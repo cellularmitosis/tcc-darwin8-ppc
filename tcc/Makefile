@@ -219,11 +219,9 @@ arm64-osx_FILES = $(arm64_FILES) tccmacho.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
 ppc_FILES = $(CORE_FILES) ppc-gen.c ppc-link.c
-# tccmacho.c is excluded for now; it's hardcoded for x86_64/arm64
-# (#error Platform not supported on line 35) and uses Rela r_addend
-# fields (PPC32 uses Rel). PPC Mach-O output is wired in once we have
-# real codegen — see roadmap phase 3 / session 020.
-ppc-osx_FILES = $(ppc_FILES)
+# tccmacho.c is hardcoded for x86_64/arm64. Replaced by minimal
+# ppc-macho-stubs.c until real PPC Mach-O emission lands (phase 3).
+ppc-osx_FILES = $(ppc_FILES) ppc-macho-stubs.c
 
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 

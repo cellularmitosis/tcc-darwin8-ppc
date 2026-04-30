@@ -192,13 +192,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #  define TCC_IS_NATIVE
 # elif defined __riscv && defined __LP64__ && defined TCC_TARGET_RISCV64
 #  define TCC_IS_NATIVE
-/* PPC native execution (-run) lands once tccmacho.c handles PPC.
- * Until then, tcc on Tiger PPC is "host=PPC, target=PPC" but
- * compiles only — it can't load and execute generated code in-process.
- * # elif (defined __powerpc__ || defined __ppc__ || defined __POWERPC__) \
- *        && !defined __LP64__ && defined TCC_TARGET_PPC
- * #  define TCC_IS_NATIVE
- */
+# elif (defined __powerpc__ || defined __ppc__ || defined __POWERPC__) \
+        && !defined __LP64__ && defined TCC_TARGET_PPC
+#  define TCC_IS_NATIVE
 # endif
 #endif
 

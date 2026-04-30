@@ -224,7 +224,18 @@ LIBTCCAPI int tcc_run(TCCState *s1, int argc, char **argv)
     s1->run_main = "_runmain", top_sym = "main";
     if (s1->elf_entryname)
         s1->run_main = top_sym = s1->elf_entryname;
+#ifdef TCC_TARGET_PPC
+    /* PPC bootstrap: tccmacho.c can't yet load gcc-built runmain.o
+     * (it's Mach-O .o, our loader is ELF only). And our codegen
+     * isn't yet rich enough to compile lib/runmain.c with tcc itself.
+     * Until either of those lands, call main() directly. The
+     * downside: no atexit, no init/fini arrays, no on_exit(). Fine
+     * for early hello-world tests; revisit when we land Mach-O .o
+     * loading or grow codegen enough to compile runmain.c. */
+    s1->run_main = top_sym;
+#else
     tcc_add_support(s1, "runmain.o");
+#endif
 
     if (tcc_relocate(s1) < 0)
         return -1;
