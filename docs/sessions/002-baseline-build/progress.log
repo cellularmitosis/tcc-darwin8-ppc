@@ -1,0 +1,4 @@
+[09:12:40] session 002 started
+[09:13:02] starting baseline build on uranium
+[09:14:08] starting baseline build attempt on imacg3
+[09:15:50] baseline confirmed: configure ok, Makefile/source missing ppc entries

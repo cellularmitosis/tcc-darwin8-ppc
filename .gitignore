@@ -1,0 +1,25 @@
+# build artifacts
+tcc/config.mak
+tcc/config.h
+tcc/*.o
+tcc/*.a
+tcc/tcc
+tcc/tcc.exe
+tcc/c2str.exe
+tcc/*-tcc
+tcc/tccdefs_.h
+tcc/tcc-doc.pod
+tcc/tcc.1
+tcc/tcc.info
+tcc/tests/**/*.o
+tcc/tests/**/test
+tcc/tests/tcctest.gcc
+tcc/tests2/*.test
+tcc/libtcc1-*.a
+tcc/lib/**/*.o
+
+# session-local scratch
+docs/sessions/**/scratch/
+
+# OS noise
+.DS_Store
