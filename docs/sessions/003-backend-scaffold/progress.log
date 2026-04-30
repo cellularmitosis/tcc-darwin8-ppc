@@ -1,0 +1,3 @@
+[09:18:28] session 003 started: backend scaffold
+[09:25:53] scaffold written, syncing to imacg3
+[09:37:07] session 003 complete: scaffold builds, tcc -E works, codegen aborts on stub
