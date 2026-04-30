@@ -144,6 +144,40 @@ static addr_t func_bound_offset;
 static unsigned long func_bound_ind;
 #endif
 
+#define IS_FREG(x) ((x) >= TREG_F(0))
+
+/* Function-prolog backfill bookkeeping. The prolog is reserved at
+ * gfunc_prolog time but emitted at gfunc_epilog time, when we know
+ * the final frame size. Mirrors i386-gen.c's pattern. */
+static unsigned long func_sub_sp_offset;
+
+/* Apple PPC ABI:
+ *   - 24-byte linkage area at top of caller's frame (back-chain,
+ *     saved CR, saved LR, three reserved words).
+ *   - Stack alignment is 16 bytes.
+ *   - Outgoing param area sits above linkage; we don't yet allocate
+ *     extra space for it (no calls in v1 codegen).
+ *
+ * PROLOG_SIZE = 3 instructions = 12 bytes:
+ *   mflr r0
+ *   stw  r0, 8(r1)
+ *   stwu r1, -frame_size(r1)
+ */
+#define PPC_PROLOG_SIZE 12
+#define PPC_LINKAGE_SIZE 24
+#define PPC_STACK_ALIGN 16
+
+static int ppc_frame_size(void)
+{
+    /* loc is non-positive (locals grow downward). Frame holds
+     * linkage + locals, rounded up to 16. Minimum 32 keeps things
+     * sane for trivial leaf functions. */
+    int n = PPC_LINKAGE_SIZE + (-loc);
+    n = (n + PPC_STACK_ALIGN - 1) & -PPC_STACK_ALIGN;
+    if (n < 32) n = 32;
+    return n;
+}
+
 /* ------------------------------------------------------------------ */
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
@@ -195,9 +229,44 @@ ST_FUNC void gen_fill_nops(int bytes)
     }
 }
 
+/* Emit a load-immediate of a 32-bit value into GPR `gpr`. Uses
+ *   li  rD, simm                  (one instruction, signed 16-bit)
+ *   lis rD, hi                    (one instruction, low 16 zero)
+ *   lis rD, hi  / ori rD, rD, lo  (two instructions, full 32-bit)
+ */
+static void ppc_emit_li(int gpr, int32_t v)
+{
+    if (v >= -0x8000 && v < 0x8000) {
+        /* li rD, v  ->  addi rD, 0, v  (sign-extends) */
+        o(0x38000000 | (gpr << 21) | (v & 0xffff));
+    } else if ((v & 0xffff) == 0) {
+        /* lis rD, hi  ->  addis rD, 0, hi */
+        o(0x3c000000 | (gpr << 21) | ((v >> 16) & 0xffff));
+    } else {
+        /* lis rD, hi ; ori rD, rD, lo */
+        o(0x3c000000 | (gpr << 21) | ((v >> 16) & 0xffff));
+        o(0x60000000 | (gpr << 21) | (gpr << 16) | (v & 0xffff));
+    }
+}
+
 ST_FUNC void load(int r, SValue *sv)
 {
-    tcc_error("ppc-gen: load stub (r=%d type=0x%x)", r, sv ? sv->type.t : 0);
+    int v = sv->r & VT_VALMASK;
+    int gpr;
+
+    /* v1: only handle integer constant immediate. Everything else
+     * stubs to a clear error message. */
+    if (v == VT_CONST && !(sv->r & VT_LVAL) && !(sv->r & VT_SYM)) {
+        if (IS_FREG(r)) {
+            tcc_error("ppc-gen: load FP constant not yet implemented");
+        }
+        gpr = TREG_TO_GPR(r);
+        ppc_emit_li(gpr, (int32_t)sv->c.i);
+        return;
+    }
+
+    tcc_error("ppc-gen: load stub (r=%d sv->r=0x%x type=0x%x val=0x%llx)",
+              r, sv->r, sv->type.t, (long long)sv->c.i);
 }
 
 ST_FUNC void store(int r, SValue *sv)
@@ -212,12 +281,49 @@ ST_FUNC void gfunc_call(int nb_args)
 
 ST_FUNC void gfunc_prolog(Sym *func_sym)
 {
-    tcc_error("ppc-gen: gfunc_prolog stub");
+    /* Reserve PROLOG_SIZE bytes at start of function. We backfill
+     * the actual prologue instructions in gfunc_epilog once we
+     * know the final frame size. */
+    ind += PPC_PROLOG_SIZE;
+    func_sub_sp_offset = ind;  /* points just past reserved prologue */
+    loc = 0;
+    func_vc = 0;
+    /* No parameter unpacking in v1 (no params supported yet). */
+    (void)func_sym;
 }
 
 ST_FUNC void gfunc_epilog(void)
 {
-    tcc_error("ppc-gen: gfunc_epilog stub");
+    addr_t saved_ind;
+    int frame_size = ppc_frame_size();
+
+    /* Patch any pending return-jumps to land here. */
+    if (rsym) {
+        gsym(rsym);
+        rsym = 0;
+    }
+
+    /* Emit epilogue at current ind:
+     *   addi r1, r1, frame_size
+     *   lwz  r0, 8(r1)
+     *   mtlr r0
+     *   blr
+     */
+    o(0x38210000 | (frame_size & 0xffff));
+    o(0x80010008);
+    o(0x7c0803a6);
+    o(0x4e800020);
+
+    /* Backfill the reserved prologue. */
+    saved_ind = ind;
+    ind = func_sub_sp_offset - PPC_PROLOG_SIZE;
+    /* mflr r0 */
+    o(0x7c0802a6);
+    /* stw r0, 8(r1) */
+    o(0x90010008);
+    /* stwu r1, -frame_size(r1) */
+    o(0x94210000 | ((-frame_size) & 0xffff));
+    ind = saved_ind;
 }
 
 /* Apple PPC ABI: structs <= 8 bytes returned in r3:r4; larger via

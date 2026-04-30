@@ -471,7 +471,8 @@ static int protect_pages(void *ptr, unsigned long length, int mode)
     if (mprotect(ptr, length, protect[mode]))
         return -1;
 /* XXX: BSD sometimes dump core with bad system call */
-# if (defined TCC_TARGET_ARM && !TARGETOS_BSD) || defined TCC_TARGET_ARM64
+# if (defined TCC_TARGET_ARM && !TARGETOS_BSD) || defined TCC_TARGET_ARM64 \
+   || defined TCC_TARGET_PPC
     if (mode == 0 || mode == 3) {
         void __clear_cache(void *beginning, void *end);
         __clear_cache(ptr, (char *)ptr + length);
