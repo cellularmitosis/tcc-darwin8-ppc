@@ -1,0 +1,2 @@
+[21:22:59] session 009 started: tccmacho.c PPC support survey
+[22:06:40] session 009 done: tcc -c -> Mach-O .o -> gcc-4.0 -> runs on G3

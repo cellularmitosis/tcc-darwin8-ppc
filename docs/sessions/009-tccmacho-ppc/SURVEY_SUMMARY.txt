@@ -1,0 +1,351 @@
+================================================================================
+ TCC Mach-O PPC 32-bit Port: Complete Surgical Survey Summary
+================================================================================
+
+Survey Date:        2026-04-30
+File Analyzed:      /Users/cell/claude/tcc-darwin8-ppc/tcc/tccmacho.c (2,476 lines)
+Target Platform:    Apple PowerPC 32-bit (Mac OS X 10.4 Tiger)
+Current Support:    x86_64, arm64 only
+Survey Scope:       Exhaustive location-by-location analysis
+
+================================================================================
+ KEY STATISTICS
+================================================================================
+
+Total Discrete Changes:                    ~25 locations
+New Struct Definitions Required:           4 (32-bit variants)
+New Load Command Constants:                2 (LC_SEGMENT, LC_UNIXTHREAD)
+Instruction-Heavy #ifdef Blocks:           8 (major complexity)
+Total New Code Lines (est.):               ~480 lines
+Difficulty Distribution:
+  - Trivial (single-line changes):         ~10
+  - Small (simple conditionals):           ~8
+  - Medium (moderate refactoring):         ~5
+  - Large (instruction sequences):         ~2
+
+Estimated Implementation Time:             4-6 sessions (Phase 1-5)
+
+================================================================================
+ MAJOR FINDINGS
+================================================================================
+
+1. STRUCTURE DIFFERENCES (32-bit vs 64-bit Mach-O)
+   - mach_header:        28 bytes (vs 64-bit: 32 bytes) — save 4 bytes
+   - segment_command:    48 bytes (vs 64-bit: 72 bytes) — save 24 bytes
+   - section:            48 bytes (vs 64-bit: 80 bytes) — save 32 bytes
+   - nlist:              12 bytes (vs 64-bit: 16 bytes) — save 4 bytes
+   
+   STRATEGY: Use per-arch typedefs (Mach_Header, Segment_Command, Section_Mach)
+             to minimize code duplication and reduce #ifdef clutter.
+
+2. LOAD COMMAND INCOMPATIBILITIES (Tiger 10.4 Constraints)
+   - LC_MAIN is 10.7+ only (NOT available on Tiger)
+     → Use LC_UNIXTHREAD (0x5) instead for PPC executables
+     → Requires thread state structure (40 uint32_t for PPC)
+   
+   - LC_BUILD_VERSION is 10.6+ only (NOT available on Tiger)
+     → Omit entirely for PPC
+   
+   - LC_DYLD_INFO_ONLY (10.6+) vs LC_DYLD_CHAINED_FIXUPS (10.15+)
+     → Use classic REBASE/BINDING sections (already in code as #else branch)
+
+3. ENDIANNESS (Big-Endian for PPC)
+   - write32le() used throughout for x86_64/arm64 (little-endian)
+   - PPC is big-endian → need write32be() equivalent
+   
+   SOLUTION: Define conditional write32le macro:
+     #ifdef TCC_TARGET_PPC
+         #define write32le(p, v) write32be(p, v)
+     #endif
+   
+   Minimal changes required (one helper definition, used everywhere).
+
+4. INSTRUCTION SEQUENCES (8 Code Blocks Requiring PPC)
+   
+   a) __GLOBAL_init (lines 575-645)
+      - Calling convention: args in r3-r6, save LR, frame setup
+      - PPC sequence: lis/ori (load addr), bl/mtlr (calls)
+      - Relocations: R_PPC_HA16, R_PPC_LO16, R_PPC_REL24
+   
+   b) PLT Stub Generation (2 locations: lines 735-760, 916-932)
+      - 16 bytes per stub (4 instructions): lis/ori/lwz/mtctr/bctr
+      - Reserved2 field: 16 (vs 6 for x86_64, 12 for arm64)
+      - Relocations: R_PPC_HA16, R_PPC_LO16
+   
+   c) Stub Helper (lines 800-830)
+      - Common entry point for PLT resolution
+      - Load _dyld_private address, call dyld_stub_binder
+      - 32 bytes (larger than x86_64/arm64 variants)
+      - Relocations: R_PPC_HA16, R_PPC_LO16
+
+5. RELOCATION TYPE MAPPING
+   - No direct Mach-O relocation conversion needed (code uses ELF format internally)
+   - Just needs correct ELF relocation types for PPC:
+     R_PPC_ADDR32, R_PPC_HA16, R_PPC_LO16, R_PPC_REL24, R_PPC_GLOB_DAT, R_PPC_JMP_SLOT
+   
+   (These should already be defined in tcc/elf.c; verify if TCC_TARGET_PPC added)
+
+6. SYMBOL TABLE & DLL LOADING
+   - Multiple locations access struct nlist_64 directly
+   - Need conditional paths for 32-bit nlist struct
+   
+   Locations to update:
+   - Line 1913: symlc->nsyms division
+   - Line 2410: symtab allocation in DLL loading
+   - Line 2462: symbol iteration in DLL loading
+
+7. MACH-O HEADER INITIALIZATION
+   - Magic number must be MH_MAGIC (0xfeedface) for PPC, not MH_MAGIC_64
+   - CPU type: CPU_TYPE_POWERPC (18)
+   - CPU subtype: CPU_SUBTYPE_POWERPC_ALL (0)
+   
+   (Magic already defined; conditionals needed at lines 1964-1970)
+
+8. FAT BINARY PARSING
+   - DLL loading from FAT binaries must recognize PPC slices
+   - Location: lines 2376-2382
+   - Check: CPU_TYPE_POWERPC + CPU_SUBTYPE_POWERPC_ALL
+
+================================================================================
+ CRITICAL CHANGES BY CATEGORY
+================================================================================
+
+STRUCT DEFINITIONS (ADD THESE NEAR TOP, AFTER EXISTING 64-BIT VARIANTS):
+  ✓ struct mach_header (32-bit) — already defined, good as-is
+  ✓ struct segment_command (32-bit) — need to add
+  ✓ struct section (32-bit) — need to add
+  ✓ struct nlist (32-bit) — need to add
+  ✓ struct thread_command (new)
+  ✓ struct ppc_thread_state (new)
+
+CONSTANTS TO ADD:
+  ✓ CPU_TYPE_POWERPC = 18
+  ✓ CPU_SUBTYPE_POWERPC_ALL = 0
+  ✓ CPU_SUBTYPE_POWERPC_750 = 9 (optional, for G3 variant)
+  ✓ LC_SEGMENT = 0x1
+  ✓ LC_UNIXTHREAD = 0x5
+
+CONDITIONAL BLOCKS (HIGH IMPACT):
+  ✓ Platform guard (line 34): Add TCC_TARGET_PPC
+  ✓ CPU type/subtype init (lines 1966-1970): Add PPC case
+  ✓ Magic number (line 1964): Conditional MH_MAGIC vs MH_MAGIC_64
+  ✓ Load commands (lines 1750-1768): Omit LC_BUILD_VERSION, use LC_UNIXTHREAD
+  ✓ Entry point setup (line 2210): Set srr0 in thread_command for PPC
+  ✓ Stub size (line 1830): Add PPC case (16 bytes)
+  ✓ Symbol table size (line 1913): Use sizeof(struct nlist) for PPC
+  ✓ FAT parsing (line 2376): Add PPC CPU_TYPE check
+  ✓ Magic check (line 2399): Use MH_MAGIC for PPC
+  ✓ Header size (line 2402): Use sizeof(struct mach_header) for PPC
+  ✓ Symbol load (lines 2410, 2462): Use struct nlist for PPC
+
+INSTRUCTION SEQUENCES (MAJOR WORK):
+  ✓ __GLOBAL_init (575-645): ~60 lines PPC code
+  ✓ PLT stubs (735-760): ~20 lines PPC code
+  ✓ PLT stubs alternate (916-932): ~20 lines PPC code
+  ✓ Stub helper (800-830): ~30 lines PPC code
+
+HELPER FUNCTIONS (REFACTORING):
+  ✓ add_segment() (line 486): Conditional struct types
+  ✓ get_segment() (line 495): Return void* for polymorphism
+  ✓ add_section() (line 500): Conditional struct types
+  ✓ get_section() (line 516): Return void* for polymorphism
+
+TYPE SYSTEM (CENTRAL DECISION):
+  ✓ Define per-arch typedefs at top of file:
+    - Mach_Header (mach_header vs mach_header_64)
+    - Segment_Command (segment_command vs segment_command_64)
+    - Section_Mach (section vs section_64)
+    - Nlist (nlist vs nlist_64)
+  
+  ✓ This reduces "if PPC use X else use X_64" patterns throughout
+
+ENDIANNESS (PERIPHERAL BUT IMPORTANT):
+  ✓ Define write32be() helper
+  ✓ Alias write32le to write32be for PPC target
+  ✓ Used everywhere (lines 614-944), minimal code change
+
+================================================================================
+ PORTING STRATEGY (RECOMMENDED)
+================================================================================
+
+APPROACH: Monolithic File with Per-Arch #ifdefs
+
+RATIONALE:
+  - ~70% of code is shared (FAT parsing, symbol handling, DLL loading, export tries)
+  - Splitting into per-arch files would duplicate thousands of lines
+  - Conditional code is concentrated (instructions, load commands, struct sizes)
+  - Single source of truth easier to maintain
+
+STRUCTURE:
+  1. Top of file: Define per-arch typedefs and helpers
+  2. Constants: Platform guard + arch-specific CPU types
+  3. Struct defs: 32-bit variants alongside 64-bit
+  4. Helper funcs: Use typedefs to avoid repetition
+  5. Core logic: Mostly unchanged, use typedefs
+  6. Instruction blocks: #ifdef for each architecture
+  7. Load commands: #ifdef for LC_MAIN vs LC_UNIXTHREAD
+  8. DLL loading: Conditional magic/size checks
+
+TOTAL CODE ADDED: ~480 lines
+  - Struct definitions: ~50 lines
+  - Typedefs and helpers: ~30 lines
+  - #ifdef blocks and conditionals: ~400 lines
+
+================================================================================
+ IMPLEMENTATION PHASES
+================================================================================
+
+PHASE 1: Structural Foundation (1-2 sessions)
+  Deliverable: Code compiles for TCC_TARGET_PPC
+  Changes: Structs, constants, typedefs, platform guard
+  Smoke Test: tcc -c test.c -o test.o (produces valid object file)
+
+PHASE 2: Load Command & Entry Point (1 session)
+  Deliverable: Correct Mach-O headers and load commands for PPC
+  Changes: LC_UNIXTHREAD, omit LC_BUILD_VERSION, thread state setup
+  Smoke Test: otool -h test.o shows PPC cputype and correct load commands
+
+PHASE 3: Basic Relocation & Symbols (1 session)
+  Deliverable: Simple programs compile and link (no function calls)
+  Changes: Symbol table handling, FAT parsing, magic number checks
+  Smoke Test: ld test.o -o test && ./test (variable access works)
+
+PHASE 4: Stub Generation & Dynamic Linking (1-2 sessions)
+  Deliverable: External function calls work (printf, etc.)
+  Changes: Instruction sequences for stubs, stub helper, __GLOBAL_init
+  Smoke Test: Program with printf() works on imacg3
+
+PHASE 5: Verification & Cleanup (1 session)
+  Deliverable: Full functionality verified on Tiger hardware
+  Changes: Bug fixes from testing, optimization pass
+  Smoke Test: Full test suite passes on real G3 iMac
+
+Total Time Estimate: 4-6 sessions
+
+================================================================================
+ RESEARCH & VALIDATION TASKS
+================================================================================
+
+Before implementation, resolve these open questions:
+
+1. PPC Instruction Encoding
+   ✓ Validate lis/ori/lwz/mtctr/bctr sequences against Apple PPC ABI
+   ✓ Source: /Users/cell/datasheets/books/prog/_powerpc/
+   ✓ Cross-check: gcc-4.0 on imacg3 disassembly
+
+2. Tiger 10.4 Load Command Set
+   ✓ Which load commands are available/required on 10.4?
+   ✓ Source: otool -lv /usr/lib/* on imacg3
+   ✓ Reference: https://leopard-adc.pepas.com/
+
+3. PPC Thread State Structure
+   ✓ Exact layout for ppc_thread_state (flavor=1, count=40)
+   ✓ Source: /usr/include/mach/ppc/thread_status.h (if exists on 10.4)
+   ✓ Alternative: gcc-compiled executable analysis
+
+4. Dyld Private Symbol
+   ✓ Location and symbol name for _dyld_private on PPC 10.4
+   ✓ Source: nm /usr/lib/dyld on imacg3
+   ✓ Verify: Stub helper expects accessible symbol
+
+5. FAT Binary Endianness
+   ✓ Are Tiger FAT binaries for PPC big-endian FAT headers?
+   ✓ Source: file /opt/local/lib/*.dylib on imacg3
+   ✓ Verify: SWAP macro handles correctly
+
+6. Relocation Type Availability
+   ✓ Are R_PPC_* types defined in tcc/elf.c?
+   ✓ If not, add: R_PPC_ADDR32, R_PPC_HA16, R_PPC_LO16, R_PPC_REL24, etc.
+   ✓ Source: tcc/elf.c (check for existing PPC support)
+
+7. Classic Mach-O Mode on Tiger
+   ✓ Verify LC_DYLD_INFO_ONLY is available on 10.4
+   ✓ (Not LC_DYLD_CHAINED_FIXUPS, which is 10.15+ only)
+   ✓ Source: Existing code has #else branch for classic mode (use this)
+
+================================================================================
+ RISK ASSESSMENT & MITIGATIONS
+================================================================================
+
+HIGH RISK:
+  ✗ Instruction sequence correctness (sections 8.1-8.4)
+    Mitigation: Cross-validate against gcc-4.0 on imacg3
+  
+  ✗ Endianness bugs (data corruption if write32be fails)
+    Mitigation: Early otool -h check of magic number
+  
+  ✗ Thread state structure (kernel may reject bad state)
+    Mitigation: Test LC_UNIXTHREAD executable on imacg3
+
+MEDIUM RISK:
+  ✗ Load command availability (silent failure on 10.4)
+    Mitigation: Check otool -lv output on imacg3
+  
+  ✗ Struct size assumptions (buffer overflows)
+    Mitigation: Use sizeof() throughout, enable compiler warnings
+
+LOW RISK:
+  ✓ Trivial changes (platform guard, constants)
+  ✓ Simple conditionals (magic number checks)
+  ✓ Helper refactoring (well-tested infrastructure)
+
+================================================================================
+ DELIVERABLES
+================================================================================
+
+Upon Completion of Survey (Session 009):
+  ✓ findings.md (1,436 lines) — Complete surgical analysis
+  ✓ README.md (140 lines) — Quick reference and roadmap
+  ✓ SURVEY_SUMMARY.txt (this file)
+  ✓ progress.log — Session tracking
+
+Upon Completion of Phase 1:
+  ✓ Modified tccmacho.c with structs, constants, typedefs
+  ✓ Code compiles for TCC_TARGET_PPC
+  ✓ otool -h shows correct magic number
+
+Upon Completion of Phase 5:
+  ✓ Full PPC32 support in tccmacho.c
+  ✓ Test programs compile and run on imacg3 Tiger
+  ✓ Mach-O structure validated against gcc-4.0
+  ✓ Ready for merge into main branch
+
+================================================================================
+ NEXT STEPS (For Session 010+)
+================================================================================
+
+1. Review findings.md carefully
+2. Gather PPC ABI documentation from /Users/cell/datasheets/
+3. Set up test program (hello.c) for validation
+4. Begin Phase 1: Struct definitions and typedefs
+5. Cross-check with gcc-4.0 output on imacg3
+6. Proceed phase-by-phase with smoke tests
+
+================================================================================
+ CONCLUSION
+================================================================================
+
+This survey provides a complete roadmap for porting tccmacho.c to PPC32.
+
+Key Insight:
+  The file can remain monolithic with ~480 lines of new code across ~25
+  locations, mostly in well-defined #ifdef blocks. Shared infrastructure
+  (70% of code) is architecture-agnostic.
+
+Complexity Assessment:
+  - Structural changes (phases 1-3): straightforward, mostly type/const updates
+  - Instruction sequences (phase 4): requires PPC ABI expertise, but isolated
+  - Overall: Medium complexity, achievable in 4-6 sessions
+
+Risk Profile:
+  Highest risks are in instruction correctness and endianness. Early smoke
+  tests with otool will catch most issues. Real hardware (imacg3) testing
+  is essential for validation.
+
+Success Criteria:
+  Simple test program compiled by tcc runs on Tiger G3. Output matches
+  gcc-4.0 compiled equivalent. Mach-O structure is valid (otool -lv confirms).
+
+================================================================================
+EOF
+cat /Users/cell/claude/tcc-darwin8-ppc/docs/sessions/009-tccmacho-ppc/SURVEY_SUMMARY.txt | head -100

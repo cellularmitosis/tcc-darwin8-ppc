@@ -219,9 +219,9 @@ arm64-osx_FILES = $(arm64_FILES) tccmacho.c
 c67_FILES = $(CORE_FILES) c67-gen.c c67-link.c tcccoff.c
 riscv64_FILES = $(CORE_FILES) riscv64-gen.c riscv64-link.c riscv64-asm.c
 ppc_FILES = $(CORE_FILES) ppc-gen.c ppc-link.c
-# tccmacho.c is hardcoded for x86_64/arm64. Replaced by minimal
-# ppc-macho-stubs.c until real PPC Mach-O emission lands (phase 3).
-ppc-osx_FILES = $(ppc_FILES) ppc-macho-stubs.c
+# Real PPC Mach-O object-file writer (MH_OBJECT only; final linking is
+# delegated to Tiger's gcc-4.0/ld). See docs/sessions/009-tccmacho-ppc.
+ppc-osx_FILES = $(ppc_FILES) ppc-macho.c
 
 TCCDEFS_H$(subst yes,,$(CONFIG_predefs)) = tccdefs_.h
 

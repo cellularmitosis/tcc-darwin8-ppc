@@ -14,6 +14,7 @@ tarball), demos for new capabilities use `v<X>.<Y>.<Z>-<slug>.c`.
 | [s006-factorial.c](s006-factorial.c) | [006 — locals + arith + control](../docs/sessions/006-locals-arith-control/README.md) | `120` | Locals, integer arithmetic, while-loop, conditional branch — the first program with real computation. |
 | [s007-fibonacci.c](s007-fibonacci.c) | [007 — function calls (Apple PPC ABI)](../docs/sessions/007-function-calls/README.md) | `55` | Recursive `fib(10)`. Caller-side arg packing in r3-r10, callee-side parameter spill, `bl` with R_PPC_REL24 relocation patched at JIT time, frame preservation across nested recursion. |
 | [s008-array-sum.c](s008-array-sum.c) | [008 — pointers + modulo](../docs/sessions/008-pointers-modulo/README.md) | `55` | Sums an `int[10]` filled with 1..10 via a pointer-passing helper, returns `sum % 256`. Pointer deref, store-via-pointer, array-to-pointer decay, modulo. |
+| [s009-real-macho.sh](s009-real-macho.sh) | [009 — real PPC Mach-O .o](../docs/sessions/009-tccmacho-ppc/SESSION_README.md) | `42` | tcc emits a real PPC Mach-O `.o`, gcc-4.0 links it, the executable runs on G3. First on-disk linkable output. |
 
 ## How to run any demo
 

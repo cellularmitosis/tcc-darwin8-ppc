@@ -3128,8 +3128,16 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
     s->nb_errors = 0;
     if (s->test_coverage)
         tcc_tcov_add_file(s, filename);
-    if (s->output_type == TCC_OUTPUT_OBJ)
+    if (s->output_type == TCC_OUTPUT_OBJ) {
+#if defined TCC_TARGET_MACHO && defined TCC_TARGET_PPC
+        /* PPC Mach-O writes real Mach-O .o files (not ELF). The other
+         * Mach-O targets (x86_64, arm64) historically emit ELF .o
+         * here; that's a separate cleanup. */
+        return macho_output_file(s, filename);
+#else
         return elf_output_obj(s, filename);
+#endif
+    }
 #ifdef TCC_TARGET_PE
     return  pe_output_file(s, filename);
 #elif defined TCC_TARGET_MACHO

@@ -25,8 +25,9 @@ self-hosts on Tiger.
 | ✅ | Local variables, assignment, arithmetic, branches ([006](docs/sessions/006-locals-arith-control/README.md), [demo](demos/s006-factorial.c)) |
 | ✅ | Function calls — direct, indirect, recursive, up to 8 int args ([007](docs/sessions/007-function-calls/README.md), [demo](demos/s007-fibonacci.c)) |
 | ✅ | Pointers, arrays, modulo ([008](docs/sessions/008-pointers-modulo/README.md), [demo](demos/s008-array-sum.c)) |
-| ⏳ | Floating point |
-| ⏳ | `tccmacho.c` PPC support (real .o output, dylib loading) |
+| ✅ | **Real PPC Mach-O `.o` output, links with gcc, runs on G3** ([009](docs/sessions/009-tccmacho-ppc/SESSION_README.md), [demo](demos/s009-real-macho.sh)) |
+| ⏳ | Long long, structs, varargs, floating point |
+| ⏳ | Dylib loading (printf et al), executable output |
 | ❌ | Self-host bootstrap on Tiger |
 | ❌ | G3 tarball |
 
