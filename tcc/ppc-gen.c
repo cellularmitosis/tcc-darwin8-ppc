@@ -154,22 +154,43 @@ static unsigned long func_sub_sp_offset;
 /* Apple PPC ABI frame layout. After our prologue:
  *
  *   high addr (caller's frame)
+ *   |  caller's parameter save area (32 bytes for r3..r10):       |
+ *   |     +52(r31)  spilled r10                                   |
+ *   |     +48       spilled r9                                    |
+ *   |     +44       spilled r8                                    |
+ *   |     +40       spilled r7                                    |
+ *   |     +36       spilled r6                                    |
+ *   |     +32       spilled r5                                    |
+ *   |     +28       spilled r4                                    |
+ *   |     +24       spilled r3   <-- first incoming arg lives here|
+ *   |  caller's linkage:                                          |
+ *   |     +8(r31)   saved LR  (we wrote it in our prolog)         |
  *   +----+ <-- OLD_SP, our r31 (frame pointer / FP)
- *   | r31 save (4 bytes)        <-- at r31-4 (i.e., loc=-4 reserved)
+ *   | r31 save (4 bytes)        <-- at r31-4 (loc=-4 reserved)
  *   | user locals (loc=-8 down) <-- addressed via offset(r31)
  *   |    ...
- *   | 24-byte linkage area
+ *   | outgoing parameter area (32 bytes, r1+24..55)
+ *   | linkage area (24 bytes,   r1+0..23)
  *   +----+ <-- NEW_SP, our r1
  *
- * r31 is a callee-saved register in the Apple PPC ABI; we save it
- * to the top of our own frame and use it as a stable frame pointer
- * for the duration of the function. Locals are addressed at
- * negative offsets from r31 (matching tcc's `loc` convention from
- * i386-gen.c).
+ * Incoming params live in the CALLER's parameter save area at
+ * r31+24..+52. The body addresses them via positive offset from FP.
+ * This layout matters for varargs: with all 8 GPR args spilled in
+ * source order at consecutive INCREASING addresses, the standard
+ * `__builtin_va_start(ap, last) = &last + sizeof(last)` macro walks
+ * forward into the variadic args correctly.
  *
- * Prologue (5 instructions = 20 bytes):
+ * Prologue (13 instructions = 52 bytes):
  *   mflr r0
- *   stw  r0, 8(r1)              ; save LR in caller's linkage area
+ *   stw  r0, 8(r1)              ; save LR in caller's linkage
+ *   stw  r3, 24(r1)             ;\
+ *   stw  r4, 28(r1)             ; \  spill arg-passing GPRs r3..r10
+ *   stw  r5, 32(r1)             ; |  to caller's param save area.
+ *   stw  r6, 36(r1)             ; |  Spilled UNCONDITIONALLY — even
+ *   stw  r7, 40(r1)             ; |  for void/no-arg/non-variadic
+ *   stw  r8, 44(r1)             ; /  functions, so the prolog size
+ *   stw  r9, 48(r1)             ;/   is constant (32 wasted bytes
+ *   stw  r10, 52(r1)            ;    in those cases — negligible).
  *   stwu r1, -frame_size(r1)    ; allocate frame, set back-chain
  *   stw  r31, frame_size-4(r1)  ; save old r31 at our frame top
  *   addi r31, r1, frame_size    ; FP = OLD_SP
@@ -181,7 +202,7 @@ static unsigned long func_sub_sp_offset;
  *   mtlr r0
  *   blr
  */
-#define PPC_PROLOG_SIZE 20
+#define PPC_PROLOG_SIZE 52
 #define PPC_LINKAGE_SIZE 24
 #define PPC_PARAM_AREA   32   /* 8 GPR slots * 4 bytes for outgoing calls */
 #define PPC_STACK_ALIGN 16
@@ -623,22 +644,20 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     loc = -4;
     func_vc = 0;
 
-    /* Apple PPC ABI: incoming int params 1..8 arrive in r3..r10. We
-     * spill each to a fresh local slot at function entry so the body
-     * can address it the same as any other local. The spill
-     * instructions emit AFTER the reserved prologue placeholder, so
-     * at execution time r31 (FP) is already valid by the time they
-     * run.
-     *
-     * Bigger params (FP, struct, varargs, long long, >8 args) are
-     * not yet supported; this is enough for straight-line int code
-     * which covers the common case. */
+    /* Apple PPC ABI: all 8 GPR arg slots (r3..r10) get spilled to
+     * the caller's parameter save area in our prologue (see
+     * PROLOG_SIZE doc above). Body code reads params at positive
+     * offsets from FP: param at slot i lives at r31 + 24 + i*4.
+     * gfunc_set_param tells tcc where each named param lives;
+     * variadic args (above the named ones) are reachable by
+     * walking forward from the last fixed param (the standard
+     * char*-based va_list mechanism in tccdefs.h). */
     for (sym = func_type->ref->next; sym; sym = sym->next) {
         CType *type = &sym->type;
         int size, align;
         int bt = type->t & VT_BTYPE;
-        int gpr;
         int slots = (bt == VT_LLONG) ? 2 : 1;
+        int param_offset;
 
         size = type_size(type, &align);
         size = (size + 3) & ~3;
@@ -650,27 +669,9 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
         if (bt == VT_STRUCT)
             tcc_error("ppc-gen: struct parameters not yet supported");
 
-        if (bt == VT_LLONG) {
-            /* Long long is in r(3+param_index):r(3+param_index+1).
-             * Allocate 8 bytes; spill high then low so the in-memory
-             * layout is high at lower addr (= big-endian word order
-             * for a 64-bit value addressed via the low slot). */
-            loc -= 8;
-            gpr = 3 + param_index;
-            /* stw r(gpr), loc(r31)     -- high half */
-            o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (loc & 0xffff));
-            /* stw r(gpr+1), loc+4(r31) -- low half */
-            o(0x90000000 | ((gpr + 1) << 21) | (PPC_FP_REG << 16) | ((loc + 4) & 0xffff));
-            gfunc_set_param(sym, loc, 0);
-            param_index += 2;
-        } else {
-            loc -= 4;
-            gpr = 3 + param_index;
-            /* stw rS, loc(r31) -- spill incoming arg to local slot. */
-            o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (loc & 0xffff));
-            gfunc_set_param(sym, loc, 0);
-            param_index++;
-        }
+        param_offset = 24 + param_index * 4;
+        gfunc_set_param(sym, param_offset, 0);
+        param_index += slots;
     }
 }
 
@@ -699,13 +700,25 @@ ST_FUNC void gfunc_epilog(void)
     o(0x7c0803a6);
     o(0x4e800020);
 
-    /* Backfill the reserved prologue. */
+    /* Backfill the reserved prologue. 13 instructions / 52 bytes. */
     saved_ind = ind;
     ind = func_sub_sp_offset - PPC_PROLOG_SIZE;
     /* mflr r0 */
     o(0x7c0802a6);
     /* stw r0, 8(r1) */
     o(0x90010008);
+    /* Spill all 8 arg-passing GPRs (r3..r10) to caller's parameter
+     * save area. Done UNCONDITIONALLY so the prolog size is constant.
+     * Trade: 32 bytes per function for not needing flow analysis
+     * to detect "is this function variadic" at prolog-emit time. */
+    {
+        int g;
+        for (g = 3; g <= 10; g++) {
+            /* stw r(g), (24 + (g-3)*4)(r1) */
+            int off = 24 + (g - 3) * 4;
+            o(0x90000000 | (g << 21) | (1 << 16) | (off & 0xffff));
+        }
+    }
     /* stwu r1, -frame_size(r1) */
     o(0x94210000 | ((-frame_size) & 0xffff));
     /* stw r31, fp_save_off(r1) */

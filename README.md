@@ -28,7 +28,8 @@ self-hosts on Tiger.
 | ✅ | **Real PPC Mach-O `.o` output, links with gcc, runs on G3** ([009](docs/sessions/009-tccmacho-ppc/SESSION_README.md), [demo](demos/s009-real-macho.sh)) |
 | ✅ | Long long arithmetic, args, return ([010](docs/sessions/010-long-long/README.md), [demo](demos/s010-long-long.c)) |
 | ✅ | Structs (member access, pass-by-pointer) ([011](docs/sessions/011-structs/README.md), [demo](demos/s011-struct.c)) |
-| ⏳ | Varargs, floating point, dylib loading (printf) |
+| ✅ | Varargs (`<stdarg.h>`, `va_start`/`va_arg`/`va_end`) ([012](docs/sessions/012-varargs/README.md), [demo](demos/s012-varargs.c)) |
+| ⏳ | Floating point, dylib loading (printf) |
 | ⏳ | Dylib loading (printf et al), executable output |
 | ❌ | Self-host bootstrap on Tiger |
 | ❌ | G3 tarball |

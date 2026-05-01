@@ -17,6 +17,7 @@ tarball), demos for new capabilities use `v<X>.<Y>.<Z>-<slug>.c`.
 | [s009-real-macho.sh](s009-real-macho.sh) | [009 — real PPC Mach-O .o](../docs/sessions/009-tccmacho-ppc/SESSION_README.md) | `42` | tcc emits a real PPC Mach-O `.o`, gcc-4.0 links it, the executable runs on G3. First on-disk linkable output. |
 | [s010-long-long.c](s010-long-long.c) | [010 — long long codegen](../docs/sessions/010-long-long/README.md) | `120` | 64-bit add through a function: `add64(0x12345678LL, 0x10000000LL)` low byte. Long long params (r3:r4 + r5:r6), returns, addc/adde. |
 | [s011-struct.c](s011-struct.c) | [011 — structs](../docs/sessions/011-structs/README.md) | `42` | Two struct types, member access (`.` and `->`), pass-by-pointer to helpers, struct holding pointer-to-array. Confirms structs work for the patterns tcc itself uses. |
+| [s012-varargs.c](s012-varargs.c) | [012 — varargs](../docs/sessions/012-varargs/README.md) | `42` | `sum_n(7, 1..7) + 14 = 42`. Standard `<stdarg.h>`. Prolog now spills all 8 GPR arg slots to caller's parameter save area so the standard char*-based va_list machinery walks forward correctly. |
 
 ## How to run any demo
 
