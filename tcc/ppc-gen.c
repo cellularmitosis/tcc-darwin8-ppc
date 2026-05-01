@@ -361,6 +361,44 @@ ST_FUNC void load(int r, SValue *sv)
         return;
     }
 
+    /* Pointer dereference: lvalue read from memory at the address
+     * held in a register (e.g. *p where p is in a register).
+     *
+     * Convention (matching i386/arm): for `(reg | VT_LVAL)`, the
+     * effective address is `reg + 0`. sv->c.i is residual from the
+     * pre-gv state and must not be added — the register already
+     * holds the full address. */
+    if (v < VT_CONST && (sv->r & VT_LVAL)) {
+        int bt = sv->type.t & VT_BTYPE;
+        int base_gpr;
+        if (IS_FREG(v))
+            tcc_error("ppc-gen: dereference of FP register?");
+        base_gpr = TREG_TO_GPR(v);
+        if (IS_FREG(r))
+            tcc_error("ppc-gen: FP load via pointer not yet implemented");
+        gpr = TREG_TO_GPR(r);
+        switch (bt) {
+        case VT_BYTE:
+            o(0x88000000 | (gpr << 21) | (base_gpr << 16));
+            if (!(sv->type.t & VT_UNSIGNED))
+                o(0x7c000774 | (gpr << 21) | (gpr << 16));  /* extsb */
+            return;
+        case VT_SHORT:
+            if (sv->type.t & VT_UNSIGNED)
+                o(0xa0000000 | (gpr << 21) | (base_gpr << 16));
+            else
+                o(0xa8000000 | (gpr << 21) | (base_gpr << 16));
+            return;
+        case VT_INT:
+        case VT_PTR:
+        case VT_FUNC:
+            o(0x80000000 | (gpr << 21) | (base_gpr << 16));
+            return;
+        default:
+            tcc_error("ppc-gen: deref of basic type 0x%x not yet supported", bt);
+        }
+    }
+
     /* Local variable, lvalue read (load from memory at FP+offset). */
     if (v == VT_LOCAL && (sv->r & VT_LVAL)) {
         int bt = sv->type.t & VT_BTYPE;
@@ -406,6 +444,33 @@ ST_FUNC void store(int r, SValue *sv)
     int gpr;
     int offset;
     int bt = sv->type.t & VT_BTYPE;
+
+    /* Store-via-pointer: lvalue is a register holding the destination
+     * address. Same offset-zero convention as load(). */
+    if (v < VT_CONST && (sv->r & VT_LVAL)) {
+        int base_gpr;
+        if (IS_FREG(v))
+            tcc_error("ppc-gen: store via FP register?");
+        base_gpr = TREG_TO_GPR(v);
+        if (IS_FREG(r))
+            tcc_error("ppc-gen: FP store via pointer not yet implemented");
+        gpr = TREG_TO_GPR(r);
+        switch (bt) {
+        case VT_BYTE:
+            o(0x98000000 | (gpr << 21) | (base_gpr << 16));
+            return;
+        case VT_SHORT:
+            o(0xb0000000 | (gpr << 21) | (base_gpr << 16));
+            return;
+        case VT_INT:
+        case VT_PTR:
+        case VT_FUNC:
+            o(0x90000000 | (gpr << 21) | (base_gpr << 16));
+            return;
+        default:
+            tcc_error("ppc-gen: store via ptr of bt 0x%x not yet supported", bt);
+        }
+    }
 
     if (v == VT_LOCAL) {
         offset = (int)sv->c.i;
@@ -769,11 +834,23 @@ ST_FUNC void gen_opi(int op)
         o(0x7c000396 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
         break;
     case '%':
-    case TOK_UMOD:
-        /* PPC has no modulo instruction; compute as a - (a/b)*b.
-         * Use a temp register? For now, error so we notice. */
-        tcc_error("ppc-gen: modulo not yet implemented");
+    case TOK_UMOD: {
+        /* PPC has no modulo instruction. Compute as a - (a/b)*b
+         * using a fresh temp register for the quotient. */
+        int tmp_slot = get_reg(RC_INT);
+        int tmp_gpr = TREG_TO_GPR(tmp_slot);
+        if (op == TOK_UMOD)
+            /* divwu rD, rA, rB */
+            o(0x7c000396 | (tmp_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        else
+            /* divw rD, rA, rB */
+            o(0x7c0003d6 | (tmp_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        /* mullw tmp, tmp, rB  →  tmp = (a/b) * b */
+        o(0x7c0001d6 | (tmp_gpr << 21) | (tmp_gpr << 16) | (rb_gpr << 11));
+        /* subf rA, tmp, rA  →  rA = rA - tmp = a - (a/b)*b */
+        o(0x7c000050 | (ra_gpr << 21) | (tmp_gpr << 16) | (ra_gpr << 11));
         break;
+    }
     default:
         tcc_error("ppc-gen: gen_opi op 0x%x not yet supported", op);
     }
