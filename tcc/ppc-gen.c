@@ -183,18 +183,29 @@ static unsigned long func_sub_sp_offset;
  */
 #define PPC_PROLOG_SIZE 20
 #define PPC_LINKAGE_SIZE 24
+#define PPC_PARAM_AREA   32   /* 8 GPR slots * 4 bytes for outgoing calls */
 #define PPC_STACK_ALIGN 16
 #define PPC_FP_REG 31
 
 static int ppc_frame_size(void)
 {
-    /* loc is non-positive (locals grow downward). loc=-4 is reserved
-     * for the FP-save slot at the top of the frame. User locals
-     * start at loc=-8. Frame holds linkage + (-loc) bytes of saved-
-     * FP-plus-locals, rounded up to 16. Minimum 32. */
-    int n = PPC_LINKAGE_SIZE + (-loc);
+    /* Frame layout (NEW_SP at bottom, OLD_SP at top):
+     *   NEW_SP+0..23      linkage area
+     *   NEW_SP+24..55     parameter area for outgoing calls (8 GPR slots)
+     *   NEW_SP+56..       gap, then locals growing upward to:
+     *   r31 + loc         user local at offset `loc` from FP
+     *   r31 - 4           saved r31 (FP)
+     *   r31               OLD_SP
+     *
+     * loc is non-positive (locals grow downward). loc=-4 is reserved
+     * for the FP-save slot. User locals start at loc=-8.
+     *
+     * Always reserving the parameter area (even for leaf functions)
+     * costs 32 bytes per stack frame and avoids needing flow analysis
+     * to detect whether a function makes calls. */
+    int n = PPC_LINKAGE_SIZE + PPC_PARAM_AREA + (-loc);
     n = (n + PPC_STACK_ALIGN - 1) & -PPC_STACK_ALIGN;
-    if (n < 32) n = 32;
+    if (n < 64) n = 64;
     return n;
 }
 
@@ -425,22 +436,117 @@ ST_FUNC void store(int r, SValue *sv)
     tcc_error("ppc-gen: store stub (r=%d sv->r=0x%x bt=0x%x)", r, sv->r, bt);
 }
 
+/* Apple PPC ABI v1 caller side:
+ *   - First 8 int args go in r3..r10 (RC_R(0)..RC_R(7)).
+ *   - FP / vector / struct / >8-arg / vararg cases not yet supported.
+ *   - Direct call (VT_CONST|VT_SYM): emit `bl 0` and record an
+ *     R_PPC_REL24 relocation; tccrun.c (or the ELF/Mach-O linker)
+ *     patches the displacement.
+ *   - Indirect call: gv into a GPR, then `mtctr ; bctrl`.
+ *   - Return value lands in r3 (REG_IRET); caller (tccgen.c) pushes
+ *     the appropriate vtop entry after we return.
+ */
 ST_FUNC void gfunc_call(int nb_args)
 {
-    tcc_error("ppc-gen: gfunc_call stub (nb_args=%d)", nb_args);
+    int i;
+
+    if (nb_args > 8)
+        tcc_error("ppc-gen: more than 8 arguments not yet supported");
+
+    /* Spill any vstack values living in caller-saved regs that the
+     * call would clobber. tcc walks the vstack and uses our
+     * reg_classes[] mask to decide what can stay. */
+    save_regs(nb_args + 1);
+
+    /* Process args from vtop downward. After the loop vtop is the
+     * function value. Arg index from-the-function is (nb_args - 1 - i)
+     * which goes into r(3 + that) = TREG_R(nb_args - 1 - i). */
+    for (i = 0; i < nb_args; i++) {
+        int target_slot = nb_args - 1 - i;
+        if ((vtop->type.t & VT_BTYPE) == VT_FLOAT ||
+            (vtop->type.t & VT_BTYPE) == VT_DOUBLE ||
+            (vtop->type.t & VT_BTYPE) == VT_LDOUBLE)
+            tcc_error("ppc-gen: floating-point arguments not yet supported");
+        if ((vtop->type.t & VT_BTYPE) == VT_STRUCT)
+            tcc_error("ppc-gen: struct arguments not yet supported");
+        if ((vtop->type.t & VT_BTYPE) == VT_LLONG)
+            tcc_error("ppc-gen: long long arguments not yet supported");
+        gv(RC_R(target_slot));
+        vtop--;
+    }
+
+    /* Emit the call. */
+    if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST && (vtop->r & VT_SYM)) {
+        /* Direct symbolic call. greloc records a relocation at `ind`
+         * for vtop->sym. The placeholder bytes are `bl 0` (LK=1,
+         * displacement field 0); the linker fills the displacement. */
+        greloc(cur_text_section, vtop->sym, ind, R_PPC_REL24);
+        o(0x48000001);  /* bl 0 */
+    } else {
+        /* Indirect call via CTR. */
+        int gpr;
+        gv(RC_INT);
+        gpr = TREG_TO_GPR(vtop->r & VT_VALMASK);
+        /* mtctr rS  (mtspr ctr, rS; ctr is SPR 9) */
+        o(0x7c0903a6 | (gpr << 21));
+        /* bctrl */
+        o(0x4e800421);
+    }
+
+    vtop--;  /* pop the function value; tccgen.c will push the return. */
 }
 
 ST_FUNC void gfunc_prolog(Sym *func_sym)
 {
-    /* Reserve PROLOG_SIZE bytes for backfill in gfunc_epilog. */
+    CType *func_type = &func_sym->type;
+    Sym *sym;
+    int param_index = 0;
+
+    /* Reserve PROLOG_SIZE bytes for backfill in gfunc_epilog. The
+     * actual mflr/stw/stwu/stw r31/addi r31 instructions are emitted
+     * at gfunc_epilog time once we know the final frame size. */
     ind += PPC_PROLOG_SIZE;
     func_sub_sp_offset = ind;
-    /* loc=-4 reserves the FP-save slot at r31-4. User locals begin
-     * at loc=-8 after tcc's first allocation. */
+    /* loc=-4 reserves the FP-save slot at r31-4. User locals (and
+     * spilled register parameters) start at loc=-8. */
     loc = -4;
     func_vc = 0;
-    /* No parameter unpacking in v1 (no params supported yet). */
-    (void)func_sym;
+
+    /* Apple PPC ABI: incoming int params 1..8 arrive in r3..r10. We
+     * spill each to a fresh local slot at function entry so the body
+     * can address it the same as any other local. The spill
+     * instructions emit AFTER the reserved prologue placeholder, so
+     * at execution time r31 (FP) is already valid by the time they
+     * run.
+     *
+     * Bigger params (FP, struct, varargs, long long, >8 args) are
+     * not yet supported; this is enough for straight-line int code
+     * which covers the common case. */
+    for (sym = func_type->ref->next; sym; sym = sym->next) {
+        CType *type = &sym->type;
+        int size, align;
+        int bt = type->t & VT_BTYPE;
+        int gpr;
+
+        size = type_size(type, &align);
+        size = (size + 3) & ~3;
+
+        if (param_index >= 8)
+            tcc_error("ppc-gen: more than 8 parameters not yet supported");
+        if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE)
+            tcc_error("ppc-gen: floating-point parameters not yet supported");
+        if (bt == VT_STRUCT)
+            tcc_error("ppc-gen: struct parameters not yet supported");
+        if (bt == VT_LLONG)
+            tcc_error("ppc-gen: long long parameters not yet supported");
+
+        loc -= 4;
+        gpr = 3 + param_index;
+        /* stw rS, loc(r31) -- spill incoming arg to local slot. */
+        o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (loc & 0xffff));
+        gfunc_set_param(sym, loc, 0);
+        param_index++;
+    }
 }
 
 ST_FUNC void gfunc_epilog(void)

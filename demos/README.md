@@ -12,6 +12,7 @@ tarball), demos for new capabilities use `v<X>.<Y>.<Z>-<slug>.c`.
 |---|---|---|---|
 | [s005-return-the-answer.c](s005-return-the-answer.c) | [005 — `tcc -run` on G3](../docs/sessions/005-macho-stubs/README.md) | `42` | First end-to-end JIT execution of tcc-generated PPC code. Function prologue/epilogue, immediate load, blr return. |
 | [s006-factorial.c](s006-factorial.c) | [006 — locals + arith + control](../docs/sessions/006-locals-arith-control/README.md) | `120` | Locals, integer arithmetic, while-loop, conditional branch — the first program with real computation. |
+| [s007-fibonacci.c](s007-fibonacci.c) | [007 — function calls (Apple PPC ABI)](../docs/sessions/007-function-calls/README.md) | `55` | Recursive `fib(10)`. Caller-side arg packing in r3-r10, callee-side parameter spill, `bl` with R_PPC_REL24 relocation patched at JIT time, frame preservation across nested recursion. |
 
 ## How to run any demo
 
