@@ -38,6 +38,7 @@ A `/opt`-installable tarball is built end-to-end by
 | ✅ | Self-contained self-host (libtcc1.a bundles `__floatundidf`; predefined `__FLT_EVAL_METHOD__`) ([021](docs/sessions/021-libtcc1-and-predefs/README.md)) |
 | ✅ | **`v0.1.0-g3` tarball — `/opt`-installable, ~146 KB, verified on iMac G3** ([022](docs/sessions/022-v0.1.0-g3-release/README.md)) |
 | 🟡 | Mach-O exec output — `tcc -o exe` works for syscall-only programs ([023](docs/sessions/023-macho-executable/README.md)); libSystem stdio needs crt1 |
+| 🟡 | EXE writer extended: extern-data PIC, `__data` section, auto-injected `__tcc_start_main`, `__mh_execute_header`, `LC_TWOLEVEL_HINTS` ([024](docs/sessions/024-libsystem-init/README.md)) — libSystem init still elusive |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 

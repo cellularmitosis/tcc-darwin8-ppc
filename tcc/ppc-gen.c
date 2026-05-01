@@ -1543,7 +1543,13 @@ static int ppc_need_pic_for_sym(Sym *sym)
     ElfSym *esym;
     if (!sym)
         return 0;
-    if (tcc_state->output_type != TCC_OUTPUT_OBJ)
+    /* PIC indirection is needed for any output type that goes through
+     * dyld (OBJ for the linker to fix up, EXE so we can resolve
+     * external data refs at link time via __nl_symbol_ptr slots).
+     * -run / TCC_OUTPUT_MEMORY uses direct addresses since the JIT
+     * resolves symbols in-process. */
+    if (tcc_state->output_type != TCC_OUTPUT_OBJ
+        && tcc_state->output_type != TCC_OUTPUT_EXE)
         return 0;
     /* Ensure sym has been pushed to the elf symtab so we can inspect
      * its st_shndx. greloc() does this on demand, but we want to
@@ -1658,7 +1664,8 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     ppc_func_pic_base_emitted = 0;
     ppc_func_pic_base_anchor = 0;
 #if defined(TCC_TARGET_MACHO)
-    if (tcc_state->output_type == TCC_OUTPUT_OBJ)
+    if (tcc_state->output_type == TCC_OUTPUT_OBJ
+        || tcc_state->output_type == TCC_OUTPUT_EXE)
         ppc_emit_pic_base_setup();
 #endif
 

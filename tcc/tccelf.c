@@ -3138,6 +3138,45 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
         return elf_output_obj(s, filename);
 #endif
     }
+
+#if defined TCC_TARGET_MACHO && defined TCC_TARGET_PPC
+    /* For executable output on PPC, auto-inject a small C function
+     * `__tcc_start_main` that initializes libSystem state (sets
+     * _NXArgc/_NXArgv/_environ) and calls main+_exit. Without it,
+     * libSystem stdio (printf, puts, malloc) deref uninitialized
+     * pointers and crash. Apple's /usr/lib/crt1.o does considerably
+     * more setup; this is the bare minimum that makes the common
+     * cases work. ppc-macho.c::macho_output_exe sets the entry to
+     * a tiny shim that aligns the stack and `bl __tcc_start_main`. */
+    if (s->output_type == TCC_OUTPUT_EXE) {
+        /* `NXArgc`, `NXArgv`, `environ` are NOT exported by libSystem
+         * — they're conventionally DEFINED by /usr/lib/crt1.o, and
+         * dyld's `_NSGetEnviron`/`_NSGetArgv` find them in the
+         * executable image. We define them ourselves here so libSystem
+         * stdio/getenv/etc. work. (tcc's `s->leading_underscore` mode
+         * adds the leading `_`, so the on-disk symbols are `_NXArgc`,
+         * `_NXArgv`, `_environ` — matching what crt1.o would emit.) */
+        /* Use `= 0` initializers so these land in .data (initialized)
+         * rather than .bss/COMMON. Our EXE writer doesn't yet
+         * synthesize __bss/__common for executables, so .data is
+         * the path of least resistance. */
+        static const char start_src[] =
+            "int    NXArgc  = 0;\n"
+            "char **NXArgv  = 0;\n"
+            "char **environ = 0;\n"
+            "int  main(int argc, char **argv, char **envp);\n"
+            "void exit(int);\n"
+            "void __tcc_start_main(int argc, char **argv, char **envp){\n"
+            "    NXArgc  = argc;\n"
+            "    NXArgv  = argv;\n"
+            "    environ = envp;\n"
+            "    exit(main(argc, argv, envp));\n"
+            "}\n";
+        if (tcc_compile_string(s, start_src) != 0)
+            return -1;
+    }
+#endif
+
 #ifdef TCC_TARGET_PE
     return  pe_output_file(s, filename);
 #elif defined TCC_TARGET_MACHO
