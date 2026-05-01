@@ -20,6 +20,7 @@ tarball), demos for new capabilities use `v<X>.<Y>.<Z>-<slug>.c`.
 | [s012-varargs.c](s012-varargs.c) | [012 — varargs](../docs/sessions/012-varargs/README.md) | `42` | `sum_n(7, 1..7) + 14 = 42`. Standard `<stdarg.h>`. Prolog now spills all 8 GPR arg slots to caller's parameter save area so the standard char*-based va_list machinery walks forward correctly. |
 | [s013-floating-point.c](s013-floating-point.c) | [013 — IEEE 754 single + double FP](../docs/sessions/013-floating-point/README.md) | `27` | `poly(a, b, c, x) = a*x*x + b*x + c` evaluated as `poly(1, 2, 3, 4)`. FP load/store/arithmetic, FP arg passing (f1..f8), int↔FP conversions, FP comparisons. |
 | [s016-hello-printf.sh](s016-hello-printf.sh) | [016 — PPC PIC stubs](../docs/sessions/016-ppc-plt-stubs/README.md) | prints `hello from tcc-built program` | First-ever `printf` from tcc-emitted code on G3. PowerPC `__picsymbolstub1` + `__la_symbol_ptr` + indirect symbol table for late-binding external function calls. |
+| [s025-self-link.sh](s025-self-link.sh) | [025 — Mach-O .o reader](../docs/sessions/025-macho-o-reader/README.md) | prints `hello from tcc-built and tcc-linked program` | Full self-link via tcc, no gcc. `tcc -o exe file.c` auto-loads `/usr/lib/crt1.o` and produces a working printf+malloc+strcpy executable end-to-end. |
 
 ## How to run any demo
 

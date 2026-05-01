@@ -3149,31 +3149,49 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
      * cases work. ppc-macho.c::macho_output_exe sets the entry to
      * a tiny shim that aligns the stack and `bl __tcc_start_main`. */
     if (s->output_type == TCC_OUTPUT_EXE) {
+        /* Auto-link Apple's /usr/lib/crt1.o when present. It does the
+         * proper Darwin startup (stack alignment, NXArgc/NXArgv/
+         * environ setup, library-init dance, __mod_init_func dispatch)
+         * and is essential for libSystem stdio (printf, malloc) to
+         * work correctly. Other tcc targets do the equivalent — every
+         * platform has *some* startup file. We attempt the load and
+         * fall through to the local-init shim if it's missing. */
+        if (access("/usr/lib/crt1.o", R_OK) == 0)
+            tcc_add_file(s, "/usr/lib/crt1.o");
+
         /* `NXArgc`, `NXArgv`, `environ` are NOT exported by libSystem
          * — they're conventionally DEFINED by /usr/lib/crt1.o, and
          * dyld's `_NSGetEnviron`/`_NSGetArgv` find them in the
          * executable image. We define them ourselves here so libSystem
          * stdio/getenv/etc. work. (tcc's `s->leading_underscore` mode
          * adds the leading `_`, so the on-disk symbols are `_NXArgc`,
-         * `_NXArgv`, `_environ` — matching what crt1.o would emit.) */
+         * `_NXArgv`, `_environ` — matching what crt1.o would emit.)
+         *
+         * GATE: skip injection if `start` (crt1's entry-point — note
+         * the on-disk name has *no* leading underscore, unusual for
+         * Mach-O) is already present. That means the user supplied
+         * /usr/lib/crt1.o (or it was auto-added) and we'd duplicate
+         * its definitions. */
         /* Use `= 0` initializers so these land in .data (initialized)
          * rather than .bss/COMMON. Our EXE writer doesn't yet
          * synthesize __bss/__common for executables, so .data is
          * the path of least resistance. */
-        static const char start_src[] =
-            "int    NXArgc  = 0;\n"
-            "char **NXArgv  = 0;\n"
-            "char **environ = 0;\n"
-            "int  main(int argc, char **argv, char **envp);\n"
-            "void exit(int);\n"
-            "void __tcc_start_main(int argc, char **argv, char **envp){\n"
-            "    NXArgc  = argc;\n"
-            "    NXArgv  = argv;\n"
-            "    environ = envp;\n"
-            "    exit(main(argc, argv, envp));\n"
-            "}\n";
-        if (tcc_compile_string(s, start_src) != 0)
-            return -1;
+        if (!find_elf_sym(s->symtab, "start")) {
+            static const char start_src[] =
+                "int    NXArgc  = 0;\n"
+                "char **NXArgv  = 0;\n"
+                "char **environ = 0;\n"
+                "int  main(int argc, char **argv, char **envp);\n"
+                "void exit(int);\n"
+                "void __tcc_start_main(int argc, char **argv, char **envp){\n"
+                "    NXArgc  = argc;\n"
+                "    NXArgv  = argv;\n"
+                "    environ = envp;\n"
+                "    exit(main(argc, argv, envp));\n"
+                "}\n";
+            if (tcc_compile_string(s, start_src) != 0)
+                return -1;
+        }
     }
 #endif
 
@@ -3234,7 +3252,14 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
 #if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
     /* Classic Mach-O on big-endian PPC: magic 0xfeedface (read as
      * `0xfe 0xed 0xfa 0xce` byte sequence). filetype is the 4th
-     * 32-bit big-endian word (offset 12). */
+     * 32-bit big-endian word (offset 12).
+     *
+     * Apple distributes /usr/lib/crt1.o (and friends) as fat
+     * (universal) binaries — magic 0xcafebabe + nfat_arch + N
+     * fat_arch records (20 bytes each: cputype/subtype/offset/
+     * size/align, big-endian). We look up the ppc slice
+     * (cputype=18) and peek at its embedded mach_header to confirm
+     * MH_OBJECT. */
     if (size >= 16) {
         const unsigned char *b = (const unsigned char *)h;
         uint32_t magic = ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)
@@ -3243,6 +3268,33 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
                        | ((uint32_t)b[14]<<8) |((uint32_t)b[15]);
         if (magic == 0xfeedface && ftype == 1 /* MH_OBJECT */)
             return AFF_BINTYPE_MACHO_REL;
+        if (magic == 0xcafebabe) {
+            uint32_t nfat = ((uint32_t)b[4]<<24)|((uint32_t)b[5]<<16)
+                          | ((uint32_t)b[6]<<8) |((uint32_t)b[7]);
+            uint32_t i;
+            unsigned char fa[20];
+            unsigned char hh[16];
+            uint32_t cputype, off2;
+            uint32_t m2, ft2;
+            if (nfat > 32) nfat = 32;
+            for (i = 0; i < nfat; i++) {
+                if (lseek(fd, 8 + (off_t)i * 20, SEEK_SET) < 0) break;
+                if (full_read(fd, fa, 20) != 20) break;
+                cputype = ((uint32_t)fa[0]<<24)|((uint32_t)fa[1]<<16)
+                        | ((uint32_t)fa[2]<<8) |((uint32_t)fa[3]);
+                off2 = ((uint32_t)fa[8]<<24)|((uint32_t)fa[9]<<16)
+                     | ((uint32_t)fa[10]<<8)|((uint32_t)fa[11]);
+                if (cputype != 18 /* CPU_TYPE_POWERPC */) continue;
+                if (lseek(fd, off2, SEEK_SET) < 0) continue;
+                if (full_read(fd, hh, 16) != 16) continue;
+                m2 = ((uint32_t)hh[0]<<24)|((uint32_t)hh[1]<<16)
+                   | ((uint32_t)hh[2]<<8) |((uint32_t)hh[3]);
+                ft2 = ((uint32_t)hh[12]<<24)|((uint32_t)hh[13]<<16)
+                    | ((uint32_t)hh[14]<<8)|((uint32_t)hh[15]);
+                if (m2 == 0xfeedface && ft2 == 1)
+                    return AFF_BINTYPE_MACHO_REL;
+            }
+        }
     }
 #endif
     return 0;
@@ -3656,7 +3708,16 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
     /* full_read(fd, magic, sizeof(magic)); */
     file_offset = sizeof ARMAG - 1;
 
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+    /* Mach-O archives use BSD format with `#1/N` names and the symdef
+     * is `__.SYMDEF` / `__.SYMDEF SORTED`. We don't yet implement
+     * selective alacarte loading via that symdef; fall back to
+     * whole-archive on these. */
+    alacarte = 0;
+#endif
+
     for(;;) {
+        unsigned long content_off;
         len = read_ar_header(fd, file_offset, &hdr);
         if (len == 0)
             return 0;
@@ -3664,17 +3725,56 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
             return tcc_error_noabort("invalid archive");
         file_offset += len;
         size = strtol(hdr.ar_size, NULL, 0);
+        content_off = file_offset;
+
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+        /* BSD-style ar long-name: ar_name is "#1/N" and the first N
+         * bytes of data are the actual member name. Advance content_off
+         * past those bytes so tcc_object_type sees the file content. */
+        if (!strncmp(hdr.ar_name, "#1/", 3)) {
+            int nlen = atoi(hdr.ar_name + 3);
+            if (nlen > 0 && nlen < size) {
+                char namebuf[256];
+                int rd = nlen < (int)sizeof(namebuf)
+                       ? nlen : (int)sizeof(namebuf) - 1;
+                lseek(fd, file_offset, SEEK_SET);
+                if (full_read(fd, namebuf, rd) == rd) {
+                    int ll = rd;
+                    while (ll > 0 && namebuf[ll-1] == 0) ll--;
+                    if (ll >= (int)sizeof(hdr.ar_name))
+                        ll = sizeof(hdr.ar_name) - 1;
+                    memcpy(hdr.ar_name, namebuf, ll);
+                    hdr.ar_name[ll] = 0;
+                }
+                content_off += nlen;
+            }
+        }
+#endif
+
         if (alacarte) {
             /* coff symbol table : we handle it */
             if (!strcmp(hdr.ar_name, "/"))
                 return tcc_load_alacarte(s1, fd, size, 4);
             if (!strcmp(hdr.ar_name, "/SYM64/"))
                 return tcc_load_alacarte(s1, fd, size, 8);
-        } else if (tcc_object_type(fd, &ehdr) == AFF_BINTYPE_REL) {
-            if (s1->verbose == 2)
-                printf("   -> %s\n", hdr.ar_name);
-            if (tcc_load_object_file(s1, fd, file_offset) < 0)
-                return -1;
+        } else {
+            int t;
+            lseek(fd, content_off, SEEK_SET);
+            t = tcc_object_type(fd, &ehdr);
+            if (t == AFF_BINTYPE_REL) {
+                if (s1->verbose == 2)
+                    printf("   -> %s\n", hdr.ar_name);
+                if (tcc_load_object_file(s1, fd, content_off) < 0)
+                    return -1;
+            }
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+            else if (t == AFF_BINTYPE_MACHO_REL) {
+                if (s1->verbose == 2)
+                    printf("   -> %s\n", hdr.ar_name);
+                if (macho_load_object_file(s1, fd, content_off) < 0)
+                    return -1;
+            }
+#endif
         }
         /* align to even */
         file_offset = (file_offset + size + 1) & ~1;
