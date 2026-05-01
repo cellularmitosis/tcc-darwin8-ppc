@@ -1,0 +1,7 @@
+[00:31:07] session 017 started: external-data PIC indirection
+[end] PIC indirection landed in ppc-gen.c + ppc-macho.c
+[end] All regressions pass: r42, fib(10), printf, errno, printf+extern, multi-stub
+[end] All 11 tcc sources compile via tcc-self
+[end] tcc-self -v still hangs in error1 path (separate codegen issue, not PIC-related)
+[end] Mach-O .o structure now matches gcc-4.0 reference
+[01:34:10] session 017: PIC for external data; tcc-self builds clean but SIGBUS in -v

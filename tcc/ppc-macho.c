@@ -41,6 +41,12 @@
 
 #include "tcc.h"
 
+/* Defined in ppc-gen.c. We share this side table so the Mach-O writer
+ * can recover the per-function PIC anchor associated with each
+ * R_PPC_HA16_PIC / R_PPC_LO16_PIC reloc emitted by ppc-gen.c. */
+ST_FUNC int  ppc_pic_pairs_lookup(int reloc_off);
+ST_FUNC void ppc_pic_pairs_reset(void);
+
 /* ====================================================================
  * Mach-O constants
  * ================================================================== */
@@ -73,12 +79,13 @@
 #define VM_PROT_DEFAULT         (VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE)
 
 /* Section types (bottom 8 bits of section.flags). */
-#define S_REGULAR               0x0
-#define S_ZEROFILL              0x1
-#define S_CSTRING_LITERALS      0x2
-#define S_LAZY_SYMBOL_POINTERS  0x7
-#define S_SYMBOL_STUBS          0x8
-#define S_COALESCED             0xb
+#define S_REGULAR                  0x0
+#define S_ZEROFILL                 0x1
+#define S_CSTRING_LITERALS         0x2
+#define S_NON_LAZY_SYMBOL_POINTERS 0x6
+#define S_LAZY_SYMBOL_POINTERS     0x7
+#define S_SYMBOL_STUBS             0x8
+#define S_COALESCED                0xb
 
 /* Section attributes (top 24 bits of section.flags). */
 #define S_ATTR_PURE_INSTRUCTIONS    0x80000000
@@ -292,12 +299,13 @@ struct macho_secmap {
     uint32_t    reserved1;  /* (indirect symbol table index for stubs/la_ptrs) */
     uint32_t    reserved2;  /* (stub size in bytes for S_SYMBOL_STUBS) */
     int         msect_no;   /* 1-based Mach-O section index */
-    /* For synthesized sections (stubs / la_symbol_ptrs), data is owned
-     * by us and freed at cleanup. For ELF-backed sections, data is NULL
-     * and we read from elf->data instead. */
+    /* For synthesized sections (stubs / la_symbol_ptrs / nl_symbol_ptrs),
+     * data is owned by us and freed at cleanup. For ELF-backed sections,
+     * data is NULL and we read from elf->data instead. */
     unsigned char *data;
     int         is_stub;    /* 1 if this is __picsymbolstub1            */
     int         is_la_ptr;  /* 1 if this is __la_symbol_ptr             */
+    int         is_nl_ptr;  /* 1 if this is __nl_symbol_ptr             */
 };
 
 /* Per-output extern-stub table. One entry per unique external function
@@ -307,6 +315,17 @@ struct extern_stub {
     uint32_t addr;          /* stub VA in __picsymbolstub1 (set at layout) */
     uint32_t la_ptr_addr;   /* la_symbol_ptr VA (set at layout) */
     int      machsym_idx;   /* idx into emitted nlist (set after build_symtab) */
+};
+
+/* Per-output non-lazy pointer table. One entry per unique external
+ * data symbol referenced via R_PPC_HA16_PIC / R_PPC_LO16_PIC. The
+ * synthesized __DATA,__nl_symbol_ptr section reserves one 4-byte slot
+ * per entry; ld writes the symbol's resolved address into the slot at
+ * static-link time (no lazy binding -- non-lazy semantics). */
+struct extern_nlptr {
+    int      elfsym_idx;
+    uint32_t slot_addr;     /* __nl_symbol_ptr slot VA (set at layout) */
+    int      machsym_idx;
 };
 
 /* Map a tcc section to its Mach-O (segname, sectname, flags).
@@ -435,6 +454,59 @@ static int collect_extern_stubs(TCCState *s1,
     return nstubs;
 }
 
+/* Collect the unique set of external data symbols referenced via
+ * R_PPC_HA16_PIC / R_PPC_LO16_PIC across all sections. Symbol order
+ * matches first-encountered order (deterministic w.r.t. our reloc
+ * walk). Returns the count and fills *out_nlptrs / *out_nl_for_elfsym
+ * (both caller-owned). */
+static int collect_extern_nlptrs(TCCState *s1,
+                                 struct extern_nlptr **out_nlptrs,
+                                 int **out_nl_for_elfsym)
+{
+    int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+    int *nl_for = tcc_mallocz(nsyms * sizeof(int));
+    struct extern_nlptr *nlptrs = NULL;
+    int n_nl = 0, cap_nl = 0;
+    int i, k;
+
+    for (i = 0; i < nsyms; i++) nl_for[i] = -1;
+
+    for (i = 1; i < s1->nb_sections; i++) {
+        Section *s = s1->sections[i];
+        Section *sr;
+        int nrel;
+        if (!s) continue;
+        sr = s->reloc;
+        if (!sr) continue;
+        nrel = sr->data_offset / sizeof(ElfW_Rel);
+        for (k = 0; k < nrel; k++) {
+            ElfW_Rel *rel = (ElfW_Rel *)sr->data + k;
+            int type = ELFW(R_TYPE)(rel->r_info);
+            int symidx = ELFW(R_SYM)(rel->r_info);
+            ElfW(Sym) *esym;
+            if (symidx <= 0 || symidx >= nsyms) continue;
+            if (type != R_PPC_HA16_PIC && type != R_PPC_LO16_PIC)
+                continue;
+            esym = (ElfW(Sym) *)s1->symtab->data + symidx;
+            if (esym->st_shndx != SHN_UNDEF) continue;
+            if (nl_for[symidx] >= 0) continue;
+            if (n_nl >= cap_nl) {
+                cap_nl = cap_nl ? cap_nl * 2 : 8;
+                nlptrs = tcc_realloc(nlptrs,
+                                     cap_nl * sizeof(struct extern_nlptr));
+            }
+            nlptrs[n_nl].elfsym_idx = symidx;
+            nlptrs[n_nl].slot_addr = 0;
+            nlptrs[n_nl].machsym_idx = -1;
+            nl_for[symidx] = n_nl;
+            n_nl++;
+        }
+    }
+    *out_nlptrs = nlptrs;
+    *out_nl_for_elfsym = nl_for;
+    return n_nl;
+}
+
 /* Build the 32-byte PIC stub for a single external function.
  * `stub_addr` is the VA of the stub (= start of the 8-instruction
  * sequence). `la_ptr_addr` is the VA of the corresponding lazy-bind
@@ -552,6 +624,10 @@ struct reloc_ctx {
     int                    *xlat_present;
     int                    *stub_for_elfsym;
     int                     stub_msect_no;
+    /* Non-lazy-pointer routing (for PIC data refs). */
+    int                    *nl_for_elfsym;     /* sym -> nl_ptr index, or -1 */
+    struct extern_nlptr    *nlptrs;            /* by nl_ptr index */
+    int                     n_nlptrs;
 };
 
 /* Emit Mach-O relocations for one tcc section into b. Returns the
@@ -576,8 +652,16 @@ static int emit_section_relocs(obuf *b, Section *s, struct reloc_ctx *ctx)
     int                   *xlat_present    = ctx->xlat_present;
     int                   *stub_for_elfsym = ctx->stub_for_elfsym;
     int                    stub_msect_no   = ctx->stub_msect_no;
+    int                   *nl_for_elfsym   = ctx->nl_for_elfsym;
+    struct extern_nlptr   *nlptrs          = ctx->nlptrs;
     int i, count = 0;
     int nrel;
+    /* Section base address of `s` -- needed because anchor offsets are
+     * relative to text start, but SECTDIFF relocs need absolute VAs. */
+    uint32_t sec_base = 0;
+    for (i = 0; i < nsec; i++) {
+        if (smap[i].elf == s) { sec_base = smap[i].addr; break; }
+    }
 
     if (!s->reloc)
         return 0;
@@ -613,6 +697,71 @@ static int emit_section_relocs(obuf *b, Section *s, struct reloc_ctx *ctx)
             continue;
         }
 
+        /* PIC HA16/LO16 reference: emit scattered HA16/LO16 SECTDIFF
+         * + PAIR. Two cases:
+         *   (a) symbol is undef external -> r_value = __nl_symbol_ptr
+         *       slot VA (the addis/lwz pair stays as load-from-slot).
+         *   (b) symbol is defined locally -> r_value = symbol's VA
+         *       directly (the lwz was rewritten to addi by the
+         *       pre-relocation pass; we now compute the symbol's
+         *       address inline without going through any slot).
+         * In both cases the PAIR's r_value is the per-function PIC
+         * anchor VA, and the PAIR's r_address carries the OTHER half
+         * of the displacement (slot/sym - anchor) so ld can recompute
+         * after section relocation. */
+        if (type == R_PPC_HA16_PIC || type == R_PPC_LO16_PIC) {
+            int anchor_off = ppc_pic_pairs_lookup((int)addr);
+            uint32_t target_va = 0;
+            uint32_t anchor_va;
+            int32_t  delta;
+            uint16_t lo, ha;
+
+            if (anchor_off < 0) {
+                tcc_error_noabort("ppc-macho: missing PIC anchor for "
+                                  "reloc at 0x%x", (unsigned)addr);
+                continue;
+            }
+            if (extern_bit
+                && nl_for_elfsym && nl_for_elfsym[elfsym] >= 0) {
+                /* External: target is the __nl_symbol_ptr slot. */
+                target_va = nlptrs[nl_for_elfsym[elfsym]].slot_addr;
+            } else if (!extern_bit) {
+                /* Locally-defined: target is the symbol itself. */
+                int j;
+                for (j = 0; j < nsec; j++) {
+                    if (smap[j].elf
+                        && smap[j].elf->sh_num == esym->st_shndx) {
+                        target_va = smap[j].addr + (uint32_t)esym->st_value;
+                        break;
+                    }
+                }
+                if (j == nsec) continue;
+            } else {
+                /* External but no slot? Skip -- shouldn't normally
+                 * happen because collect_extern_nlptrs() registers a
+                 * slot for every PIC reloc against an undef extern. */
+                continue;
+            }
+            anchor_va = sec_base + (uint32_t)anchor_off;
+            delta = (int32_t)(target_va - anchor_va);
+            lo = (uint16_t)(delta & 0xffff);
+            ha = (uint16_t)((delta + 0x8000) >> 16);
+
+            if (type == R_PPC_HA16_PIC) {
+                emit_scattered(b, 0, 2, PPC_RELOC_HA16_SECTDIFF,
+                               addr, target_va);
+                emit_scattered(b, 0, 2, PPC_RELOC_PAIR,
+                               (uint32_t)lo, anchor_va);
+            } else {
+                emit_scattered(b, 0, 2, PPC_RELOC_LO16_SECTDIFF,
+                               addr, target_va);
+                emit_scattered(b, 0, 2, PPC_RELOC_PAIR,
+                               (uint32_t)ha, anchor_va);
+            }
+            count += 2;
+            continue;
+        }
+
         if (extern_bit) {
             /* External: r_symbolnum is the Mach-O symtab index. */
             msym = sym_xlat[elfsym];
@@ -632,46 +781,67 @@ static int emit_section_relocs(obuf *b, Section *s, struct reloc_ctx *ctx)
                 continue;  /* target section not emitted; skip */
         }
 
-        switch (type) {
-        case R_PPC_ADDR32:
-            mtype = PPC_RELOC_VANILLA;
-            mlength = 2;     /* 4 bytes */
-            mpcrel = 0;
-            break;
-        case R_PPC_REL24:
-            mtype = PPC_RELOC_BR24;
-            mlength = 2;
-            mpcrel = 1;
-            break;
-        case R_PPC_ADDR16_HA:
-            mtype = PPC_RELOC_HA16;
-            mlength = 2;
-            mpcrel = 0;
-            emit_pair = 1;
-            /* Mach-O linker needs the "other half" -- the 16 low bits
-             * of the (full address + addend). For an .o where we don't
-             * yet know the symbol address, we emit the addend's low
-             * half -- normally 0 for tcc-generated relocs. */
-            other_half = 0;
-            break;
-        case R_PPC_ADDR16_HI:
-            mtype = PPC_RELOC_HI16;
-            mlength = 2;
-            mpcrel = 0;
-            emit_pair = 1;
-            other_half = 0;
-            break;
-        case R_PPC_ADDR16_LO:
-            mtype = PPC_RELOC_LO16;
-            mlength = 2;
-            mpcrel = 0;
-            emit_pair = 1;
-            /* For LO16 the PAIR carries the high half. */
-            other_half = 0;
-            break;
-        default:
-            /* Unsupported reloc: skip rather than corrupt the .o. */
-            continue;
+        /* For HA16/LO16/HI16 PAIR entries, the second record carries
+         * the OTHER half of the symbol's resolved value so ld can do
+         * the carry-correction across the 16-bit split. For a defined
+         * symbol we already know its provisional VA in our layout; use
+         * it. For an undef extern we have to leave it 0 (ld will
+         * resolve the address but the addend contribution from us is
+         * empty in tcc's Rel-without-addend format). */
+        {
+            uint32_t sym_val_for_pair = 0;
+            if (!extern_bit) {
+                int j;
+                for (j = 0; j < nsec; j++) {
+                    if (smap[j].elf
+                        && smap[j].elf->sh_num == esym->st_shndx) {
+                        sym_val_for_pair = smap[j].addr
+                                         + (uint32_t)esym->st_value;
+                        break;
+                    }
+                }
+            }
+
+            switch (type) {
+            case R_PPC_ADDR32:
+                mtype = PPC_RELOC_VANILLA;
+                mlength = 2;     /* 4 bytes */
+                mpcrel = 0;
+                break;
+            case R_PPC_REL24:
+                mtype = PPC_RELOC_BR24;
+                mlength = 2;
+                mpcrel = 1;
+                break;
+            case R_PPC_ADDR16_HA:
+                mtype = PPC_RELOC_HA16;
+                mlength = 2;
+                mpcrel = 0;
+                emit_pair = 1;
+                /* PAIR's r_address holds the LO half of the symbol's
+                 * resolved address (so ld can apply the +1 if bit 15
+                 * is set). */
+                other_half = sym_val_for_pair & 0xffff;
+                break;
+            case R_PPC_ADDR16_HI:
+                mtype = PPC_RELOC_HI16;
+                mlength = 2;
+                mpcrel = 0;
+                emit_pair = 1;
+                other_half = sym_val_for_pair & 0xffff;
+                break;
+            case R_PPC_ADDR16_LO:
+                mtype = PPC_RELOC_LO16;
+                mlength = 2;
+                mpcrel = 0;
+                emit_pair = 1;
+                /* PAIR's r_address holds the HA half. */
+                other_half = ((sym_val_for_pair + 0x8000) >> 16) & 0xffff;
+                break;
+            default:
+                /* Unsupported reloc: skip rather than corrupt the .o. */
+                continue;
+            }
         }
 
         /* Main entry. */
@@ -930,6 +1100,11 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     int  stub_msect_no = 0;       /* 1-based mach-o section index of __picsymbolstub1 */
     int  la_ptr_msect_no = 0;     /* ditto __la_symbol_ptr */
     int  helper_elfsym_idx = 0;   /* dyld_stub_binding_helper in s1->symtab */
+    /* External-data PIC bookkeeping. */
+    struct extern_nlptr *nlptrs = NULL;
+    int *nl_for_elfsym = NULL;
+    int  n_nlptrs = 0;
+    int  nl_ptr_msect_no = 0;     /* 1-based mach-o section index of __nl_symbol_ptr */
 
     memset(&out, 0, sizeof(out));
     memset(&relbuf, 0, sizeof(relbuf));
@@ -944,7 +1119,9 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     }
 
     /* ---- Step 0.5: collect external functions called via R_PPC_REL24
-     * and inject dyld_stub_binding_helper if any stubs are needed. */
+     * and inject dyld_stub_binding_helper if any stubs are needed.
+     * Also collect external data symbols referenced via the synthetic
+     * R_PPC_HA16_PIC / R_PPC_LO16_PIC PIC relocs from ppc-gen.c. */
     nstubs = collect_extern_stubs(s1, &stubs, &stub_for_elfsym);
     if (nstubs > 0) {
         helper_elfsym_idx = set_elf_sym(s1->symtab, 0, 0,
@@ -953,11 +1130,13 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
                                         "dyld_stub_binding_helper");
         (void)helper_elfsym_idx;
     }
+    n_nlptrs = collect_extern_nlptrs(s1, &nlptrs, &nl_for_elfsym);
 
     /* ---- Step 1: collect Mach-O sections from tcc's section list. ----
-     * Two extra slots reserved at the end for synthesized __picsymbolstub1
-     * and __la_symbol_ptr sections. */
-    smap_cap = s1->nb_sections + 2;
+     * Three extra slots reserved at the end for synthesized
+     * __picsymbolstub1, __nl_symbol_ptr, and __la_symbol_ptr sections.
+     * Sections appear in this order to match gcc-4.0 output. */
+    smap_cap = s1->nb_sections + 3;
     smap = tcc_mallocz(smap_cap * sizeof(*smap));
     for (i = 1; i < s1->nb_sections; i++) {
         Section *s = s1->sections[i];
@@ -977,14 +1156,21 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         nsec++;
     }
 
-    /* ---- Step 1a: synthesize __picsymbolstub1 and __la_symbol_ptr if
-     * we have any external function calls. */
+    /* ---- Step 1a: synthesize __picsymbolstub1, __nl_symbol_ptr,
+     * and __la_symbol_ptr in section-header order matching gcc-4.0:
+     *
+     *   __TEXT,__picsymbolstub1     (one entry per extern function call)
+     *   __DATA,__nl_symbol_ptr      (one entry per extern data symbol)
+     *   __DATA,__la_symbol_ptr      (one entry per extern function call)
+     *
+     * The indirect symbol table is laid out in the same section order:
+     *   [0 .. nstubs)                     stub symbols
+     *   [nstubs .. nstubs + n_nlptrs)     nl_ptr symbols
+     *   [nstubs + n_nlptrs ..)            la_ptr symbols
+     * Each section's reserved1 field gives its starting index in that
+     * table. */
     if (nstubs > 0) {
         struct macho_secmap *m;
-
-        /* __TEXT,__picsymbolstub1: 32-byte stubs, align 2^5 not strictly
-         * necessary (gcc uses 2^5 because indirect-symbol-table tools
-         * historically expected it). */
         m = &smap[nsec];
         m->elf = NULL;
         m->segname = "__TEXT";
@@ -996,11 +1182,29 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         m->msect_no = nsec + 1;
         m->is_stub = 1;
         m->reserved2 = 32;          /* bytes per stub */
+        m->reserved1 = 0;           /* first stub at indirect-symtab index 0 */
         m->data = tcc_mallocz(m->size);
         stub_msect_no = m->msect_no;
         nsec++;
-
-        /* __DATA,__la_symbol_ptr: 4-byte slots, align 2^2. */
+    }
+    if (n_nlptrs > 0) {
+        struct macho_secmap *m;
+        m = &smap[nsec];
+        m->elf = NULL;
+        m->segname = "__DATA";
+        m->sectname = "__nl_symbol_ptr";
+        m->flags = S_NON_LAZY_SYMBOL_POINTERS;
+        m->size = (uint32_t)n_nlptrs * 4u;
+        m->align_log2 = 2;
+        m->msect_no = nsec + 1;
+        m->is_nl_ptr = 1;
+        m->reserved1 = (uint32_t)nstubs;    /* nl_ptrs start after stubs */
+        m->data = tcc_mallocz(m->size);
+        nl_ptr_msect_no = m->msect_no;
+        nsec++;
+    }
+    if (nstubs > 0) {
+        struct macho_secmap *m;
         m = &smap[nsec];
         m->elf = NULL;
         m->segname = "__DATA";
@@ -1010,9 +1214,7 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         m->align_log2 = 2;
         m->msect_no = nsec + 1;
         m->is_la_ptr = 1;
-        m->reserved1 = nstubs;      /* indirect-symtab index of first la_ptr
-                                     * entry: stubs occupy [0, nstubs),
-                                     * la_ptrs occupy [nstubs, 2*nstubs). */
+        m->reserved1 = (uint32_t)(nstubs + n_nlptrs);
         m->data = tcc_mallocz(m->size);
         la_ptr_msect_no = m->msect_no;
         nsec++;
@@ -1068,9 +1270,10 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     total_vmsize = vmaddr;
 
     /* ---- Step 2.4: now that section addresses are set, fill in
-     * stubs[].addr / stubs[].la_ptr_addr. Done before the
-     * relocate-bytes pass so external R_PPC_REL24 relocs can encode
-     * the bl displacement to the correct stub address. */
+     * stubs[].addr / stubs[].la_ptr_addr / nlptrs[].slot_addr. Done
+     * before the relocate-bytes pass so the addis/lwz instruction
+     * displacements (slot - PIC anchor) and BR24 displacements (stub -
+     * call site) can be pre-encoded into the section bytes. */
     if (nstubs > 0) {
         int sidx;
         struct macho_secmap *stub_sect = NULL, *la_sect = NULL;
@@ -1082,6 +1285,14 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
             stubs[sidx].addr        = stub_sect->addr + (uint32_t)sidx * 32u;
             stubs[sidx].la_ptr_addr = la_sect->addr   + (uint32_t)sidx * 4u;
         }
+    }
+    if (n_nlptrs > 0) {
+        int nidx;
+        struct macho_secmap *nl_sect = NULL;
+        for (j = 0; j < nsec; j++)
+            if (smap[j].is_nl_ptr) { nl_sect = &smap[j]; break; }
+        for (nidx = 0; nidx < n_nlptrs; nidx++)
+            nlptrs[nidx].slot_addr = nl_sect->addr + (uint32_t)nidx * 4u;
     }
 
     /* ---- Step 2.5: pre-apply same-section relocations to section
@@ -1128,10 +1339,112 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
                     ptr = s->data + rel->r_offset;
                     relocate(s1, rel, type, ptr, reloc_addr, sym_val);
                 }
+                /* PIC HA16/LO16 to extern data: encode the
+                 * (slot_va - anchor_va) displacement directly into
+                 * the addis/lwz immediate. ld will recompute via
+                 * SECTDIFF if either section moves. */
+                if ((type == R_PPC_HA16_PIC || type == R_PPC_LO16_PIC)
+                    && nl_for_elfsym
+                    && nl_for_elfsym[symidx] >= 0) {
+                    int nidx = nl_for_elfsym[symidx];
+                    int anchor_off = ppc_pic_pairs_lookup((int)rel->r_offset);
+                    uint32_t slot_va, anchor_va;
+                    int32_t  delta;
+                    uint32_t orig, imm;
+                    if (anchor_off < 0) {
+                        tcc_error_noabort("ppc-macho: missing PIC anchor "
+                                          "for reloc at 0x%lx",
+                                          (unsigned long)rel->r_offset);
+                        continue;
+                    }
+                    slot_va  = nlptrs[nidx].slot_addr;
+                    anchor_va = smap[i].addr + (uint32_t)anchor_off;
+                    delta = (int32_t)(slot_va - anchor_va);
+                    ptr = s->data + rel->r_offset;
+                    orig = ((uint32_t)ptr[0] << 24) | ((uint32_t)ptr[1] << 16)
+                         | ((uint32_t)ptr[2] << 8)  | (uint32_t)ptr[3];
+                    if (type == R_PPC_HA16_PIC) {
+                        imm = ((uint32_t)((delta + 0x8000) >> 16)) & 0xffff;
+                    } else {
+                        imm = ((uint32_t)delta) & 0xffff;
+                    }
+                    orig = (orig & ~0xffffu) | imm;
+                    ptr[0] = (orig >> 24) & 0xff;
+                    ptr[1] = (orig >> 16) & 0xff;
+                    ptr[2] = (orig >>  8) & 0xff;
+                    ptr[3] =  orig        & 0xff;
+                }
                 /* Other external relocs (HA16/LO16 to globals, ADDR32):
                  * leave the bits as their addend; ld will fix up. */
                 continue;
             }
+
+            /* PIC reloc against a LOCALLY-DEFINED symbol. tcc's
+             * ppc_need_pic_for_sym() decided to emit PIC at codegen
+             * time based on st_shndx == SHN_UNDEF, but the symbol
+             * was DEFINED later in the same TU (a forward-reference).
+             * No __nl_symbol_ptr slot was reserved for it. We rewrite
+             * the bytes to compute the address directly via SECTDIFF
+             * from the PIC base:
+             *   addis r12, r2, ha(sym - anchor)     ; unchanged opcode
+             *   lwz   r12, lo(sym - anchor)(r12)  ->  addi r12, r12, lo(...)
+             * The `lwz` (op 0x80) becomes `addi` (op 0x38). Both have
+             * the same RT/RA/SIMM field layout. */
+            if (type == R_PPC_HA16_PIC || type == R_PPC_LO16_PIC) {
+                int anchor_off = ppc_pic_pairs_lookup((int)rel->r_offset);
+                uint32_t target_va, anchor_va;
+                int32_t  delta;
+                uint32_t orig, imm;
+                int j;
+                if (anchor_off < 0) {
+                    tcc_error_noabort("ppc-macho: missing PIC anchor "
+                                      "for local reloc at 0x%lx",
+                                      (unsigned long)rel->r_offset);
+                    continue;
+                }
+                /* Compute symbol's final VA. */
+                target_va = 0;
+                for (j = 0; j < nsec; j++) {
+                    if (smap[j].elf
+                        && smap[j].elf->sh_num == esym->st_shndx) {
+                        target_va = smap[j].addr + esym->st_value;
+                        break;
+                    }
+                }
+                if (j == nsec) continue;  /* unmapped section: skip */
+                anchor_va = smap[i].addr + (uint32_t)anchor_off;
+                delta = (int32_t)(target_va - anchor_va);
+                ptr = s->data + rel->r_offset;
+                orig = ((uint32_t)ptr[0] << 24) | ((uint32_t)ptr[1] << 16)
+                     | ((uint32_t)ptr[2] << 8)  | (uint32_t)ptr[3];
+                if (type == R_PPC_HA16_PIC) {
+                    /* Keep addis opcode, just patch immediate. */
+                    imm = ((uint32_t)((delta + 0x8000) >> 16)) & 0xffff;
+                    orig = (orig & ~0xffffu) | imm;
+                } else {
+                    /* Convert lwz (0x80xxxxxx) to addi (0x38xxxxxx).
+                     * Patch immediate to lo(delta). */
+                    imm = ((uint32_t)delta) & 0xffff;
+                    orig = (orig & ~0xfc00ffffu) | 0x38000000u | imm;
+                }
+                ptr[0] = (orig >> 24) & 0xff;
+                ptr[1] = (orig >> 16) & 0xff;
+                ptr[2] = (orig >>  8) & 0xff;
+                ptr[3] =  orig        & 0xff;
+                /* The reloc record itself will be emitted as
+                 * SECTDIFF-against-symbol-VA in emit_section_relocs;
+                 * we just patched the bytes here. */
+                continue;
+            }
+            /* Synthetic PIC types should never be applied via the
+             * generic relocate() path -- they have no in-section
+             * meaning that relocate() understands. They should also
+             * never reference defined symbols (ppc_need_pic_for_sym
+             * returns 0 in that case), but if the symbol got defined
+             * later (forward decl + later definition in the same TU)
+             * we'd see one here. Skip silently rather than crash. */
+            if (type == R_PPC_HA16_PIC || type == R_PPC_LO16_PIC)
+                continue;
             /* Compute the symbol's final address in our layout. */
             sym_val = 0;
             {
@@ -1172,6 +1485,13 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         for (sidx = 0; sidx < nstubs; sidx++) {
             int eidx = stubs[sidx].elfsym_idx;
             stubs[sidx].machsym_idx = sb.xlat[eidx];
+        }
+    }
+    if (n_nlptrs > 0) {
+        int nidx;
+        for (nidx = 0; nidx < n_nlptrs; nidx++) {
+            int eidx = nlptrs[nidx].elfsym_idx;
+            nlptrs[nidx].machsym_idx = sb.xlat[eidx];
         }
     }
 
@@ -1240,6 +1560,9 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
             ctx.xlat_present = sb.xlat_present;
             ctx.stub_for_elfsym = stub_for_elfsym;
             ctx.stub_msect_no = stub_msect_no;
+            ctx.nl_for_elfsym = nl_for_elfsym;
+            ctx.nlptrs = nlptrs;
+            ctx.n_nlptrs = n_nlptrs;
             n = emit_section_relocs(&relbuf, smap[i].elf, &ctx);
         }
         if (n > 0) {
@@ -1252,16 +1575,21 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     }
     cur_off += (uint32_t)relbuf.len;
 
-    /* Build the indirect symbol table (one entry per stub + one per
-     * la_ptr slot, both pointing back at the corresponding undef
-     * external in nlist). */
-    if (nstubs > 0) {
+    /* Build the indirect symbol table. Layout matches gcc-4.0:
+     *   [0 .. nstubs)               stub entries  (one per extern fn call)
+     *   [nstubs .. +n_nlptrs)       nl_ptr entries (one per extern data ref)
+     *   [+nstubs)                   la_ptr entries (one per extern fn call)
+     * Each entry is a 4-byte word holding the index of the corresponding
+     * undef-external symbol in our nlist. */
+    {
         int sidx;
         for (sidx = 0; sidx < nstubs; sidx++)
             put32be(&indirect_buf, (uint32_t)stubs[sidx].machsym_idx);
+        for (sidx = 0; sidx < n_nlptrs; sidx++)
+            put32be(&indirect_buf, (uint32_t)nlptrs[sidx].machsym_idx);
         for (sidx = 0; sidx < nstubs; sidx++)
             put32be(&indirect_buf, (uint32_t)stubs[sidx].machsym_idx);
-        n_indirect = (uint32_t)nstubs * 2u;
+        n_indirect = (uint32_t)(nstubs * 2 + n_nlptrs);
     }
     cur_off = (cur_off + 3u) & ~3u;
     indirect_file_off = cur_off;
@@ -1459,7 +1787,11 @@ cleanup:
     }
     tcc_free(stubs);
     tcc_free(stub_for_elfsym);
+    tcc_free(nlptrs);
+    tcc_free(nl_for_elfsym);
     tcc_free(section_lc_off);
+    /* Reset PIC pair side-table for the next translation unit. */
+    ppc_pic_pairs_reset();
     return ret;
 }
 

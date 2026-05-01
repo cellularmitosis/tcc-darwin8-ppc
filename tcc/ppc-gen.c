@@ -202,7 +202,10 @@ static unsigned long func_sub_sp_offset;
  *   mtlr r0
  *   blr
  */
-#define PPC_PROLOG_SIZE 52
+/* Prologue size in bytes. 13 fixed instructions (mflr, stw LR, 8 arg
+ * spills, stwu, stw r31, addi r31) + 1 instruction to save r30 (the
+ * PIC base register) = 14 instructions = 56 bytes. */
+#define PPC_PROLOG_SIZE 56
 #define PPC_LINKAGE_SIZE 24
 #define PPC_PARAM_AREA   96   /* 24 GPR slots * 4 bytes, big enough for
                                   any stdarg-style call we've seen */
@@ -237,6 +240,11 @@ static int ppc_frame_size(void)
 /* ------------------------------------------------------------------ */
 /* helpers                                                            */
 /* ------------------------------------------------------------------ */
+
+/* Forward declarations for the PIC-indirection helpers (defined later
+ * in this file, after the gfunc_prolog/epilog block). */
+static int  ppc_need_pic_for_sym(Sym *sym);
+static void ppc_emit_pic_addr_load(int addr_gpr, Sym *sym);
 
 /* PPC instructions are big-endian 32-bit words regardless of the host
  * byte order. Write directly without using write32le / write32be —
@@ -629,6 +637,92 @@ ST_FUNC void load(int r, SValue *sv)
         int extra_off = (int)sv->c.i;
         int addr_gpr;
         int want_load = (sv->r & VT_LVAL) != 0;
+        int need_pic = ppc_need_pic_for_sym(sv->sym);
+
+        /* PIC path: external data symbol. Two-step indirection:
+         *   addr_gpr = *(__nl_symbol_ptr_for_sym)
+         *   (then load/use as below).
+         * The address-load uses addis+lwz against r2 (the per-function
+         * PIC base anchor). We stash the result in a scratch GPR or
+         * directly in the destination if want_load is false. */
+        if (need_pic) {
+            int dst_gpr;
+
+            /* Pick the scratch GPR that will hold the symbol's address.
+             * If we're computing an address and the destination is a
+             * GPR (not FP) with no extra offset, use r itself. Otherwise
+             * use r12 as a scratch -- it's not in tcc's reg allocator
+             * and is caller-saved on Darwin. */
+            if (!want_load && !IS_FREG(r) && extra_off == 0) {
+                addr_gpr = TREG_TO_GPR(r);
+            } else {
+                addr_gpr = 12;
+            }
+            ppc_emit_pic_addr_load(addr_gpr, sv->sym);
+            /* Now addr_gpr holds the *address* of the symbol. */
+
+            if (!want_load) {
+                /* Address-of (with optional addend). */
+                dst_gpr = TREG_TO_GPR(r);
+                if (extra_off != 0) {
+                    /* addi dst, addr_gpr, extra_off */
+                    o(0x38000000 | (dst_gpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                } else if (dst_gpr != addr_gpr) {
+                    /* mr dst, addr_gpr -- shouldn't normally happen
+                     * because we picked addr_gpr = dst_gpr above. */
+                    o(0x7c000378 | (addr_gpr << 21) | (dst_gpr << 16)
+                                 | (addr_gpr << 11));
+                }
+                return;
+            }
+
+            /* Typed load through addr_gpr + extra_off. */
+            if (IS_FREG(r)) {
+                int fpr = TREG_TO_FPR(r);
+                if (bt == VT_FLOAT) {
+                    o(0xc0000000 | (fpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+                    o(0xc8000000 | (fpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                } else {
+                    tcc_error("ppc-gen: PIC FP load of bt 0x%x", bt);
+                }
+                return;
+            }
+            gpr = TREG_TO_GPR(r);
+            switch (bt) {
+            case VT_BYTE:
+                o(0x88000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                if (!(sv->type.t & VT_UNSIGNED))
+                    o(0x7c000774 | (gpr << 21) | (gpr << 16));  /* extsb */
+                return;
+            case VT_SHORT:
+                if (sv->type.t & VT_UNSIGNED)
+                    o(0xa0000000 | (gpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                else
+                    o(0xa8000000 | (gpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                return;
+            case VT_INT:
+            case VT_PTR:
+            case VT_FUNC:
+                o(0x80000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                return;
+            case VT_LLONG:
+                /* High then low (big-endian word order). */
+                o(0x80000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                return;
+            default:
+                tcc_error("ppc-gen: PIC load via sym of bt 0x%x not yet supported", bt);
+            }
+            return;
+        }
 
         /* Choose a GPR to hold the symbol address. If our destination
          * is a GPR and we want_load is FALSE (just want the address),
@@ -868,10 +962,62 @@ ST_FUNC void store(int r, SValue *sv)
      *   stw  rS,   sym@lo(rTMP)    (R_PPC_ADDR16_LO on the stw)
      */
     if (v == VT_CONST && (sv->r & VT_SYM)) {
-        int tmp_slot = get_reg(RC_INT);
-        int tmp_gpr = TREG_TO_GPR(tmp_slot);
+        int tmp_slot;
+        int tmp_gpr;
         int store_op;
         int64_t addend = sv->c.i;
+        int need_pic = ppc_need_pic_for_sym(sv->sym);
+
+        /* PIC path: external data symbol. Get the address into a
+         * scratch GPR via __nl_symbol_ptr, then store through it. */
+        if (need_pic) {
+            tmp_gpr = 12;     /* scratch (not in tcc allocator) */
+            ppc_emit_pic_addr_load(tmp_gpr, sv->sym);
+            /* Now tmp_gpr holds the address of the symbol. Store
+             * through it with addend as the byte offset. */
+            if (IS_FREG(r)) {
+                int fpr = TREG_TO_FPR(r);
+                if (bt == VT_FLOAT)
+                    store_op = 0xd0000000;       /* stfs */
+                else if (bt == VT_DOUBLE || bt == VT_LDOUBLE)
+                    store_op = 0xd8000000;       /* stfd */
+                else {
+                    tcc_error("ppc-gen: PIC store global FP of bt 0x%x", bt);
+                    return;
+                }
+                o(store_op | (fpr << 21) | (tmp_gpr << 16) | (((int32_t)addend) & 0xffff));
+                return;
+            }
+            gpr = TREG_TO_GPR(r);
+            switch (bt) {
+            case VT_BYTE:  store_op = 0x98000000; break;
+            case VT_SHORT: store_op = 0xb0000000; break;
+            case VT_INT:
+            case VT_PTR:
+            case VT_FUNC:  store_op = 0x90000000; break;
+            case VT_LLONG:
+                if (sv->r2 >= VT_CONST) {
+                    tcc_error("ppc-gen: PIC store VT_LLONG to global with no r2");
+                    return;
+                }
+                {
+                    int hi_gpr = TREG_TO_GPR(sv->r2);
+                    o(0x90000000 | (hi_gpr << 21) | (tmp_gpr << 16)
+                                 | (((int32_t)addend) & 0xffff));
+                    o(0x90000000 | (gpr << 21) | (tmp_gpr << 16)
+                                 | (((int32_t)(addend + 4)) & 0xffff));
+                    return;
+                }
+            default:
+                tcc_error("ppc-gen: PIC store global of bt 0x%x not yet supported", bt);
+                return;
+            }
+            o(store_op | (gpr << 21) | (tmp_gpr << 16) | (((int32_t)addend) & 0xffff));
+            return;
+        }
+
+        tmp_slot = get_reg(RC_INT);
+        tmp_gpr = TREG_TO_GPR(tmp_slot);
         /* lis rTMP, sym@ha  -- placeholder; relocator fills the half. */
         greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_HA);
         o(0x3c000000 | (tmp_gpr << 21) | (((int32_t)addend) & 0xffff));
@@ -1041,9 +1187,18 @@ ST_FUNC void gfunc_call(int nb_args)
         greloc(cur_text_section, vtop->sym, ind, R_PPC_REL24);
         o(0x48000001);  /* bl 0 */
     } else {
-        /* Indirect call via CTR. */
+        /* Indirect call via CTR.
+         *
+         * IMPORTANT: we materialize the function pointer into r11
+         * (TREG_R11 / RC_R(8)), NOT into any old RC_INT slot. The
+         * arg-passing slots r3..r10 are already populated above with
+         * arg values, but tcc's vstack tracking doesn't reserve them
+         * after we vtop-- through them. If we did `gv(RC_INT)`, the
+         * allocator could pick r3 (the lowest free slot) and clobber
+         * the first argument. Pinning to r11 (a scratch GPR not used
+         * for ABI args) avoids this. */
         int gpr;
-        gv(RC_INT);
+        gv(RC_R(8));   /* r11 */
         gpr = TREG_TO_GPR(vtop->r & VT_VALMASK);
         /* mtctr rS  (mtspr ctr, rS; ctr is SPR 9) */
         o(0x7c0903a6 | (gpr << 21));
@@ -1063,6 +1218,195 @@ static int ppc_fp_param_off[8];
 /* Per-FP-param: 1 if double (8-byte stfd), 0 if float (4-byte stfs).  */
 static int ppc_fp_param_is_double[8];
 
+/* ------------------------------------------------------------------ */
+/* PIC indirection bookkeeping                                        */
+/* ------------------------------------------------------------------ */
+/*
+ * For Mach-O -c output, references to externally-defined data symbols
+ * (e.g. errno, stdin, __sF, etc.) cannot be emitted as direct
+ * R_PPC_ADDR16_HA/LO relocations because dyld cannot patch a 16-bit
+ * instruction immediate at load time on PowerPC. Instead we emit:
+ *
+ *   ; Once per function, the first time a PIC ref is needed:
+ *   mflr  r0
+ *   bcl   20, 31, .+4         ; pseudo-call to next insn (sets LR)
+ *   mflr  r2                  ; r2 = anchor address (= addr of mtlr)
+ *   mtlr  r0
+ *
+ *   ; Per access:
+ *   addis rT, r2, ha(slot - anchor)    ; R_PPC_HA16_PIC
+ *   lwz   rT, lo(slot - anchor)(rT)    ; R_PPC_LO16_PIC
+ *   ; rT now holds the address of `sym`; lwz/stw through it as needed
+ *
+ * The slot lives in __DATA,__nl_symbol_ptr (synthesized by
+ * ppc-macho.c). The HA16/LO16 SECTDIFF relocations encode the offset
+ * (slot_va - anchor_va), which the static linker (ld) recomputes after
+ * section relocation.
+ *
+ * We use r30 as the PIC base register. r30 is callee-saved per the
+ * Apple PPC ABI (r13..r31 are non-volatile), so its value survives
+ * calls into libSystem and back -- this matters because we re-use
+ * the PIC base for every external data access and many of those
+ * accesses straddle calls. r30 is not exposed to tcc's register
+ * allocator (only r3..r12 are; see reg_classes[]) so reserving it
+ * costs only the prologue save and epilogue restore (4 bytes each).
+ *
+ * Why not r2? Although r2 is documented as "reserved" on Darwin,
+ * libSystem routines do clobber it in practice -- so a PIC base
+ * stashed in r2 is destroyed by the first printf/strlen/etc. call.
+ *
+ * Why not r10? r10 is volatile (caller-saved) per the Apple ABI,
+ * same problem as r2. gcc gets away with r10 only when there are
+ * no calls between the PIC base setup and its uses.
+ */
+#define PPC_PIC_BASE_REG 30
+
+/* Per-function flag: 1 once PIC base setup has been emitted. Reset
+ * in gfunc_prolog. */
+static int ppc_func_pic_base_emitted;
+/* Per-function value: the anchor offset within cur_text_section
+ * (i.e. the byte-offset of the mtlr that follows our `mflr r2`).
+ * Used as the SECTDIFF "subtrahend" for every PIC access in the
+ * function body. Valid only after ppc_func_pic_base_emitted=1. */
+static int ppc_func_pic_base_anchor;
+
+/* Side table: maps a reloc's r_offset (within cur_text_section) to
+ * the per-function anchor offset, so ppc-macho.c can compute
+ * (slot - anchor) for the SECTDIFF reloc record. We keep one global
+ * table for the whole translation unit; entries accumulate across
+ * functions and are flushed by ppc_pic_pairs_reset(). */
+struct ppc_pic_pair {
+    int reloc_off;   /* byte offset of the relocated insn within text */
+    int anchor_off;  /* byte offset of the PIC anchor within text     */
+};
+ST_DATA struct ppc_pic_pair *ppc_pic_pairs;
+ST_DATA int ppc_pic_pairs_n;
+ST_DATA int ppc_pic_pairs_cap;
+
+ST_FUNC void ppc_pic_pairs_reset(void)
+{
+    ppc_pic_pairs_n = 0;
+}
+
+ST_FUNC int ppc_pic_pairs_lookup(int reloc_off)
+{
+    int i;
+    for (i = 0; i < ppc_pic_pairs_n; i++)
+        if (ppc_pic_pairs[i].reloc_off == reloc_off)
+            return ppc_pic_pairs[i].anchor_off;
+    return -1;
+}
+
+static void ppc_pic_pair_record(int reloc_off, int anchor_off)
+{
+    if (ppc_pic_pairs_n >= ppc_pic_pairs_cap) {
+        ppc_pic_pairs_cap = ppc_pic_pairs_cap ? ppc_pic_pairs_cap * 2 : 64;
+        ppc_pic_pairs = tcc_realloc(ppc_pic_pairs,
+                                    ppc_pic_pairs_cap * sizeof(*ppc_pic_pairs));
+    }
+    ppc_pic_pairs[ppc_pic_pairs_n].reloc_off = reloc_off;
+    ppc_pic_pairs[ppc_pic_pairs_n].anchor_off = anchor_off;
+    ppc_pic_pairs_n++;
+}
+
+/* Decide whether a given symbol reference needs PIC indirection.
+ *
+ * Returns 1 if we must emit (addis/lwz via __nl_symbol_ptr); 0 if a
+ * direct R_PPC_ADDR16_HA/LO pair is fine.
+ *
+ * Conditions for PIC:
+ *   - We're producing a Mach-O .o (TCC_OUTPUT_OBJ on PPC/MACHO)
+ *   - The symbol is global *and* will end up undefined in our object
+ *     (i.e. an actual extern, not a local static or a definition we
+ *      emit ourselves).
+ *
+ * For -run mode (TCC_OUTPUT_MEMORY) we keep the direct path: the
+ * runtime resolves symbol addresses directly into the instruction
+ * via R_PPC_ADDR16_HA/LO at JIT time — no dyld involved.
+ */
+static int ppc_need_pic_for_sym(Sym *sym)
+{
+#if defined(TCC_TARGET_MACHO)
+    ElfSym *esym;
+    if (!sym)
+        return 0;
+    if (tcc_state->output_type != TCC_OUTPUT_OBJ)
+        return 0;
+    /* Ensure sym has been pushed to the elf symtab so we can inspect
+     * its st_shndx. greloc() does this on demand, but we want to
+     * decide BEFORE emitting anything. */
+    if (!sym->c)
+        put_extern_sym(sym, NULL, 0, 0);
+    esym = elfsym(sym);
+    if (!esym)
+        return 0;
+    /* Only externals. Defined-locally symbols (rodata FP literals,
+     * static globals, locally-defined functions) keep the direct path. */
+    if (esym->st_shndx != SHN_UNDEF)
+        return 0;
+    /* COMMON symbols (uninitialized globals without an explicit
+     * extern) are tentative-defined and should be emitted by us;
+     * they're still in our object so direct ADDR16 works.
+     * SHN_COMMON has st_shndx > SHN_UNDEF so the test above already
+     * excludes them. */
+    return 1;
+#else
+    (void)sym;
+    return 0;
+#endif
+}
+
+/* Emit the 4-instruction PIC base setup once per function. After
+ * this runs, r30 holds the address of the `mflr r30` instruction
+ * itself (because `bcl 20,31,.+4` sets LR to the address of the
+ * NEXT instruction, which is `mflr r30`). That address is our PIC
+ * anchor, used as the SECTDIFF subtrahend for every PIC ref.
+ *
+ * r30 is callee-saved -- saved at function entry by the prologue's
+ * `stw r30, frame_size-8(r1)` and restored by the epilogue's matching
+ * `lwz r30, ...` -- so the PIC base survives intervening function
+ * calls. */
+static void ppc_emit_pic_base_setup(void)
+{
+    /* mflr r0           -- save caller's LR (we mustn't clobber it) */
+    o(0x7c0802a6);
+    /* bcl 20, 31, .+4   -- "branch and link" to next insn; LR := ind */
+    o(0x429f0005);
+    /* The anchor is the address of the NEXT instruction (mflr r30),
+     * because that's the value `bcl` wrote to LR. Capture `ind` BEFORE
+     * emitting `mflr r30`. */
+    ppc_func_pic_base_anchor = ind;
+    /* mflr r30          -- r30 = LR = anchor address */
+    o(0x7c0802a6 | (PPC_PIC_BASE_REG << 21));
+    /* mtlr r0           -- restore caller's LR */
+    o(0x7c0803a6);
+    ppc_func_pic_base_emitted = 1;
+}
+
+/* Emit the addis+lwz pair that loads the *address* of an external
+ * data symbol into `addr_gpr`, going through __nl_symbol_ptr.
+ * Records the per-insn anchor offsets for ppc-macho.c to translate
+ * R_PPC_HA16_PIC / R_PPC_LO16_PIC into HA16_SECTDIFF / LO16_SECTDIFF. */
+static void ppc_emit_pic_addr_load(int addr_gpr, Sym *sym)
+{
+    int reloc_off;
+
+    if (!ppc_func_pic_base_emitted)
+        ppc_emit_pic_base_setup();
+
+    /* addis addr_gpr, r2, 0   -- placeholder; HA16_PIC reloc fills imm */
+    reloc_off = ind;
+    greloc(cur_text_section, sym, ind, R_PPC_HA16_PIC);
+    ppc_pic_pair_record(reloc_off, ppc_func_pic_base_anchor);
+    o(0x3c000000 | (addr_gpr << 21) | (PPC_PIC_BASE_REG << 16));
+
+    /* lwz addr_gpr, 0(addr_gpr) -- placeholder; LO16_PIC reloc fills imm */
+    reloc_off = ind;
+    greloc(cur_text_section, sym, ind, R_PPC_LO16_PIC);
+    ppc_pic_pair_record(reloc_off, ppc_func_pic_base_anchor);
+    o(0x80000000 | (addr_gpr << 21) | (addr_gpr << 16));
+}
+
 ST_FUNC void gfunc_prolog(Sym *func_sym)
 {
     CType *func_type = &func_sym->type;
@@ -1078,11 +1422,17 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
      * (one stfs/stfd per FP param). Unused slots become nops. */
     ind += PPC_PROLOG_SIZE + 8 * 4;
     func_sub_sp_offset = ind;
-    /* loc=-4 reserves the FP-save slot at r31-4. User locals (and
-     * spilled register parameters) start at loc=-8. */
-    loc = -4;
+    /* loc=-4 reserves the FP-save slot at r31-4 (saved r31).
+     * loc=-8 reserves the PIC-base-save slot at r31-8 (saved r30).
+     * User locals (and spilled register parameters) start at loc=-12. */
+    loc = -8;
     func_vc = 0;
     ppc_fp_param_count = 0;
+
+    /* PIC base is emitted lazily on first need (only for -c output
+     * with externally-defined data refs). Reset per-function state. */
+    ppc_func_pic_base_emitted = 0;
+    ppc_func_pic_base_anchor = 0;
 
     /* Apple PPC ABI: all 8 GPR arg slots (r3..r10) get spilled to
      * the caller's parameter save area in our prologue. Body code
@@ -1145,6 +1495,7 @@ ST_FUNC void gfunc_epilog(void)
     addr_t saved_ind;
     int frame_size = ppc_frame_size();
     int fp_save_off = frame_size - 4;  /* offset of saved-r31 slot from new SP */
+    int pic_save_off = frame_size - 8; /* offset of saved-r30 slot from new SP */
 
     /* Note: tccgen.c already calls gsym(rsym) before invoking us
      * (see tccgen.c around `gsym(rsym); nocode_wanted = 0;` just
@@ -1153,12 +1504,14 @@ ST_FUNC void gfunc_epilog(void)
      * touch rsym here. */
 
     /* Epilogue:
+     *   lwz  r30, pic_save_off(r1)  ; restore PIC base reg
      *   lwz  r31, fp_save_off(r1)
      *   addi r1, r1, frame_size
      *   lwz  r0, 8(r1)
      *   mtlr r0
      *   blr
      */
+    o(0x80000000 | (PPC_PIC_BASE_REG << 21) | (1 << 16) | (pic_save_off & 0xffff));
     o(0x80000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
     o(0x38210000 | (frame_size & 0xffff));
     o(0x80010008);
@@ -1214,6 +1567,10 @@ ST_FUNC void gfunc_epilog(void)
     o(0x94210000 | ((-frame_size) & 0xffff));
     /* stw r31, fp_save_off(r1) */
     o(0x90000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
+    /* stw r30, pic_save_off(r1) -- save PIC base register so we
+     * can clobber it freely in the function body and restore in
+     * the epilogue. */
+    o(0x90000000 | (PPC_PIC_BASE_REG << 21) | (1 << 16) | (pic_save_off & 0xffff));
     /* addi r31, r1, frame_size */
     o(0x38000000 | (PPC_FP_REG << 21) | (1 << 16) | (frame_size & 0xffff));
     ind = saved_ind;

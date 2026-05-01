@@ -19,6 +19,20 @@
 #define R_COPY          R_PPC_COPY
 #define R_RELATIVE      R_PPC_RELATIVE
 
+/* Synthetic relocation types used internally by the PowerPC backend
+ * to mark a PIC-base-relative reference to a __nl_symbol_ptr slot for
+ * an external data symbol. ppc-gen.c emits these; ppc-macho.c
+ * translates them to scattered HA16_SECTDIFF / LO16_SECTDIFF + PAIR
+ * record sequences for ld(1). They never appear in -run mode (PIC is
+ * only emitted when output_type == TCC_OUTPUT_OBJ).
+ *
+ * Numeric values chosen to avoid collisions with the highest real
+ * R_PPC_* codes (currently up to 255 = R_PPC_TOC16). 200 and 201
+ * sit comfortably in the gap between the DIAB extensions (~185)
+ * and IRELATIVE (248). */
+#define R_PPC_HA16_PIC  200
+#define R_PPC_LO16_PIC  201
+
 /* PPC has no upstream R_PPC_NUM in elf.h; the highest base reloc we use
  * is 36 (R_PPC_SECTOFF_HA). 256 leaves comfortable room without colliding
  * with the high (>= 67) TLS / REL16 ranges. */
@@ -46,6 +60,8 @@ ST_FUNC int code_reloc(int reloc_type)
         case R_PPC_GLOB_DAT:
         case R_PPC_COPY:
         case R_PPC_RELATIVE:
+        case R_PPC_HA16_PIC:
+        case R_PPC_LO16_PIC:
             return 0;
         case R_PPC_REL24:
         case R_PPC_REL14:
@@ -67,6 +83,8 @@ ST_FUNC int gotplt_entry_type(int reloc_type)
         case R_PPC_GLOB_DAT:
         case R_PPC_COPY:
         case R_PPC_JMP_SLOT:
+        case R_PPC_HA16_PIC:
+        case R_PPC_LO16_PIC:
             return NO_GOTPLT_ENTRY;
         case R_PPC_ADDR32:
         case R_PPC_REL24:
@@ -162,6 +180,17 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
         ppc_link_write32be(ptr, (orig & ~0xffff) | lo);
         return;
     }
+
+    case R_PPC_HA16_PIC:
+    case R_PPC_LO16_PIC:
+        /* Synthetic PIC relocations are only emitted for Mach-O .o
+         * output (TCC_OUTPUT_OBJ); they should never reach this path
+         * in -run / -shared / executable output. If we get here it
+         * almost certainly indicates a bug -- something emitted a PIC
+         * reloc in a non-OBJ output. Surface it loudly. */
+        tcc_error_noabort("ppc-link: R_PPC_HA16_PIC/LO16_PIC encountered "
+                          "in non-OBJ output (type=%d)", type);
+        return;
 
     default:
         tcc_error_noabort("ppc-link: relocate type 0x%x not implemented "
