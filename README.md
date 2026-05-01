@@ -3,13 +3,12 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: SELF-HOSTING.** TCC has never had a PowerPC backend in
-any release. As of [session 020](docs/sessions/020-self-host/README.md),
-tcc-built-by-tcc compiles `tcc.c` into a `.o` byte-identical to its
-own — the canonical self-host fixpoint, on a 22-year-old G3. The
-remaining work is packaging: bundle libtcc1 helpers into
-`tcc/lib/`, predefine a couple of compiler macros, ship a
-`/opt`-installable tarball.
+**Status: v0.1.0-g3 SHIPPED.** TCC has never had a PowerPC backend
+in any release. As of session [020](docs/sessions/020-self-host/README.md),
+tcc-built-by-tcc compiles `tcc.c` into a `.o` byte-identical to
+its own — the canonical self-host fixpoint, on a 22-year-old G3.
+A `/opt`-installable tarball is built end-to-end by
+`scripts/build-release-tarball.sh` ([022](docs/sessions/022-v0.1.0-g3-release/README.md)).
 
 ## Status
 
@@ -37,7 +36,7 @@ remaining work is packaging: bundle libtcc1 helpers into
 | ✅ | **BE long-long handling fixed — tcc-self compiles real programs** ([019](docs/sessions/019-be-ll-fixes/README.md)) |
 | ✅ | **🎉 SELF-HOST FIXPOINT — tcc-self2 compiles tcc.c into a byte-identical .o** ([020](docs/sessions/020-self-host/README.md)) |
 | ✅ | Self-contained self-host (libtcc1.a bundles `__floatundidf`; predefined `__FLT_EVAL_METHOD__`) ([021](docs/sessions/021-libtcc1-and-predefs/README.md)) |
-| ⏳ | G3 tarball (`v0.1.0-g3`) |
+| ✅ | **`v0.1.0-g3` tarball — `/opt`-installable, ~146 KB, verified on iMac G3** ([022](docs/sessions/022-v0.1.0-g3-release/README.md)) |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
