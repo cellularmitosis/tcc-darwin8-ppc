@@ -7873,10 +7873,43 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
                 write16le(ptr, val);
 		break;
 	    case VT_FLOAT:
+#if defined TCC_TARGET_PPC
+                /* PPC is big-endian. Use c.f directly (the actual host
+                 * float bytes) and write MSB-first.  Note: the "low 32
+                 * bits of val" trick used elsewhere doesn't work on a
+                 * big-endian host because the low 4 bytes of a uint64_t
+                 * union member are the OPPOSITE 4 bytes from the float. */
+                {
+                    union { float f; uint32_t u; } cv;
+                    unsigned char *q = (unsigned char *)ptr;
+                    cv.f = vtop->c.f;
+                    q[0] = (cv.u >> 24) & 0xff;
+                    q[1] = (cv.u >> 16) & 0xff;
+                    q[2] = (cv.u >> 8)  & 0xff;
+                    q[3] = cv.u & 0xff;
+                }
+#else
                 write32le(ptr, val);
+#endif
 		break;
 	    case VT_DOUBLE:
+#if defined TCC_TARGET_PPC
+                {
+                    union { double d; uint64_t u; } cv;
+                    unsigned char *q = (unsigned char *)ptr;
+                    cv.d = vtop->c.d;
+                    q[0] = (cv.u >> 56) & 0xff;
+                    q[1] = (cv.u >> 48) & 0xff;
+                    q[2] = (cv.u >> 40) & 0xff;
+                    q[3] = (cv.u >> 32) & 0xff;
+                    q[4] = (cv.u >> 24) & 0xff;
+                    q[5] = (cv.u >> 16) & 0xff;
+                    q[6] = (cv.u >> 8)  & 0xff;
+                    q[7] = cv.u & 0xff;
+                }
+#else
                 write64le(ptr, val);
+#endif
 		break;
 	    case VT_LDOUBLE:
 #if defined TCC_IS_NATIVE_387
