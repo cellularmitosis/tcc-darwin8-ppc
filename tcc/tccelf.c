@@ -3231,6 +3231,20 @@ ST_FUNC int tcc_object_type(int fd, ElfW(Ehdr) *h)
             return AFF_BINTYPE_C67;
 #endif
     }
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+    /* Classic Mach-O on big-endian PPC: magic 0xfeedface (read as
+     * `0xfe 0xed 0xfa 0xce` byte sequence). filetype is the 4th
+     * 32-bit big-endian word (offset 12). */
+    if (size >= 16) {
+        const unsigned char *b = (const unsigned char *)h;
+        uint32_t magic = ((uint32_t)b[0]<<24)|((uint32_t)b[1]<<16)
+                       | ((uint32_t)b[2]<<8) |((uint32_t)b[3]);
+        uint32_t ftype = ((uint32_t)b[12]<<24)|((uint32_t)b[13]<<16)
+                       | ((uint32_t)b[14]<<8) |((uint32_t)b[15]);
+        if (magic == 0xfeedface && ftype == 1 /* MH_OBJECT */)
+            return AFF_BINTYPE_MACHO_REL;
+    }
+#endif
     return 0;
 }
 

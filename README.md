@@ -64,10 +64,14 @@ In addition to the codegen, this requires extending TCC's
 - PowerPC ISA is genuinely pleasant — a fixed-size 32-bit
   instruction set with a clean RISC dispatch model.
 
-## Building (G3, Tiger)
+## Building (G3 / G4, Tiger)
+
+Primary dev host is **`ibookg37`** (300 MHz faster than the iMac G3
+the project started on; both run Tiger 10.4.11 with the same gcc-4.0
++ libSystem + dyld).
 
 ```sh
-ssh imacg3
+ssh ibookg37
 git clone <this-repo> ~/tcc-darwin8-ppc
 cd ~/tcc-darwin8-ppc/tcc
 ./configure --config-semlock=no

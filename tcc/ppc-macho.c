@@ -2970,6 +2970,668 @@ cleanup:
 }
 
 /* ====================================================================
+ * Mach-O .o reader
+ *
+ * Reads classic Mach-O MH_OBJECT files (e.g. /usr/lib/crt1.o) and
+ * merges their contents into tcc's internal section/symbol/relocation
+ * tables. tcc's link-time machinery (relocate_syms, the EXE writer)
+ * then handles the merged content like any other input.
+ *
+ * Sections we map into tcc's ELF-style section list:
+ *   __TEXT,__text     -> .text   (SHT_PROGBITS, SHF_ALLOC|SHF_EXECINSTR)
+ *   __TEXT,__const    -> .rodata (SHT_PROGBITS, SHF_ALLOC)
+ *   __TEXT,__cstring  -> .rodata
+ *   __DATA,__data     -> .data   (SHT_PROGBITS, SHF_ALLOC|SHF_WRITE)
+ *   __DATA,__bss      -> .bss    (SHT_NOBITS,   SHF_ALLOC|SHF_WRITE)
+ *   __DATA,__dyld     -> .data   (8-byte placeholder; dyld fills)
+ *
+ * Sections we IGNORE (re-synthesized by our EXE writer):
+ *   __TEXT,__symbol_stub*  - the input's stubs aren't reusable
+ *   __DATA,__nl_symbol_ptr - same
+ *   __DATA,__la_symbol_ptr - same
+ *
+ * For relocations targeting one of the IGNORED stub/lazy-ptr sections,
+ * we use the input's indirect symbol table to find the underlying
+ * extern symbol and rewrite the reloc to target that symbol directly.
+ * Our existing extern-stub / nl-ptr machinery in macho_output_exe will
+ * then synthesize fresh stubs/slots for them.
+ *
+ * Mach-O reloc -> ELF reloc translation:
+ *   PPC_RELOC_VANILLA(len=2)        -> R_PPC_ADDR32
+ *   PPC_RELOC_BR24                  -> R_PPC_REL24
+ *   PPC_RELOC_BR14                  -> R_PPC_REL14
+ *   PPC_RELOC_HA16 (+PAIR)          -> R_PPC_ADDR16_HA
+ *   PPC_RELOC_LO16 (+PAIR)          -> R_PPC_ADDR16_LO
+ *   PPC_RELOC_HI16 (+PAIR)          -> R_PPC_ADDR16_HI
+ *   PPC_RELOC_JBSR (+PAIR)          -> R_PPC_REL24 (the long-branch
+ *                                      island flavor; we take the
+ *                                      direct REL24 form for now)
+ *   PPC_RELOC_SECTDIFF*             -> SKIPPED (only used inside the
+ *                                      stub/la_ptr sections we discard)
+ *   scattered relocs                -> handled per the bit pattern;
+ *                                      most appear inside discarded
+ *                                      sections so we skip them.
+ * ================================================================== */
+
+/* On-disk Mach-O reading helpers. We read 32-bit big-endian fields
+ * from a flat byte buffer so we don't depend on host endianness. */
+static uint32_t mach_get32(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] <<  8) |  (uint32_t)p[3];
+}
+
+static uint16_t mach_get16(const unsigned char *p)
+{
+    return (uint16_t)((p[0] << 8) | p[1]);
+}
+
+/* Mach-O nlist (12 bytes per entry):
+ *   uint32_t n_strx
+ *   uint8_t  n_type
+ *   uint8_t  n_sect
+ *   int16_t  n_desc
+ *   uint32_t n_value
+ */
+struct mach_nlist {
+    uint32_t n_strx;
+    uint8_t  n_type;
+    uint8_t  n_sect;
+    int16_t  n_desc;
+    uint32_t n_value;
+};
+
+/* Mach-O section header (68 bytes): we keep the few fields we use. */
+struct mach_section {
+    char     sectname[16];
+    char     segname[16];
+    uint32_t addr;
+    uint32_t size;
+    uint32_t offset;
+    uint32_t align;
+    uint32_t reloff;
+    uint32_t nreloc;
+    uint32_t flags;
+    uint32_t reserved1;
+    uint32_t reserved2;
+};
+
+/* Parsed indirect-symtab entry (just the symbol index). */
+struct mach_indirect_entry {
+    uint32_t sym_idx;       /* nlist index this slot points to */
+};
+
+/* Determine the tcc section name (and ELF flags) for a Mach-O section.
+ * Returns 0 if we want to skip the section. */
+static int macho_section_to_elf(const char *segname, const char *sectname,
+                                 const char **out_name,
+                                 uint32_t *out_sh_type,
+                                 uint32_t *out_sh_flags)
+{
+    if (!strcmp(segname, "__TEXT") && !strcmp(sectname, "__text")) {
+        *out_name = ".text";
+        *out_sh_type = SHT_PROGBITS;
+        *out_sh_flags = SHF_ALLOC | SHF_EXECINSTR;
+        return 1;
+    }
+    if (!strcmp(segname, "__TEXT")
+        && (!strcmp(sectname, "__const")
+         || !strcmp(sectname, "__cstring"))) {
+        *out_name = ".rodata";
+        *out_sh_type = SHT_PROGBITS;
+        *out_sh_flags = SHF_ALLOC;
+        return 1;
+    }
+    if (!strcmp(segname, "__DATA") && !strcmp(sectname, "__data")) {
+        *out_name = ".data";
+        *out_sh_type = SHT_PROGBITS;
+        *out_sh_flags = SHF_ALLOC | SHF_WRITE;
+        return 1;
+    }
+    if (!strcmp(segname, "__DATA") && !strcmp(sectname, "__bss")) {
+        *out_name = ".bss";
+        *out_sh_type = SHT_NOBITS;
+        *out_sh_flags = SHF_ALLOC | SHF_WRITE;
+        return 1;
+    }
+    if (!strcmp(segname, "__DATA") && !strcmp(sectname, "__dyld")) {
+        /* 8-byte placeholder dyld writes to. We fold it into .data. */
+        *out_name = ".data";
+        *out_sh_type = SHT_PROGBITS;
+        *out_sh_flags = SHF_ALLOC | SHF_WRITE;
+        return 1;
+    }
+    /* Sections that re-synthesize at link time are skipped. */
+    return 0;
+}
+
+/* Per-input bookkeeping for one .o load. */
+struct macho_load_ctx {
+    const unsigned char       *file;        /* whole file in memory */
+    size_t                     file_size;
+    const struct mach_section *sects;       /* parsed section headers */
+    int                        nsec;
+    const struct mach_nlist   *syms;        /* parsed nlist entries */
+    int                        nsyms;
+    const char                *strtab;
+    uint32_t                   strtab_size;
+    /* Mach-O section index (0..nsec-1) -> tcc Section* (or NULL if skipped). */
+    Section                  **sec_to_tcc;
+    /* Mach-O section index -> offset in tcc section (where input data starts). */
+    uint32_t                  *sec_to_off;
+    /* Mach-O sym index -> tcc symbol index (0 if not added). */
+    int                       *sym_old_to_new;
+    /* Indirect symtab for resolving stub/lazy-ptr targets. */
+    const struct mach_indirect_entry *indirect;
+    int                        n_indirect;
+    /* For each section, its starting indirect-symtab offset (= reserved1). */
+    uint32_t                  *sec_indirect_base;
+};
+
+/* Look up the underlying extern symbol that a stub-section/la-ptr
+ * slot points to, via the input's indirect symbol table.
+ *
+ * For example, in crt1.o, __TEXT,__symbol_stub1 has reserved1=0 and
+ * 4 entries, with indirect[0..3] = {_exit, ___keymgr_..., _main, _atexit}.
+ * A reloc that targets a sym defined in __symbol_stub1 at relative
+ * offset N (= stub_idx * stub_size) maps to indirect[reserved1 + N/16].
+ * We return the *Mach-O* sym index (caller will translate to tcc).
+ */
+static int macho_resolve_stub_slot(struct macho_load_ctx *ctx,
+                                    int sect_idx, uint32_t stub_value)
+{
+    const struct mach_section *sec = &ctx->sects[sect_idx];
+    uint32_t entry_size;
+    uint32_t entry_idx;
+    uint32_t indirect_idx;
+    /* For S_SYMBOL_STUBS, reserved2 is the stub size. For
+     * S_(NON_)LAZY_SYMBOL_POINTERS, entries are 4 bytes each. */
+    if ((sec->flags & 0xff) == S_SYMBOL_STUBS)
+        entry_size = sec->reserved2;
+    else
+        entry_size = 4;
+    if (entry_size == 0) entry_size = 4;
+    entry_idx = (stub_value - sec->addr) / entry_size;
+    indirect_idx = sec->reserved1 + entry_idx;
+    if ((int)indirect_idx >= ctx->n_indirect)
+        return -1;
+    return (int)ctx->indirect[indirect_idx].sym_idx;
+}
+
+/* Translate a single Mach-O symbol into tcc's symtab, returning the
+ * new symbol index (or 0 for skipped/anonymous). */
+static int macho_translate_sym(TCCState *s1, struct macho_load_ctx *ctx,
+                                int old_idx)
+{
+    const struct mach_nlist *nl = &ctx->syms[old_idx];
+    const char *name;
+    int n_type = nl->n_type;
+    int is_ext = (n_type & N_EXT) != 0;
+    int basic = n_type & N_TYPE;
+    int sh_num;
+    uint32_t value;
+    int bind, type;
+    int new_idx;
+
+    if (n_type & N_STAB)
+        return 0;       /* debug syms: skip */
+    if (nl->n_strx == 0 || nl->n_strx >= ctx->strtab_size)
+        return 0;
+    name = ctx->strtab + nl->n_strx;
+    if (!name[0])
+        return 0;
+
+    bind = is_ext ? STB_GLOBAL : STB_LOCAL;
+    type = STT_NOTYPE;
+
+    if (basic == N_UNDF) {
+        if (nl->n_value != 0) {
+            /* Common symbol (n_value = size). Allocate space in .bss. */
+            Section *bss;
+            int j;
+            uint32_t off, align;
+            for (j = 1; j < s1->nb_sections; j++) {
+                if (!strcmp(s1->sections[j]->name, ".bss")) break;
+            }
+            if (j < s1->nb_sections) {
+                bss = s1->sections[j];
+            } else {
+                bss = new_section(s1, ".bss", SHT_NOBITS,
+                                   SHF_ALLOC | SHF_WRITE);
+            }
+            align = 4;        /* common syms typically 4-byte align */
+            off = section_add(bss, nl->n_value, align);
+            sh_num = bss->sh_num;
+            value = off;
+        } else {
+            sh_num = SHN_UNDEF;
+            value = 0;
+        }
+    } else if (basic == N_ABS) {
+        sh_num = SHN_ABS;
+        value = nl->n_value;
+    } else if (basic == N_SECT) {
+        Section *s;
+        int sec_idx = nl->n_sect - 1;
+        if (sec_idx < 0 || sec_idx >= ctx->nsec) return 0;
+        s = ctx->sec_to_tcc[sec_idx];
+        if (!s) {
+            /* Symbol points into a section we discarded (stubs / la_ptr).
+             * For these, we expect callers to have used the indirect
+             * symtab to find the underlying extern. We still create an
+             * undef-extern entry so the name resolves; relocs that
+             * target this symbol will get rewritten via
+             * macho_resolve_stub_slot before they're recorded. */
+            sh_num = SHN_UNDEF;
+            value = 0;
+        } else {
+            sh_num = s->sh_num;
+            value = (nl->n_value - ctx->sects[sec_idx].addr)
+                  + ctx->sec_to_off[sec_idx];
+        }
+    } else {
+        return 0;
+    }
+
+    new_idx = set_elf_sym(s1->symtab, value, 0,
+                           ELFW(ST_INFO)(bind, type),
+                           0, sh_num, name);
+    return new_idx;
+}
+
+/* Translate Mach-O relocations for one section into tcc's reloc
+ * table. Per the Mach-O ABI, classic-format relocs come in two flavors:
+ *
+ *   non-scattered (8 bytes, "relocation_info"):
+ *     uint32_t r_address  -- offset within section
+ *     packed:  r_symbolnum:24 r_pcrel:1
+ *              r_length:2 r_extern:1 r_type:4
+ *
+ *   scattered (high bit of first word set, 8 bytes):
+ *     packed:  R_SCATTERED:1 r_pcrel:1 r_length:2
+ *              r_type:4 r_address:24
+ *     uint32_t r_value
+ *
+ * HI16/LO16/HA16 entries are followed by a PAIR entry encoding the
+ * other half of the address (a 16-bit value, not a true address).
+ */
+static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
+                                   int sect_idx)
+{
+    const struct mach_section *sec = &ctx->sects[sect_idx];
+    Section *s = ctx->sec_to_tcc[sect_idx];
+    uint32_t sec_off;
+    uint32_t k;
+    if (!s)
+        return 0;        /* skipped section: no relocs to translate */
+    if (sec->nreloc == 0)
+        return 0;
+    if (sec->reloff + sec->nreloc * 8 > ctx->file_size) {
+        tcc_error_noabort("macho: reloc table out of bounds");
+        return -1;
+    }
+    sec_off = ctx->sec_to_off[sect_idx];
+
+    for (k = 0; k < sec->nreloc; k++) {
+        const unsigned char *r;
+        uint32_t w0, w1, r_address;
+        int scattered, r_pcrel, r_length, r_type, r_extern, r_symnum;
+        int target_old_sym, elf_type, new_sym;
+        int target_sect, file_off;
+        const unsigned char *insn_bytes;
+        uint32_t insn, target_value, pair_w0;
+        uint16_t this_half, other_half;
+        int32_t disp;
+
+        r  = ctx->file + sec->reloff + k * 8;
+        w0 = mach_get32(r);
+        w1 = mach_get32(r + 4);
+        scattered = (w0 & R_SCATTERED) != 0;
+        if (scattered)
+            continue;
+        r_address = w0;
+        r_symnum  = (w1 >> 8) & 0x00ffffff;
+        r_pcrel   = (w1 >> 7) & 0x1;
+        r_length  = (w1 >> 5) & 0x3;
+        r_extern  = (w1 >> 4) & 0x1;
+        r_type    = w1 & 0xf;
+        target_old_sym = -1;
+        elf_type = 0;
+        (void)r_pcrel;
+        if (r_type == PPC_RELOC_PAIR)
+            continue;
+
+        if (r_extern) {
+            target_old_sym = r_symnum;
+        } else {
+            target_sect = r_symnum - 1;
+            if (target_sect < 0 || target_sect >= ctx->nsec) continue;
+            file_off = sec->offset + r_address;
+            if (file_off + 4 > (int)ctx->file_size) continue;
+            insn_bytes = ctx->file + file_off;
+            insn = mach_get32(insn_bytes);
+            target_value = 0;
+            if (r_type == PPC_RELOC_VANILLA && r_length == 2) {
+                target_value = insn;
+            } else if (r_type == PPC_RELOC_BR24 || r_type == PPC_RELOC_JBSR) {
+                disp = insn & 0x03fffffc;
+                if (disp & 0x02000000) disp |= 0xfc000000;
+                target_value = sec->addr + r_address + disp;
+            } else if (r_type == PPC_RELOC_HA16
+                    || r_type == PPC_RELOC_LO16
+                    || r_type == PPC_RELOC_HI16) {
+                pair_w0 = (k + 1 < sec->nreloc) ? mach_get32(r + 8) : 0;
+                this_half  = insn & 0xffff;
+                other_half = pair_w0 & 0xffff;
+                if (r_type == PPC_RELOC_HA16) {
+                    target_value = ((uint32_t)this_half << 16)
+                                 + (int16_t)other_half;
+                } else if (r_type == PPC_RELOC_HI16) {
+                    target_value = ((uint32_t)this_half << 16)
+                                 | (uint32_t)other_half;
+                } else {
+                    target_value = ((uint32_t)other_half << 16)
+                                 + (int16_t)this_half;
+                }
+            } else {
+                continue;
+            }
+
+            /* If target section is one we skipped (stubs / la_ptr),
+             * resolve via the indirect symtab to the underlying
+             * extern. Otherwise we don't yet handle local section
+             * targets — we error out so unhandled cases are visible. */
+            if (!ctx->sec_to_tcc[target_sect]) {
+                int und_sym;
+                und_sym = macho_resolve_stub_slot(ctx, target_sect,
+                                                   target_value);
+                if (und_sym < 0) continue;
+                target_old_sym = und_sym;
+            } else {
+                /* Local section target. Skip for now; this only
+                 * matters for crt1.o's REL24-to-__text (e.g. start
+                 * → __start). We handle those by running pass 2
+                 * before pass 3 so __start is already in our symtab
+                 * with its merged offset; but we currently don't
+                 * have a mechanism to FIND that sym from a section-
+                 * relative reloc. TODO. */
+                continue;
+            }
+        }
+
+        if (target_old_sym < 0 || target_old_sym >= ctx->nsyms) continue;
+        new_sym = ctx->sym_old_to_new[target_old_sym];
+        if (new_sym == 0) {
+            new_sym = macho_translate_sym(s1, ctx, target_old_sym);
+            ctx->sym_old_to_new[target_old_sym] = new_sym;
+        }
+        if (new_sym == 0) continue;
+
+        if (r_type == PPC_RELOC_VANILLA && r_length == 2)
+            elf_type = R_PPC_ADDR32;
+        else if (r_type == PPC_RELOC_BR24 || r_type == PPC_RELOC_JBSR)
+            elf_type = R_PPC_REL24;
+        else if (r_type == PPC_RELOC_HA16)
+            elf_type = R_PPC_ADDR16_HA;
+        else if (r_type == PPC_RELOC_HI16)
+            elf_type = R_PPC_ADDR16_HI;
+        else if (r_type == PPC_RELOC_LO16)
+            elf_type = R_PPC_ADDR16_LO;
+        else
+            continue;
+
+        put_elf_reloc(s1->symtab, s, sec_off + r_address, elf_type, new_sym);
+
+        if (r_type == PPC_RELOC_HA16
+         || r_type == PPC_RELOC_LO16
+         || r_type == PPC_RELOC_HI16
+         || r_type == PPC_RELOC_JBSR)
+            k++;
+    }
+    return 0;
+}
+
+ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
+                                    unsigned long file_offset)
+{
+    unsigned char *file = NULL;
+    off_t fsize;
+    int ret = -1;
+    int i;
+    uint32_t magic, ncmds, sizeofcmds;
+    uint32_t cmd_off;
+    int found_segment = 0, found_symtab = 0;
+    uint32_t symoff = 0, nsyms_count = 0, stroff = 0, strsize = 0;
+    uint32_t indirectsymoff = 0, nindirectsyms = 0;
+    struct mach_section *sects = NULL;
+    int nsec = 0;
+    struct mach_nlist *syms = NULL;
+    int nsyms = 0;
+    char *strtab = NULL;
+    struct mach_indirect_entry *indirect = NULL;
+    struct macho_load_ctx ctx;
+
+    memset(&ctx, 0, sizeof(ctx));
+
+    /* Read the whole file into memory. */
+    lseek(fd, 0, SEEK_END);
+    fsize = lseek(fd, 0, SEEK_CUR);
+    lseek(fd, file_offset, SEEK_SET);
+    if (fsize <= (off_t)file_offset) {
+        tcc_error_noabort("macho: empty file");
+        return -1;
+    }
+    file = tcc_malloc(fsize - file_offset);
+    if (full_read(fd, file, fsize - file_offset) != (ssize_t)(fsize - file_offset)) {
+        tcc_error_noabort("macho: short read");
+        goto cleanup;
+    }
+    ctx.file = file;
+    ctx.file_size = fsize - file_offset;
+
+    if (ctx.file_size < 28) {
+        tcc_error_noabort("macho: file too small for header");
+        goto cleanup;
+    }
+
+    magic = mach_get32(file);
+    if (magic != 0xfeedface) {
+        tcc_error_noabort("macho: bad magic 0x%x", magic);
+        goto cleanup;
+    }
+    ncmds = mach_get32(file + 16);
+    sizeofcmds = mach_get32(file + 20);
+    if (28 + sizeofcmds > ctx.file_size) {
+        tcc_error_noabort("macho: load commands truncated");
+        goto cleanup;
+    }
+
+    /* First pass over load commands: count sections, find LC_SYMTAB
+     * and LC_DYSYMTAB offsets. */
+    cmd_off = 28;
+    for (i = 0; i < (int)ncmds; i++) {
+        uint32_t cmd, cmdsize;
+        if (cmd_off + 8 > 28 + sizeofcmds) break;
+        cmd = mach_get32(file + cmd_off);
+        cmdsize = mach_get32(file + cmd_off + 4);
+        if (cmd == LC_SEGMENT) {
+            uint32_t seg_nsects;
+            if (cmd_off + 56 > ctx.file_size) goto bad;
+            seg_nsects = mach_get32(file + cmd_off + 48);
+            nsec += seg_nsects;
+        } else if (cmd == LC_SYMTAB) {
+            symoff = mach_get32(file + cmd_off + 8);
+            nsyms_count = mach_get32(file + cmd_off + 12);
+            stroff = mach_get32(file + cmd_off + 16);
+            strsize = mach_get32(file + cmd_off + 20);
+            found_symtab = 1;
+        } else if (cmd == LC_DYSYMTAB) {
+            indirectsymoff = mach_get32(file + cmd_off + 56);
+            nindirectsyms = mach_get32(file + cmd_off + 60);
+        }
+        cmd_off += cmdsize;
+    }
+    if (!found_symtab) {
+        tcc_error_noabort("macho: no LC_SYMTAB");
+        goto cleanup;
+    }
+
+    /* Allocate parsed-section table and second pass: collect sections. */
+    sects = tcc_mallocz(nsec * sizeof(*sects));
+    nsec = 0;
+    cmd_off = 28;
+    for (i = 0; i < (int)ncmds; i++) {
+        uint32_t cmd, cmdsize, seg_nsects;
+        int j;
+        if (cmd_off + 8 > 28 + sizeofcmds) break;
+        cmd = mach_get32(file + cmd_off);
+        cmdsize = mach_get32(file + cmd_off + 4);
+        if (cmd == LC_SEGMENT) {
+            seg_nsects = mach_get32(file + cmd_off + 48);
+            for (j = 0; j < (int)seg_nsects; j++) {
+                const unsigned char *sh = file + cmd_off + 56 + j * 68;
+                struct mach_section *m = &sects[nsec++];
+                memcpy(m->sectname, sh, 16);
+                memcpy(m->segname, sh + 16, 16);
+                m->addr      = mach_get32(sh + 32);
+                m->size      = mach_get32(sh + 36);
+                m->offset    = mach_get32(sh + 40);
+                m->align     = mach_get32(sh + 44);
+                m->reloff    = mach_get32(sh + 48);
+                m->nreloc    = mach_get32(sh + 52);
+                m->flags     = mach_get32(sh + 56);
+                m->reserved1 = mach_get32(sh + 60);
+                m->reserved2 = mach_get32(sh + 64);
+            }
+            found_segment = 1;
+        }
+        cmd_off += cmdsize;
+    }
+    if (!found_segment) {
+        tcc_error_noabort("macho: no LC_SEGMENT");
+        goto cleanup;
+    }
+
+    /* Parse symbol table. */
+    nsyms = (int)nsyms_count;
+    if (symoff + nsyms * 12 > ctx.file_size
+     || stroff + strsize > ctx.file_size) {
+        tcc_error_noabort("macho: symtab/strtab out of bounds");
+        goto cleanup;
+    }
+    syms = tcc_mallocz(nsyms * sizeof(*syms));
+    for (i = 0; i < nsyms; i++) {
+        const unsigned char *p = file + symoff + i * 12;
+        syms[i].n_strx  = mach_get32(p);
+        syms[i].n_type  = p[4];
+        syms[i].n_sect  = p[5];
+        syms[i].n_desc  = (int16_t)mach_get16(p + 6);
+        syms[i].n_value = mach_get32(p + 8);
+    }
+    strtab = (char *)file + stroff;
+
+    /* Parse indirect symtab. */
+    if (nindirectsyms) {
+        if (indirectsymoff + nindirectsyms * 4 > ctx.file_size) {
+            tcc_error_noabort("macho: indirect symtab out of bounds");
+            goto cleanup;
+        }
+        indirect = tcc_mallocz(nindirectsyms * sizeof(*indirect));
+        for (i = 0; i < (int)nindirectsyms; i++)
+            indirect[i].sym_idx = mach_get32(file + indirectsymoff + i * 4);
+    }
+
+    /* Wire up the context for helpers. */
+    ctx.sects             = sects;
+    ctx.nsec              = nsec;
+    ctx.syms              = syms;
+    ctx.nsyms             = nsyms;
+    ctx.strtab            = strtab;
+    ctx.strtab_size       = strsize;
+    ctx.indirect          = indirect;
+    ctx.n_indirect        = nindirectsyms;
+    ctx.sec_to_tcc        = tcc_mallocz(nsec * sizeof(*ctx.sec_to_tcc));
+    ctx.sec_to_off        = tcc_mallocz(nsec * sizeof(*ctx.sec_to_off));
+    ctx.sym_old_to_new    = tcc_mallocz(nsyms * sizeof(*ctx.sym_old_to_new));
+
+    /* Pass 1: merge sections into tcc's section list. */
+    for (i = 0; i < nsec; i++) {
+        const struct mach_section *m = &sects[i];
+        const char *name;
+        uint32_t sh_type, sh_flags;
+        Section *s;
+        int j;
+        uint32_t off, align;
+        if (!macho_section_to_elf(m->segname, m->sectname,
+                                   &name, &sh_type, &sh_flags))
+            continue;
+        /* Find or create the matching tcc section. */
+        for (j = 1; j < s1->nb_sections; j++) {
+            if (!strcmp(s1->sections[j]->name, name)) break;
+        }
+        if (j < s1->nb_sections) {
+            s = s1->sections[j];
+        } else {
+            s = new_section(s1, name, sh_type, sh_flags);
+        }
+        align = (uint32_t)1 << m->align;
+        if (align < 1) align = 1;
+        if (sh_type == SHT_NOBITS) {
+            off = section_add(s, m->size, align);
+        } else {
+            off = section_add(s, m->size, align);
+            if (m->offset + m->size <= ctx.file_size && m->size) {
+                memcpy(s->data + off, file + m->offset, m->size);
+            }
+        }
+        if (align > s->sh_addralign) s->sh_addralign = align;
+        ctx.sec_to_tcc[i] = s;
+        ctx.sec_to_off[i] = off;
+    }
+
+    /* Pass 2: pull all named externally-visible symbols and any
+     * symbols defined in our merged sections. (Lazy-add for sym
+     * referenced by relocs but not pre-emitted happens on demand.) */
+    for (i = 1; i < nsyms; i++) {
+        const struct mach_nlist *nl = &syms[i];
+        int basic = nl->n_type & N_TYPE;
+        int is_ext = (nl->n_type & N_EXT) != 0;
+        int new_idx;
+        if (nl->n_type & N_STAB) continue;
+        if (!is_ext && basic != N_SECT) continue;     /* skip locals not in a kept section */
+        if (basic == N_SECT) {
+            int sec_idx = nl->n_sect - 1;
+            if (sec_idx < 0 || sec_idx >= nsec) continue;
+            if (!ctx.sec_to_tcc[sec_idx] && !is_ext) continue;
+        }
+        new_idx = macho_translate_sym(s1, &ctx, i);
+        ctx.sym_old_to_new[i] = new_idx;
+    }
+
+    /* Pass 3: translate relocations. */
+    for (i = 0; i < nsec; i++) {
+        if (!ctx.sec_to_tcc[i]) continue;
+        if (macho_translate_relocs(s1, &ctx, i) < 0)
+            goto cleanup;
+    }
+
+    ret = 0;
+cleanup:
+    if (0) {
+bad:
+        tcc_error_noabort("macho: malformed file");
+    }
+    tcc_free(file);
+    tcc_free(sects);
+    tcc_free(syms);
+    tcc_free(indirect);
+    tcc_free(ctx.sec_to_tcc);
+    tcc_free(ctx.sec_to_off);
+    tcc_free(ctx.sym_old_to_new);
+    return ret;
+}
+
+/* ====================================================================
  * Other exports (unchanged from ppc-macho-stubs.c).
  * ================================================================== */
 

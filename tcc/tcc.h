@@ -1301,6 +1301,7 @@ ST_FUNC int tcc_add_file_internal(TCCState *s1, const char *filename, int flags)
 #define AFF_BINTYPE_DYN 2
 #define AFF_BINTYPE_AR  3
 #define AFF_BINTYPE_C67 4
+#define AFF_BINTYPE_MACHO_REL 5     /* classic Mach-O .o (MH_OBJECT) */
 
 /* return value of tcc_add_file_internal(): 0, -1, or FILE_NOT_FOUND */
 #define FILE_NOT_FOUND -2
@@ -1790,6 +1791,9 @@ PUB_FUNC int tcc_get_dllexports(const char *filename, char **pp);
 ST_FUNC int macho_output_file(TCCState * s1, const char *filename);
 ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev);
 ST_FUNC int macho_load_tbd(TCCState *s1, int fd, const char *filename, int lev);
+#ifdef TCC_TARGET_PPC
+ST_FUNC int macho_load_object_file(TCCState *s1, int fd, unsigned long file_offset);
+#endif
 #ifdef TCC_IS_NATIVE
 ST_FUNC void tcc_add_macos_sdkpath(TCCState* s);
 ST_FUNC char* macho_tbd_soname(int fd);

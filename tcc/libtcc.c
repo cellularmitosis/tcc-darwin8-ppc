@@ -1086,6 +1086,12 @@ static int tcc_add_binary(TCCState *s1, int flags, const char *filename, int fd)
         ret = tcc_load_object_file(s1, fd, 0);
         break;
 
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+    case AFF_BINTYPE_MACHO_REL:
+        ret = macho_load_object_file(s1, fd, 0);
+        break;
+#endif
+
     case AFF_BINTYPE_AR:
         ret = tcc_load_archive(s1, fd, !(flags & AFF_WHOLE_ARCHIVE));
         break;
