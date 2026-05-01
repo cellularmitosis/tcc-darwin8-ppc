@@ -40,6 +40,7 @@
  */
 
 #include "tcc.h"
+#include <sys/stat.h>   /* chmod */
 
 /* Defined in ppc-gen.c. We share this side table so the Mach-O writer
  * can recover the per-function PIC anchor associated with each
@@ -71,6 +72,16 @@ ST_FUNC void ppc_pic_pairs_reset(void);
 #define LC_LOAD_DYLIB           0xc
 #define LC_LOAD_DYLINKER        0xe
 #define LC_UNIXTHREAD           0x5
+
+/* MH_EXECUTE filetype + flags. */
+#define MH_EXECUTE              2
+#define MH_NOUNDEFS             0x1
+#define MH_DYLDLINK             0x4
+#define MH_TWOLEVEL             0x80
+
+/* PPC thread state (for LC_UNIXTHREAD; matches /usr/include/mach/ppc/thread_status.h). */
+#define PPC_THREAD_STATE        1
+#define PPC_THREAD_STATE_COUNT  40
 
 /* VM protections. */
 #define VM_PROT_READ            0x1
@@ -1069,6 +1080,438 @@ static void free_symtab(struct symtab_build *sb)
  * actually serialize.
  * ================================================================== */
 
+/* ====================================================================
+ * MH_EXECUTE writer (Phase A)
+ *
+ * Writes a self-contained Mach-O executable for the simplest case:
+ * a single text section, no external/libSystem references, no global
+ * data. Layout:
+ *   __PAGEZERO  vmaddr 0          vmsize 0x1000   no file content
+ *   __TEXT      vmaddr 0x1000     contains header+cmds + .text + crt-shim
+ *   __LINKEDIT  vmaddr next-page  contains symtab+strtab
+ *
+ * The crt-shim is a tiny stub appended to .text:
+ *     bl   _main          ; call user's main
+ *     li   r0, 1          ; SYS_exit
+ *     sc                  ; trap to kernel; r3 = main's return value
+ * Entry point (LC_UNIXTHREAD srr0) is set to the shim.
+ *
+ * Phase B will extend this for libSystem stubs (printf et al.).
+ * ================================================================== */
+
+#define EXE_PAGEZERO_VMSIZE     0x1000
+#define EXE_TEXT_VMADDR_BASE    0x1000
+#define EXE_PAGE_SIZE           0x1000
+
+/* Helper: locate _main's offset within the .text section. Returns -1 if
+ * not found. */
+static int exe_find_main_offset(TCCState *s1, Section *text)
+{
+    int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+    int i;
+    for (i = 1; i < nsyms; i++) {
+        ElfW(Sym) *sym = &((ElfW(Sym) *)s1->symtab->data)[i];
+        const char *name = (char *)s1->symtab->link->data + sym->st_name;
+        /* Names in s1->symtab already have leading underscores on
+         * Mach-O (s1->leading_underscore is set in libtcc.c). */
+        if (sym->st_shndx == text->sh_num && name
+            && (!strcmp(name, "_main") || !strcmp(name, "main")))
+            return (int)sym->st_value;
+    }
+    return -1;
+}
+
+/* Helper: emit the crt-shim into `text` after the user code. The shim:
+ *   bl   _main            (REL24, displacement = main_off - shim_off)
+ *   li   r0, 1            (SYS_exit)
+ *   sc
+ *   trap                  (defensive, sc shouldn't return)
+ * Returns the shim's offset within text (= entry point offset). */
+static int exe_emit_crt_shim(TCCState *s1, unsigned char *text_data,
+                             int *text_size, int main_off)
+{
+    int shim_off = *text_size;
+    int disp;
+    uint32_t bl_word;
+    uint32_t i;
+
+    disp = main_off - shim_off;  /* relative branch displacement */
+    if (disp < -(1 << 25) || disp >= (1 << 25)) {
+        tcc_error_noabort("ppc-macho: crt shim too far from main (disp=0x%x)",
+                          (unsigned)disp);
+        return -1;
+    }
+    /* bl: opcode 18, AA=0, LK=1; displacement in bits 6..29 (4-byte aligned). */
+    bl_word = 0x48000001u | ((uint32_t)disp & 0x03fffffc);
+
+    i = shim_off;
+    text_data[i+0] = (bl_word >> 24) & 0xff;
+    text_data[i+1] = (bl_word >> 16) & 0xff;
+    text_data[i+2] = (bl_word >>  8) & 0xff;
+    text_data[i+3] =  bl_word        & 0xff;
+    /* li r0, 1  -> addi r0, 0, 1 = 0x38000001 */
+    text_data[i+4] = 0x38; text_data[i+5] = 0x00;
+    text_data[i+6] = 0x00; text_data[i+7] = 0x01;
+    /* sc       -> 0x44000002 */
+    text_data[i+8] = 0x44; text_data[i+9] = 0x00;
+    text_data[i+10]= 0x00; text_data[i+11]= 0x02;
+    /* trap (tw 31, 0, 0)  -> 0x7fe00008  (defensive; sc shouldn't return) */
+    text_data[i+12]= 0x7f; text_data[i+13]= 0xe0;
+    text_data[i+14]= 0x00; text_data[i+15]= 0x08;
+
+    *text_size = shim_off + 16;
+    return shim_off;
+}
+
+/* Resolve any internal R_PPC_REL24 relocations in the text section
+ * against the absolute VM addresses of their target symbols. Returns 0
+ * on success, -1 on error (e.g. external reference encountered).
+ *
+ * `text_vmaddr` is the VM address where the text section will be loaded.
+ * Symbols are looked up in s1->symtab; defined symbols get their
+ * st_value + text_vmaddr; undef symbols are an error in Phase A. */
+static int exe_resolve_text_relocs(TCCState *s1, Section *text,
+                                   uint32_t text_vmaddr,
+                                   unsigned char *text_data)
+{
+    Section *rel = text->reloc;
+    int nrel, i;
+    ElfW_Rel *rels;
+    if (!rel || !rel->data_offset)
+        return 0;
+    nrel = rel->data_offset / sizeof(ElfW_Rel);
+    rels = (ElfW_Rel *)rel->data;
+    for (i = 0; i < nrel; i++) {
+        int type = ELFW(R_TYPE)(rels[i].r_info);
+        int symidx = ELFW(R_SYM)(rels[i].r_info);
+        ElfW(Sym) *sym = &((ElfW(Sym) *)s1->symtab->data)[symidx];
+        uint32_t reloc_off = rels[i].r_offset;
+        uint32_t target_addr;
+        uint32_t inst, disp;
+
+        if (sym->st_shndx == SHN_UNDEF) {
+            const char *name = (char *)s1->symtab->link->data + sym->st_name;
+            tcc_error_noabort("ppc-macho: undefined external symbol '%s' "
+                              "in -o exe mode (Phase A doesn't link libSystem)",
+                              name && name[0] ? name : "?");
+            return -1;
+        }
+        if (sym->st_shndx != text->sh_num) {
+            tcc_error_noabort("ppc-macho: cross-section reloc not yet "
+                              "supported in -o exe (sym shndx %d, text %d)",
+                              sym->st_shndx, text->sh_num);
+            return -1;
+        }
+        target_addr = text_vmaddr + sym->st_value;
+
+        switch (type) {
+        case R_PPC_REL24: {
+            int32_t bdisp = (int32_t)(target_addr - (text_vmaddr + reloc_off));
+            if (bdisp < -(1 << 25) || bdisp >= (1 << 25)) {
+                tcc_error_noabort("ppc-macho: REL24 out of range");
+                return -1;
+            }
+            inst = ((uint32_t)text_data[reloc_off] << 24)
+                 | ((uint32_t)text_data[reloc_off+1] << 16)
+                 | ((uint32_t)text_data[reloc_off+2] <<  8)
+                 |  (uint32_t)text_data[reloc_off+3];
+            inst = (inst & ~0x03fffffc) | ((uint32_t)bdisp & 0x03fffffc);
+            text_data[reloc_off+0] = (inst >> 24) & 0xff;
+            text_data[reloc_off+1] = (inst >> 16) & 0xff;
+            text_data[reloc_off+2] = (inst >>  8) & 0xff;
+            text_data[reloc_off+3] =  inst        & 0xff;
+            break;
+        }
+        case R_PPC_ADDR16_HA:
+        case R_PPC_ADDR16_LO:
+        case R_PPC_ADDR32: {
+            uint16_t imm;
+            inst = ((uint32_t)text_data[reloc_off] << 24)
+                 | ((uint32_t)text_data[reloc_off+1] << 16)
+                 | ((uint32_t)text_data[reloc_off+2] <<  8)
+                 |  (uint32_t)text_data[reloc_off+3];
+            (void)disp;
+            if (type == R_PPC_ADDR32) {
+                inst = target_addr;
+            } else if (type == R_PPC_ADDR16_HA) {
+                imm = ((target_addr + 0x8000) >> 16) & 0xffff;
+                inst = (inst & ~0xffff) | imm;
+            } else {  /* R_PPC_ADDR16_LO */
+                imm = target_addr & 0xffff;
+                inst = (inst & ~0xffff) | imm;
+            }
+            text_data[reloc_off+0] = (inst >> 24) & 0xff;
+            text_data[reloc_off+1] = (inst >> 16) & 0xff;
+            text_data[reloc_off+2] = (inst >>  8) & 0xff;
+            text_data[reloc_off+3] =  inst        & 0xff;
+            break;
+        }
+        default:
+            tcc_error_noabort("ppc-macho: reloc type %d not supported in "
+                              "-o exe yet", type);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/* Emit the actual MH_EXECUTE file. Returns 0 on success, -1 on error. */
+static int macho_output_exe(TCCState *s1, const char *filename)
+{
+    obuf out;
+    Section *text = NULL;
+    int main_off, shim_off;
+    int i, ret = -1;
+    FILE *fp = NULL;
+    int fd;
+    uint32_t text_seg_vmaddr = EXE_TEXT_VMADDR_BASE;  /* segment base */
+    uint32_t text_sect_vmaddr;                        /* section base = seg + hdr+cmds */
+    uint32_t text_data_size, text_seg_filesize, text_seg_vmsize;
+    uint32_t linkedit_file_off, linkedit_vmaddr;
+    uint32_t entry_addr;
+    uint32_t hdr_and_lc_size;
+    uint32_t ncmds = 4;          /* PAGEZERO, TEXT, LINKEDIT, SYMTAB, UNIXTHREAD = 5 */
+    /* (actually 5; bumped below) */
+    uint32_t pagezero_cmd_size = 56;     /* segment header sans sections */
+    uint32_t text_seg_cmd_size = 56 + 68; /* segment header + 1 section */
+    uint32_t linkedit_cmd_size = 56;
+    uint32_t symtab_cmd_size   = 24;
+    uint32_t unixthread_cmd_size = 8 + 8 + PPC_THREAD_STATE_COUNT * 4;
+    uint32_t total_cmds_size;
+    obuf nlist, strtab;
+    uint32_t main_str_off, start_str_off;
+    int nsyms_emit = 2;          /* _main + _start */
+    unsigned char *text_data = NULL;
+    int new_text_size;
+
+    memset(&out,    0, sizeof(out));
+    memset(&nlist,  0, sizeof(nlist));
+    memset(&strtab, 0, sizeof(strtab));
+    ncmds = 5;
+
+    /* Locate the .text section. */
+    for (i = 1; i < s1->nb_sections; i++) {
+        if (s1->sections[i]->sh_type == SHT_PROGBITS
+            && (s1->sections[i]->sh_flags & SHF_EXECINSTR)
+            && !strcmp(s1->sections[i]->name, ".text")) {
+            text = s1->sections[i];
+            break;
+        }
+    }
+    if (!text || text->data_offset == 0) {
+        tcc_error_noabort("ppc-macho: empty or missing .text section");
+        return -1;
+    }
+
+    /* Locate _main. */
+    main_off = exe_find_main_offset(s1, text);
+    if (main_off < 0) {
+        tcc_error_noabort("ppc-macho: _main not defined in .text");
+        return -1;
+    }
+
+    /* Compute load-command region size first so we know where the
+     * text section actually lands within the __TEXT segment (right
+     * after the header + load commands). */
+    total_cmds_size = pagezero_cmd_size + text_seg_cmd_size
+                    + linkedit_cmd_size + symtab_cmd_size
+                    + unixthread_cmd_size;
+    hdr_and_lc_size = 28 + total_cmds_size;
+    text_sect_vmaddr = text_seg_vmaddr + hdr_and_lc_size;
+
+    /* Make a writable copy of text + room for the crt shim (16 bytes). */
+    new_text_size = text->data_offset;
+    text_data = tcc_malloc(new_text_size + 16);
+    memcpy(text_data, text->data, new_text_size);
+    memset(text_data + new_text_size, 0, 16);
+
+    /* Resolve REL24 relocations within text (all internal in Phase A). */
+    if (exe_resolve_text_relocs(s1, text, text_sect_vmaddr, text_data) < 0)
+        goto cleanup;
+
+    /* Append crt shim. shim_off is its byte-offset in the section data
+     * (and thus also relative to text_sect_vmaddr). */
+    shim_off = exe_emit_crt_shim(s1, text_data, &new_text_size, main_off);
+    if (shim_off < 0)
+        goto cleanup;
+    text_data_size = (uint32_t)new_text_size;
+    entry_addr = text_sect_vmaddr + (uint32_t)shim_off;
+    /* The text segment needs to start with the header + cmds, then the
+     * actual code. The whole thing fits in the first page (we'll error
+     * out otherwise). */
+    if (hdr_and_lc_size + text_data_size > EXE_PAGE_SIZE) {
+        tcc_error_noabort("ppc-macho: text + headers exceed one page "
+                          "(%u bytes); exe layout needs to span pages "
+                          "(deferred)", hdr_and_lc_size + text_data_size);
+        goto cleanup;
+    }
+    text_seg_filesize = EXE_PAGE_SIZE;       /* round up to page */
+    text_seg_vmsize   = EXE_PAGE_SIZE;
+    linkedit_file_off = EXE_PAGE_SIZE;
+    linkedit_vmaddr   = text_seg_vmaddr + EXE_PAGE_SIZE;
+
+    /* Build minimal symbol table: _main and _start. */
+    obuf_put(&strtab, "", 1);                /* offset 0 = empty */
+    main_str_off = (uint32_t)strtab.len;
+    obuf_put(&strtab, "_main", 6);
+    start_str_off = (uint32_t)strtab.len;
+    obuf_put(&strtab, "_start", 7);
+    /* nlist entries (12 bytes each: n_strx, n_type, n_sect, n_desc, n_value). */
+    /* _main */
+    put32be(&nlist, main_str_off);
+    put8(&nlist, N_SECT | N_EXT);
+    put8(&nlist, 1);                                /* n_sect = 1 (__text) */
+    put8(&nlist, 0); put8(&nlist, 0);                /* n_desc */
+    put32be(&nlist, text_sect_vmaddr + main_off);    /* n_value */
+    /* _start */
+    put32be(&nlist, start_str_off);
+    put8(&nlist, N_SECT | N_EXT);
+    put8(&nlist, 1);
+    put8(&nlist, 0); put8(&nlist, 0);
+    put32be(&nlist, entry_addr);
+
+    /* ---- Mach header. ---- */
+    put32be(&out, MH_MAGIC);
+    put32be(&out, CPU_TYPE_POWERPC);
+    put32be(&out, CPU_SUBTYPE_POWERPC_ALL);
+    put32be(&out, MH_EXECUTE);
+    put32be(&out, ncmds);
+    put32be(&out, total_cmds_size);
+    put32be(&out, MH_NOUNDEFS);              /* no dyld needed for Phase A */
+
+    /* ---- LC_SEGMENT __PAGEZERO ---- */
+    put32be(&out, LC_SEGMENT);
+    put32be(&out, pagezero_cmd_size);
+    {
+        char nm[16] = "__PAGEZERO";
+        obuf_put(&out, nm, 16);
+    }
+    put32be(&out, 0);                        /* vmaddr */
+    put32be(&out, EXE_PAGEZERO_VMSIZE);      /* vmsize */
+    put32be(&out, 0);                        /* fileoff */
+    put32be(&out, 0);                        /* filesize */
+    put32be(&out, 0);                        /* maxprot */
+    put32be(&out, 0);                        /* initprot */
+    put32be(&out, 0);                        /* nsects */
+    put32be(&out, 0);                        /* flags */
+
+    /* ---- LC_SEGMENT __TEXT ---- */
+    put32be(&out, LC_SEGMENT);
+    put32be(&out, text_seg_cmd_size);
+    {
+        char nm[16] = "__TEXT";
+        obuf_put(&out, nm, 16);
+    }
+    put32be(&out, text_seg_vmaddr);
+    put32be(&out, text_seg_vmsize);
+    put32be(&out, 0);                        /* fileoff: start of file */
+    put32be(&out, text_seg_filesize);
+    put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    put32be(&out, VM_PROT_READ | VM_PROT_EXECUTE);
+    put32be(&out, 1);                        /* nsects */
+    put32be(&out, 0);                        /* flags */
+    /* one section: __text */
+    {
+        char nm[16] = "__text";
+        obuf_put(&out, nm, 16);
+    }
+    {
+        char nm[16] = "__TEXT";
+        obuf_put(&out, nm, 16);
+    }
+    put32be(&out, text_sect_vmaddr);                 /* addr */
+    put32be(&out, text_data_size);                  /* size */
+    put32be(&out, hdr_and_lc_size);                 /* offset */
+    put32be(&out, 2);                                /* align (2^2) */
+    put32be(&out, 0);                                /* reloff */
+    put32be(&out, 0);                                /* nreloc */
+    put32be(&out, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS);
+    put32be(&out, 0);                                /* reserved1 */
+    put32be(&out, 0);                                /* reserved2 */
+
+    /* ---- LC_SEGMENT __LINKEDIT ---- */
+    put32be(&out, LC_SEGMENT);
+    put32be(&out, linkedit_cmd_size);
+    {
+        char nm[16] = "__LINKEDIT";
+        obuf_put(&out, nm, 16);
+    }
+    put32be(&out, linkedit_vmaddr);
+    put32be(&out, EXE_PAGE_SIZE);            /* round up vm size */
+    put32be(&out, linkedit_file_off);
+    put32be(&out, (uint32_t)(nlist.len + strtab.len));
+    put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    put32be(&out, VM_PROT_READ);
+    put32be(&out, 0);                        /* nsects */
+    put32be(&out, 0);                        /* flags */
+
+    /* ---- LC_SYMTAB ---- */
+    put32be(&out, LC_SYMTAB);
+    put32be(&out, symtab_cmd_size);
+    put32be(&out, linkedit_file_off);                /* symoff */
+    put32be(&out, nsyms_emit);                       /* nsyms */
+    put32be(&out, linkedit_file_off + (uint32_t)nlist.len);  /* stroff */
+    put32be(&out, (uint32_t)strtab.len);             /* strsize */
+
+    /* ---- LC_UNIXTHREAD with PPC_THREAD_STATE ---- */
+    put32be(&out, LC_UNIXTHREAD);
+    put32be(&out, unixthread_cmd_size);
+    put32be(&out, PPC_THREAD_STATE);
+    put32be(&out, PPC_THREAD_STATE_COUNT);
+    /* PPC_THREAD_STATE storage layout (40 32-bit words):
+     *   srr0, srr1, r0..r31, cr, xer, lr, ctr, mq, vrsave.
+     * (otool's display renames index 0 as "srr0" but prints registers
+     * in a different visual order.) srr0 holds the entry PC. */
+    {
+        int wi;
+        for (wi = 0; wi < PPC_THREAD_STATE_COUNT; wi++) {
+            uint32_t v = 0;
+            if (wi == 0)
+                v = entry_addr;     /* srr0 */
+            put32be(&out, v);
+        }
+    }
+
+    /* ---- Pad to text data offset, then write text. ---- */
+    while (out.len < hdr_and_lc_size)
+        put8(&out, 0);
+    obuf_put(&out, text_data, text_data_size);
+
+    /* ---- Pad to LINKEDIT page, then write nlist + strtab. ---- */
+    while (out.len < linkedit_file_off)
+        put8(&out, 0);
+    obuf_put(&out, nlist.buf, nlist.len);
+    obuf_put(&out, strtab.buf, strtab.len);
+
+    /* ---- Write file. ---- */
+    unlink(filename);
+    fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0755);
+    if (fd < 0 || (fp = fdopen(fd, "wb")) == NULL) {
+        tcc_error_noabort("could not write '%s': %s", filename, strerror(errno));
+        if (fd >= 0) close(fd);
+        goto cleanup;
+    }
+    if (fwrite(out.buf, 1, out.len, fp) != out.len) {
+        tcc_error_noabort("short write to '%s'", filename);
+        goto cleanup;
+    }
+    /* Ensure executable bits. */
+    fclose(fp); fp = NULL;
+    chmod(filename, 0755);
+    if (s1->verbose)
+        printf("<- %s (exe %u bytes, entry 0x%x)\n",
+               filename, (unsigned)out.len, entry_addr);
+    ret = 0;
+
+cleanup:
+    if (fp) fclose(fp);
+    tcc_free(out.buf);
+    tcc_free(nlist.buf);
+    tcc_free(strtab.buf);
+    tcc_free(text_data);
+    return ret;
+}
+
 ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
 {
     obuf out;
@@ -1111,10 +1554,12 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     memset(&indirect_buf, 0, sizeof(indirect_buf));
     memset(&sb, 0, sizeof(sb));
 
-    /* ---- Step 0: only handle MH_OBJECT for now. ---- */
+    /* ---- Step 0: dispatch by output type. ---- */
+    if (s1->output_type == TCC_OUTPUT_EXE)
+        return macho_output_exe(s1, filename);
     if (s1->output_type != TCC_OUTPUT_OBJ) {
-        tcc_error_noabort("ppc-macho: only -c (object output) is "
-                          "implemented; use gcc-4.0 to link");
+        tcc_error_noabort("ppc-macho: only -c (object) and -o exe "
+                          "(executable) outputs are implemented");
         return -1;
     }
 
