@@ -30,7 +30,8 @@ self-hosts on Tiger.
 | ✅ | Structs (member access, pass-by-pointer) ([011](docs/sessions/011-structs/README.md), [demo](demos/s011-struct.c)) |
 | ✅ | Varargs (`<stdarg.h>`, `va_start`/`va_arg`/`va_end`) ([012](docs/sessions/012-varargs/README.md), [demo](demos/s012-varargs.c)) |
 | ✅ | IEEE 754 single + double floating point ([013](docs/sessions/013-floating-point/README.md), [demo](demos/s013-floating-point.c)) |
-| ⏳ | Dylib loading (printf), self-host bootstrap, G3 tarball |
+| 🟡 | **Bootstrap attempt: every tcc source file compiles to .o with our tcc** ([014](docs/sessions/014-bootstrap-attempt/README.md)) — 2 codegen gaps + 1 macho bug remain before self-host links |
+| ⏳ | Dylib loading (printf), G3 tarball |
 | ⏳ | Dylib loading (printf et al), executable output |
 | ❌ | Self-host bootstrap on Tiger |
 | ❌ | G3 tarball |
