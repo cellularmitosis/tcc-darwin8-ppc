@@ -24,6 +24,9 @@ scripts/                — build orchestration, cross-compile wrappers,
                           test runners.
 tests/                  — regression suites we own (separate from tcc's
                           own tests/ subdir).
+demos/                  — one runnable demo per milestone, showcasing
+                          what that milestone unlocked. See
+                          demos/README.md.
 ```
 
 The `tcc/` source is pulled from upstream once and lives in git as
@@ -44,6 +47,28 @@ to a casual reader. We'll defer the status-table format until we
 have something worth showing (e.g. a release that bootstraps tcc on
 Tiger, or the tcc testsuite passing). Until then the README stays
 narrative.
+
+## Demos workflow
+
+Every meaningful milestone ships a small runnable demo under
+`demos/` that proves the new capability. A milestone might be a
+GitHub release, but it might also be a session that lands a
+visibly-new capability (e.g. "tcc -run executes PPC code", "if/while
+loops compile correctly"). Pre-release milestones use
+`demos/sNNN-<slug>.{c,sh}`; once we ship versioned releases, future
+demos go under `demos/v<X>.<Y>.<Z>-<slug>.{c,sh}`.
+
+Each demo:
+- Is a tiny program that compiles and runs end-to-end on a real Tiger
+  G3, with a one-line invocation a reader can paste.
+- Is named by the milestone that introduced the capability it
+  showcases.
+- Has a row in [`demos/README.md`](demos/README.md)'s table linking
+  the source, the runner, the milestone session, and the expected
+  output.
+
+The goal is "someone landing on the repo can scroll demos/ and see
+the project's current capability surface in concrete C, not prose."
 
 ## Sessions workflow
 

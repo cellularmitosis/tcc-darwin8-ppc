@@ -21,16 +21,15 @@ self-hosts on Tiger.
 | ✅ | Baseline builds verified on uranium (host) and imacg3 (target) ([002](docs/sessions/002-baseline-build/README.md)) |
 | ✅ | Backend scaffold — `tcc` builds, runs, preprocesses ([003](docs/sessions/003-backend-scaffold/README.md)) |
 | ✅ | First real PPC instructions emitted, hand-verified ([004](docs/sessions/004-prolog-epilog-return/README.md)) |
-| ✅ | **`tcc -run` executes PPC code on G3, exit codes propagate** ([005](docs/sessions/005-macho-stubs/README.md)) |
-| ⏳ | Local variables, assignment, arithmetic |
-| ⏳ | Branches (`if`, `while`, `for`) |
+| ✅ | **`tcc -run` executes PPC code on G3, exit codes propagate** ([005](docs/sessions/005-macho-stubs/README.md), [demo](demos/s005-return-the-answer.c)) |
+| ✅ | Local variables, assignment, arithmetic, branches ([006](docs/sessions/006-locals-arith-control/README.md), [demo](demos/s006-factorial.c)) |
 | ⏳ | Function calls (Apple PPC ABI) |
 | ⏳ | Floating point |
 | ⏳ | `tccmacho.c` PPC support (real .o output, dylib loading) |
 | ❌ | Self-host bootstrap on Tiger |
 | ❌ | G3 tarball |
 
-[Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/)
+[Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
 ## What this project is
 
