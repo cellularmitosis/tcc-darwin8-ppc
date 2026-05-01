@@ -61,3 +61,30 @@ ST_FUNC char *macho_tbd_soname(int fd)
     (void)fd;
     return NULL;  /* no .tbd parsing yet */
 }
+
+/* tccrun.c calls __clear_cache() to flush the icache after writing
+ * JITted code. Tiger's gcc-4.0 / libgcc don't provide this symbol
+ * (it's a libgcc helper that wasn't shipped with the Apple GCC of
+ * the era); 10.5+ has sys_icache_invalidate() in libkern, but Tiger
+ * predates that. Provide our own using the PPC dcbst/icbi/sync/isync
+ * sequence, one cache line at a time. G3 cache lines are 32 bytes;
+ * we use 32 to be safe across the whole G3/G4/G5 family. */
+#if defined __APPLE__ && defined __ppc__
+void __clear_cache(void *begin, void *end)
+{
+    char *p = (char *)begin;
+    char *e = (char *)end;
+    /* Round to cache-line boundaries. */
+    char *p0 = (char *)((uintptr_t)p & ~31);
+    char *q;
+    /* Step 1: write dirty d-cache lines back to memory. */
+    for (q = p0; q < e; q += 32)
+        __asm__ volatile("dcbst 0, %0" : : "r"(q) : "memory");
+    __asm__ volatile("sync" : : : "memory");
+    /* Step 2: invalidate i-cache lines so they refetch the new code. */
+    for (q = p0; q < e; q += 32)
+        __asm__ volatile("icbi 0, %0" : : "r"(q) : "memory");
+    __asm__ volatile("sync" : : : "memory");
+    __asm__ volatile("isync" : : : "memory");
+}
+#endif

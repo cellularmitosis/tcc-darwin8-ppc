@@ -151,27 +151,47 @@ static unsigned long func_bound_ind;
  * the final frame size. Mirrors i386-gen.c's pattern. */
 static unsigned long func_sub_sp_offset;
 
-/* Apple PPC ABI:
- *   - 24-byte linkage area at top of caller's frame (back-chain,
- *     saved CR, saved LR, three reserved words).
- *   - Stack alignment is 16 bytes.
- *   - Outgoing param area sits above linkage; we don't yet allocate
- *     extra space for it (no calls in v1 codegen).
+/* Apple PPC ABI frame layout. After our prologue:
  *
- * PROLOG_SIZE = 3 instructions = 12 bytes:
+ *   high addr (caller's frame)
+ *   +----+ <-- OLD_SP, our r31 (frame pointer / FP)
+ *   | r31 save (4 bytes)        <-- at r31-4 (i.e., loc=-4 reserved)
+ *   | user locals (loc=-8 down) <-- addressed via offset(r31)
+ *   |    ...
+ *   | 24-byte linkage area
+ *   +----+ <-- NEW_SP, our r1
+ *
+ * r31 is a callee-saved register in the Apple PPC ABI; we save it
+ * to the top of our own frame and use it as a stable frame pointer
+ * for the duration of the function. Locals are addressed at
+ * negative offsets from r31 (matching tcc's `loc` convention from
+ * i386-gen.c).
+ *
+ * Prologue (5 instructions = 20 bytes):
  *   mflr r0
- *   stw  r0, 8(r1)
- *   stwu r1, -frame_size(r1)
+ *   stw  r0, 8(r1)              ; save LR in caller's linkage area
+ *   stwu r1, -frame_size(r1)    ; allocate frame, set back-chain
+ *   stw  r31, frame_size-4(r1)  ; save old r31 at our frame top
+ *   addi r31, r1, frame_size    ; FP = OLD_SP
+ *
+ * Epilogue (5 instructions = 20 bytes):
+ *   lwz  r31, frame_size-4(r1)  ; restore r31 (must precede addi)
+ *   addi r1, r1, frame_size     ; restore SP
+ *   lwz  r0, 8(r1)              ; reload LR from caller's linkage
+ *   mtlr r0
+ *   blr
  */
-#define PPC_PROLOG_SIZE 12
+#define PPC_PROLOG_SIZE 20
 #define PPC_LINKAGE_SIZE 24
 #define PPC_STACK_ALIGN 16
+#define PPC_FP_REG 31
 
 static int ppc_frame_size(void)
 {
-    /* loc is non-positive (locals grow downward). Frame holds
-     * linkage + locals, rounded up to 16. Minimum 32 keeps things
-     * sane for trivial leaf functions. */
+    /* loc is non-positive (locals grow downward). loc=-4 is reserved
+     * for the FP-save slot at the top of the frame. User locals
+     * start at loc=-8. Frame holds linkage + (-loc) bytes of saved-
+     * FP-plus-locals, rounded up to 16. Minimum 32. */
     int n = PPC_LINKAGE_SIZE + (-loc);
     n = (n + PPC_STACK_ALIGN - 1) & -PPC_STACK_ALIGN;
     if (n < 32) n = 32;
@@ -193,7 +213,31 @@ static void ppc_write32be(unsigned char *p, uint32_t v)
     p[3] = v         & 0xff;
 }
 
-/* (ppc_read32be will be added when first needed by ppc-link.c.) */
+static uint32_t ppc_read32be(unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
+}
+
+/* Read the chain-link offset stored in an unconditional `b`
+ * instruction at byte position `pos` and return the absolute
+ * position the link points to (or 0 for end-of-chain). */
+static int ppc_b_chain_decode(int pos)
+{
+    uint32_t w = ppc_read32be(cur_text_section->data + pos);
+    int32_t disp = w & 0x03ffffff;
+    if (disp & 0x02000000) disp |= 0xfc000000;
+    disp &= ~3;
+    return pos + disp;
+}
+
+/* Encode an unconditional `b` whose displacement encodes a chain
+ * link to `target` (target=0 ⇒ end-of-chain). */
+static uint32_t ppc_b_chain(int pos, int target)
+{
+    int32_t disp = target - pos;
+    return 0x48000000u | ((uint32_t)disp & 0x03fffffc);
+}
 
 /* ------------------------------------------------------------------ */
 /* required ST_FUNC API — bodies are stubs in session 003             */
@@ -212,10 +256,18 @@ ST_FUNC void o(unsigned int c)
     ind = ind1;
 }
 
-/* Patch an unresolved jump-list. */
+/* Walk the unresolved-jump chain rooted at `t`, patching each
+ * branch to point at absolute byte position `a`. */
 ST_FUNC void gsym_addr(int t, int a)
 {
-    tcc_error("ppc-gen: gsym_addr stub (t=0x%x a=0x%x)", t, a);
+    while (t) {
+        int next = ppc_b_chain_decode(t);
+        uint8_t *p = cur_text_section->data + t;
+        uint32_t w = ppc_read32be(p);
+        int32_t new_disp = (a - t) & 0x03fffffc;
+        ppc_write32be(p, (w & ~0x03fffffc) | new_disp);
+        t = next;
+    }
 }
 
 /* PPC nop = ori r0, r0, 0 = 0x60000000. */
@@ -253,9 +305,32 @@ ST_FUNC void load(int r, SValue *sv)
 {
     int v = sv->r & VT_VALMASK;
     int gpr;
+    int offset;
 
-    /* v1: only handle integer constant immediate. Everything else
-     * stubs to a clear error message. */
+    /* Value already in a register slot (no VT_LVAL): move-register.
+     * tcc requests this when forcing a value into a specific register
+     * class (e.g. RC_IRET) where it currently lives in some other
+     * register. */
+    if (v < VT_CONST && !(sv->r & VT_LVAL)) {
+        int src = v;
+        if (src == r) return;  /* nothing to do */
+        if (IS_FREG(r) != IS_FREG(src))
+            tcc_error("ppc-gen: cross-bank int<->FP register move not supported");
+        if (IS_FREG(r)) {
+            int dst_fpr = TREG_TO_FPR(r);
+            int src_fpr = TREG_TO_FPR(src);
+            /* fmr fD, fB  --  opcode 63, ext 72 (X-form). */
+            o(0xfc000090 | (dst_fpr << 21) | (src_fpr << 11));
+        } else {
+            int dst_gpr = TREG_TO_GPR(r);
+            int src_gpr = TREG_TO_GPR(src);
+            /* mr rA, rS  =  or rA, rS, rS  --  opcode 31, ext 444. */
+            o(0x7c000378 | (src_gpr << 21) | (dst_gpr << 16) | (src_gpr << 11));
+        }
+        return;
+    }
+
+    /* Integer constant immediate. */
     if (v == VT_CONST && !(sv->r & VT_LVAL) && !(sv->r & VT_SYM)) {
         if (IS_FREG(r)) {
             tcc_error("ppc-gen: load FP constant not yet implemented");
@@ -265,13 +340,89 @@ ST_FUNC void load(int r, SValue *sv)
         return;
     }
 
+    /* Local variable, address taken (rvalue = its address). */
+    if (v == VT_LOCAL && !(sv->r & VT_LVAL)) {
+        if (IS_FREG(r)) tcc_error("ppc-gen: address-of into FP register?");
+        gpr = TREG_TO_GPR(r);
+        offset = (int)sv->c.i;
+        /* addi rD, r31, offset */
+        o(0x38000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+        return;
+    }
+
+    /* Local variable, lvalue read (load from memory at FP+offset). */
+    if (v == VT_LOCAL && (sv->r & VT_LVAL)) {
+        int bt = sv->type.t & VT_BTYPE;
+        offset = (int)sv->c.i;
+        if (IS_FREG(r)) {
+            tcc_error("ppc-gen: FP local load not yet implemented");
+        }
+        gpr = TREG_TO_GPR(r);
+        switch (bt) {
+        case VT_BYTE:
+            /* lbz rD, d(rA) — opcode 34. Sign-extend with extsb if signed. */
+            o(0x88000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            if (!(sv->type.t & VT_UNSIGNED))
+                o(0x7c000774 | (gpr << 21) | (gpr << 16));  /* extsb rA, rS */
+            return;
+        case VT_SHORT:
+            if (sv->type.t & VT_UNSIGNED) {
+                /* lhz — opcode 40 */
+                o(0xa0000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            } else {
+                /* lha — opcode 42 (sign-extending) */
+                o(0xa8000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            }
+            return;
+        case VT_INT:
+        case VT_PTR:
+        case VT_FUNC:
+            /* lwz rD, d(rA) — opcode 32 = 0x80000000 */
+            o(0x80000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            return;
+        default:
+            tcc_error("ppc-gen: load VT_LOCAL of basic type 0x%x not yet supported", bt);
+        }
+    }
+
     tcc_error("ppc-gen: load stub (r=%d sv->r=0x%x type=0x%x val=0x%llx)",
               r, sv->r, sv->type.t, (long long)sv->c.i);
 }
 
 ST_FUNC void store(int r, SValue *sv)
 {
-    tcc_error("ppc-gen: store stub (r=%d)", r);
+    int v = sv->r & VT_VALMASK;
+    int gpr;
+    int offset;
+    int bt = sv->type.t & VT_BTYPE;
+
+    if (v == VT_LOCAL) {
+        offset = (int)sv->c.i;
+        if (IS_FREG(r)) {
+            tcc_error("ppc-gen: store FP local not yet implemented");
+        }
+        gpr = TREG_TO_GPR(r);
+        switch (bt) {
+        case VT_BYTE:
+            /* stb rS, d(rA) — opcode 38 */
+            o(0x98000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            return;
+        case VT_SHORT:
+            /* sth rS, d(rA) — opcode 44 */
+            o(0xb0000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            return;
+        case VT_INT:
+        case VT_PTR:
+        case VT_FUNC:
+            /* stw rS, d(rA) — opcode 36 = 0x90000000 */
+            o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            return;
+        default:
+            tcc_error("ppc-gen: store VT_LOCAL of bt 0x%x not yet supported", bt);
+        }
+    }
+
+    tcc_error("ppc-gen: store stub (r=%d sv->r=0x%x bt=0x%x)", r, sv->r, bt);
 }
 
 ST_FUNC void gfunc_call(int nb_args)
@@ -281,12 +432,12 @@ ST_FUNC void gfunc_call(int nb_args)
 
 ST_FUNC void gfunc_prolog(Sym *func_sym)
 {
-    /* Reserve PROLOG_SIZE bytes at start of function. We backfill
-     * the actual prologue instructions in gfunc_epilog once we
-     * know the final frame size. */
+    /* Reserve PROLOG_SIZE bytes for backfill in gfunc_epilog. */
     ind += PPC_PROLOG_SIZE;
-    func_sub_sp_offset = ind;  /* points just past reserved prologue */
-    loc = 0;
+    func_sub_sp_offset = ind;
+    /* loc=-4 reserves the FP-save slot at r31-4. User locals begin
+     * at loc=-8 after tcc's first allocation. */
+    loc = -4;
     func_vc = 0;
     /* No parameter unpacking in v1 (no params supported yet). */
     (void)func_sym;
@@ -296,19 +447,22 @@ ST_FUNC void gfunc_epilog(void)
 {
     addr_t saved_ind;
     int frame_size = ppc_frame_size();
+    int fp_save_off = frame_size - 4;  /* offset of saved-r31 slot from new SP */
 
-    /* Patch any pending return-jumps to land here. */
-    if (rsym) {
-        gsym(rsym);
-        rsym = 0;
-    }
+    /* Note: tccgen.c already calls gsym(rsym) before invoking us
+     * (see tccgen.c around `gsym(rsym); nocode_wanted = 0;` just
+     * before gfunc_epilog), so any pending return-jumps have
+     * already been patched to land at our current ind. We don't
+     * touch rsym here. */
 
-    /* Emit epilogue at current ind:
+    /* Epilogue:
+     *   lwz  r31, fp_save_off(r1)
      *   addi r1, r1, frame_size
      *   lwz  r0, 8(r1)
      *   mtlr r0
      *   blr
      */
+    o(0x80000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
     o(0x38210000 | (frame_size & 0xffff));
     o(0x80010008);
     o(0x7c0803a6);
@@ -323,6 +477,10 @@ ST_FUNC void gfunc_epilog(void)
     o(0x90010008);
     /* stwu r1, -frame_size(r1) */
     o(0x94210000 | ((-frame_size) & 0xffff));
+    /* stw r31, fp_save_off(r1) */
+    o(0x90000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
+    /* addi r31, r1, frame_size */
+    o(0x38000000 | (PPC_FP_REG << 21) | (1 << 16) | (frame_size & 0xffff));
     ind = saved_ind;
 }
 
@@ -338,32 +496,182 @@ ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret,
     return 0;
 }
 
+/* Unconditional branch with chain link to `t`. Returns the position
+ * of the emitted branch (the new chain head). */
 ST_FUNC int gjmp(int t)
 {
-    tcc_error("ppc-gen: gjmp stub (t=%d)", t);
-    return 0;
+    int r;
+    if (nocode_wanted)
+        return t;
+    r = ind;
+    o(ppc_b_chain(r, t));
+    return r;
 }
 
+/* Unconditional branch to a fixed (already-known) byte address. */
 ST_FUNC void gjmp_addr(int a)
 {
-    tcc_error("ppc-gen: gjmp_addr stub (a=0x%x)", a);
+    int32_t disp = a - ind;
+    o(0x48000000u | ((uint32_t)disp & 0x03fffffc));
 }
 
+/* Append chain `n` to chain `t` and return the merged head. */
 ST_FUNC int gjmp_append(int n, int t)
 {
-    tcc_error("ppc-gen: gjmp_append stub");
-    return 0;
+    if (n) {
+        int lp = n;
+        int p = ppc_b_chain_decode(lp);
+        while (p) {
+            lp = p;
+            p = ppc_b_chain_decode(lp);
+        }
+        /* lp is the chain terminator; patch it to point at t. */
+        uint8_t *q = cur_text_section->data + lp;
+        uint32_t w = ppc_read32be(q);
+        int32_t new_disp = (t - lp) & 0x03fffffc;
+        ppc_write32be(q, (w & ~0x03fffffc) | new_disp);
+        t = n;
+    }
+    return t;
 }
 
+/* Conditional branch. Pattern: `bc <skip>, .+8 ; b <chain>` so that
+ * the chained instruction is always a 24-bit `b` (one chain encoding
+ * to maintain). Cost: 1 extra instruction per conditional vs. using
+ * `bc`'s 14-bit BD field directly. Worth it for simplicity until we
+ * grow large enough functions to need BD-direct.
+ *
+ * `op` is a tcc TOK_EQ..TOK_GT comparison; we emit the bc that
+ * SKIPS the chained b when the condition is FALSE (i.e., when we
+ * shouldn't take the branch). */
 ST_FUNC int gjmp_cond(int op, int t)
 {
-    tcc_error("ppc-gen: gjmp_cond stub (op=0x%x)", op);
-    return 0;
+    int r;
+    int take_bo, bi;
+
+    /* Map op -> (BO, BI) for "branch if op holds". BI selects the
+     * cr0 bit: 0=LT, 1=GT, 2=EQ. BO=12 means take when bit is set,
+     * BO=4 means take when bit is clear. */
+    switch (op) {
+    case TOK_EQ:                take_bo = 12; bi = 2; break;
+    case TOK_NE:                take_bo = 4;  bi = 2; break;
+    case TOK_LT: case TOK_ULT:  take_bo = 12; bi = 0; break;
+    case TOK_GE: case TOK_UGE:  take_bo = 4;  bi = 0; break;
+    case TOK_GT: case TOK_UGT:  take_bo = 12; bi = 1; break;
+    case TOK_LE: case TOK_ULE:  take_bo = 4;  bi = 1; break;
+    default:
+        tcc_error("ppc-gen: gjmp_cond op 0x%x not supported", op);
+        return t;
+    }
+
+    if (nocode_wanted)
+        return t;
+
+    /* bc <inverted-BO>, BI, .+8  -- skip the next 4-byte b if
+     * we should NOT take the branch. */
+    o(0x40000000u | ((take_bo ^ 8) << 21) | (bi << 16) | 8);
+
+    /* b <chain-to-t>  -- taken if condition holds. */
+    r = ind;
+    o(ppc_b_chain(r, t));
+    return r;
 }
 
+/* Two-register integer ops. Result goes into vtop[-1]'s slot;
+ * vtop[0] is consumed.
+ *
+ * PPC has two main encoding shapes for these:
+ *   XO-form arithmetic (add/sub/mul):  rD at 21..25, rA at 16..20, rB at 11..15
+ *   X-form logical / shift:            rS at 21..25, rA(=dst) at 16..20, rB at 11..15
+ */
 ST_FUNC void gen_opi(int op)
 {
-    tcc_error("ppc-gen: gen_opi stub (op=0x%x)", op);
+    int ra_slot, rb_slot, ra_gpr, rb_gpr;
+
+    /* Comparisons: emit cmpw / cmplw into cr0, then mark vtop as
+     * VT_CMP. The actual conditional branch is emitted later by
+     * gjmp_cond(). */
+    if (op >= TOK_ULT && op <= TOK_GT) {
+        int unsigned_cmp = (op == TOK_ULT || op == TOK_UGE ||
+                            op == TOK_ULE || op == TOK_UGT);
+        gv2(RC_INT, RC_INT);
+        ra_slot = vtop[-1].r;
+        rb_slot = vtop[0].r;
+        ra_gpr = TREG_TO_GPR(ra_slot);
+        rb_gpr = TREG_TO_GPR(rb_slot);
+        if (unsigned_cmp) {
+            /* cmplw cr0, rA, rB (X-form, opcode 31, ext 32) */
+            o(0x7c000040 | (ra_gpr << 16) | (rb_gpr << 11));
+        } else {
+            /* cmpw cr0, rA, rB (X-form, opcode 31, ext 0) */
+            o(0x7c000000 | (ra_gpr << 16) | (rb_gpr << 11));
+        }
+        vtop--;
+        vset_VT_CMP(op);
+        return;
+    }
+
+    gv2(RC_INT, RC_INT);
+    ra_slot = vtop[-1].r;
+    rb_slot = vtop[0].r;
+    ra_gpr = TREG_TO_GPR(ra_slot);
+    rb_gpr = TREG_TO_GPR(rb_slot);
+
+    switch (op) {
+    case '+':
+        /* add rD, rA, rB */
+        o(0x7c000214 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case '-':
+        /* subf rD, rA, rB  computes rD = rB - rA, so swap. */
+        o(0x7c000050 | (ra_gpr << 21) | (rb_gpr << 16) | (ra_gpr << 11));
+        break;
+    case '*':
+        /* mullw rD, rA, rB */
+        o(0x7c0001d6 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case '&':
+        /* and rA, rS, rB */
+        o(0x7c000038 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case '|':
+        /* or rA, rS, rB */
+        o(0x7c000378 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case '^':
+        /* xor rA, rS, rB */
+        o(0x7c000278 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case TOK_SHL:
+        /* slw rA, rS, rB */
+        o(0x7c000030 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case TOK_SHR:
+        /* srw rA, rS, rB (logical) */
+        o(0x7c000430 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case TOK_SAR:
+        /* sraw rA, rS, rB (arithmetic) */
+        o(0x7c000630 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case '/':
+        /* divw rD, rA, rB (signed) */
+        o(0x7c0003d6 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case TOK_UDIV:
+        /* divwu rD, rA, rB (unsigned) */
+        o(0x7c000396 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case '%':
+    case TOK_UMOD:
+        /* PPC has no modulo instruction; compute as a - (a/b)*b.
+         * Use a temp register? For now, error so we notice. */
+        tcc_error("ppc-gen: modulo not yet implemented");
+        break;
+    default:
+        tcc_error("ppc-gen: gen_opi op 0x%x not yet supported", op);
+    }
+    vtop--;
 }
 
 ST_FUNC void gen_opf(int op)
