@@ -3687,6 +3687,13 @@ static void tcc_predefs(TCCState *s1, CString *cs, int is_asm)
       putdef(cs, "__leading_underscore");
     cstr_printf(cs, "#define __SIZEOF_POINTER__ %d\n", PTR_SIZE);
     cstr_printf(cs, "#define __SIZEOF_LONG__ %d\n", LONG_SIZE);
+#ifdef TCC_TARGET_PPC
+    /* Apple's <math.h> requires __FLT_EVAL_METHOD__ to be defined to a
+       value the compiler agrees with. tcc evaluates floating-point
+       expressions at the operand's type (no upgrades), which is "0"
+       per the C99 spec. gcc and clang predefine this; we mirror that. */
+    putdef(cs, "__FLT_EVAL_METHOD__ 0");
+#endif
     if (!is_asm) {
       putdef(cs, "__STDC__");
       cstr_printf(cs, "#define __STDC_HOSTED__ %d\n", s1->nostdlib ? 0 : 1);

@@ -14,6 +14,10 @@ TCC = $(TOP)/$(X)tcc$(EXESUF)
 XTCC ?= $(TOP)/$(X)tcc$(EXESUF)
 XCC = $(XTCC)
 XAR = $(XTCC) -ar
+# tcc's -ar driver only handles ELF; on PPC Mach-O we use system ar.
+ifneq "$(filter ppc%,$T)" ""
+XAR = $(AR)
+endif
 XFLAGS-unx = -B$(TOPSRC)
 XFLAGS-win = -B$(TOPSRC)/win32 -I$(TOPSRC)/include
 XFLAGS = $(XFLAGS$(XCFG))
@@ -65,6 +69,7 @@ OBJ-i386-win32 = $(I386_O) chkstk.o $(WIN_O)
 OBJ-x86_64-win32 = $(X86_64_O) chkstk.o $(WIN_O)
 OBJ-arm64 = $(ARM64_O) $(LIN_O)
 OBJ-arm64-osx = $(ARM64_O) $(OSX_O)
+OBJ-ppc-osx = lib-ppc.o $(OSX_O)
 OBJ-arm = $(ARM_O) $(LIN_O)
 OBJ-arm-fpa = $(OBJ-arm)
 OBJ-arm-fpa-ld = $(OBJ-arm)
