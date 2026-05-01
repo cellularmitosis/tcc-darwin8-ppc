@@ -3,14 +3,13 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: very early but moving.** TCC has never had a PowerPC
-backend; we're writing one from scratch. As of session 005, tcc
-compiles `int main(void) { return N; }` to correct PowerPC
-instructions and executes them on a real G3 via `tcc -run`. Real
-codegen (variables, arithmetic, calls) is the next ramp.
-
-The first major milestone is a `/opt`-installable G3 tarball that
-self-hosts on Tiger.
+**Status: SELF-HOSTING.** TCC has never had a PowerPC backend in
+any release. As of [session 020](docs/sessions/020-self-host/README.md),
+tcc-built-by-tcc compiles `tcc.c` into a `.o` byte-identical to its
+own — the canonical self-host fixpoint, on a 22-year-old G3. The
+remaining work is packaging: bundle libtcc1 helpers into
+`tcc/lib/`, predefine a couple of compiler macros, ship a
+`/opt`-installable tarball.
 
 ## Status
 
@@ -36,8 +35,8 @@ self-hosts on Tiger.
 | ✅ | External-data PIC indirection — `errno` etc. work end-to-end ([017](docs/sessions/017-extern-data-pic/README.md)) |
 | ✅ | **`tcc-self -v` runs** — bootstrap binary executes ([018](docs/sessions/018-tcc-self-sigbus/README.md)) |
 | ✅ | **BE long-long handling fixed — tcc-self compiles real programs** ([019](docs/sessions/019-be-ll-fixes/README.md)) |
-| 🟡 | Self-host bootstrap on Tiger (one register-allocator bug remains, see [019](docs/sessions/019-be-ll-fixes/README.md)) |
-| ❌ | G3 tarball |
+| ✅ | **🎉 SELF-HOST FIXPOINT — tcc-self2 compiles tcc.c into a byte-identical .o** ([020](docs/sessions/020-self-host/README.md)) |
+| ⏳ | G3 tarball (`v0.1.0-g3`) |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 

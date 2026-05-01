@@ -1431,6 +1431,10 @@ ST_FUNC void save_reg_upstack(int r, int n)
                 sv.r = VT_LOCAL | VT_LVAL;
                 sv.c.i = l;
 		sv.sym = NULL;
+                sv.r2 = VT_CONST;  /* upstream omits this; the store
+                                      paths on PPC look at r2 to decide
+                                      between full-LL and single-half
+                                      stores, so we need a known value */
 #ifdef TCC_TARGET_PPC
                 /* Big-endian save: HIGH at offset, LOW at offset+PTR_SIZE.
                    Without this swap, the spill writes LOW at the lower
@@ -1971,15 +1975,25 @@ ST_FUNC int gv(int rc)
 #ifdef TCC_TARGET_PPC
                     /* Big-endian: HIGH at offset+0, LOW at offset+4. tcc
                        convention is vtop->r = LOW, vtop->r2 = HIGH, so we
-                       load LOW first from offset+4, then move the lvalue
-                       back to offset+0 so the trailing load(r2, vtop)
-                       reads HIGH. (Mirrors the LE sequence below, with
-                       the two offsets exchanged.) */
+                       load LOW first from offset+4, then HIGH from
+                       offset+0. After the first incr_offset+load, take a
+                       fast path when the lvalue is still LOCAL/CONST
+                       (just bump c.i back) to avoid emitting an extra
+                       runtime address computation that would consume a
+                       scratch register from the ABI slot range. The
+                       second incr_offset(-PTR_SIZE) is only needed for
+                       the register-resident pointer case. */
                     incr_offset(PTR_SIZE);
                     load(r, vtop);
                     vdup();
                     vtop[-1].r = r;
-                    incr_offset(-PTR_SIZE);
+                    {
+                        int v_loc = vtop->r & VT_VALMASK;
+                        if (v_loc == VT_LOCAL || v_loc == VT_CONST)
+                            vtop->c.i -= PTR_SIZE;
+                        else
+                            incr_offset(-PTR_SIZE);
+                    }
 #else
                     load(r, vtop);
                     vdup();

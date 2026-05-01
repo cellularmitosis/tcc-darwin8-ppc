@@ -993,11 +993,12 @@ ST_FUNC void store(int r, SValue *sv)
              * (matches gfunc_prolog spill order, big-endian word
              * order).
              *
-             * Some tcc paths call store() with VT_LLONG but only the
-             * low half materialized (r2 == VT_CONST = unset). In
-             * those cases we just store the low half — the caller
-             * has presumably arranged a separate write for the high
-             * half, or only the low half matters. */
+             * If sv->r2 isn't set we treat the call as a single-half
+             * store and write `r` at the given offset verbatim. This
+             * is the contract that save_reg_upstack uses on PPC: it
+             * calls store() once per half with type=VT_LLONG and
+             * r2=VT_CONST, advancing sv->c.i by PTR_SIZE between
+             * calls. The caller decides which slot is which. */
             int hi_gpr;
             if (sv->r2 < VT_CONST) {
                 hi_gpr = TREG_TO_GPR(sv->r2);
@@ -1006,8 +1007,7 @@ ST_FUNC void store(int r, SValue *sv)
                 /* stw r(=low), offset+4(r31) */
                 o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | ((offset + 4) & 0xffff));
             } else {
-                /* Only low half. Write at offset+4 (the low slot). */
-                o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | ((offset + 4) & 0xffff));
+                o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
             }
             return;
         }
