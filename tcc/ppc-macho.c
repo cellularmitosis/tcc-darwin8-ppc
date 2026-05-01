@@ -1451,7 +1451,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     struct exe_sect sects[8];   /* generous; we never use more than 4 */
     int nsec = 0;
     int sect_idx_text = -1, sect_idx_rodata = -1, sect_idx_data = -1;
-    int sect_idx_stub = -1, sect_idx_nlptr = -1;
+    int sect_idx_stub = -1, sect_idx_nlptr = -1, sect_idx_dyld = -1;
     /* External-data __nl_symbol_ptr bookkeeping. The function-stub
      * path uses its own slots in the same __nl_symbol_ptr section;
      * data symbols append after them. */
@@ -1549,6 +1549,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         n_data_sects++;     /* __data */
     if (nstubs > 0 || n_nlptrs > 0)
         n_data_sects++;     /* __nl_symbol_ptr (function ptrs + data ptrs) */
+    if (nstubs > 0 || n_nlptrs > 0)
+        n_data_sects++;     /* __dyld (8 bytes; dyld writes pointers here) */
 
     total_msects = n_text_sects + n_data_sects;
 
@@ -1654,6 +1656,21 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             sects[nsec].is_zerofill = 0;
             nsec++;
             data_cur += total_nlptr_size;
+        }
+
+        /* __dyld: 8 bytes that dyld writes at load time. Empirically
+         * its presence affects whether dyld runs library
+         * initializers; without it libSystem stays uninitialized. */
+        if (nstubs > 0 || n_nlptrs > 0) {
+            data_cur = (data_cur + 3u) & ~3u;
+            sect_idx_dyld = nsec;
+            sects[nsec].elf = NULL;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = 8;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += 8;
         }
 
         data_end = data_cur;
@@ -2016,6 +2033,20 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             put32be(&out, 0);     /* reserved1: indirect symtab base index */
             put32be(&out, 0);
         }
+        /* __dyld */
+        if (sect_idx_dyld >= 0) {
+            put_sectname(&out, "__dyld");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_dyld].vmaddr);
+            put32be(&out, sects[sect_idx_dyld].size);
+            put32be(&out, sects[sect_idx_dyld].file_off);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, S_REGULAR);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
     }
 
     /* ---- LC_SEGMENT __LINKEDIT. ---- */
@@ -2147,6 +2178,11 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             while (out.len < sects[sect_idx_nlptr].file_off)
                 put8(&out, 0);
             obuf_put(&out, nl_ptr_data, sects[sect_idx_nlptr].size);
+        }
+        if (sect_idx_dyld >= 0) {
+            while (out.len < sects[sect_idx_dyld].file_off)
+                put8(&out, 0);
+            obuf_zero(&out, sects[sect_idx_dyld].size);
         }
     }
 
