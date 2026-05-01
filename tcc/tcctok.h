@@ -301,6 +301,15 @@
      DEF(TOK___fixxfdi, "__fixxfdi")
 #endif
 
+#if defined TCC_TARGET_PPC
+     /* PPC32 has no native FP <-> 64-bit-int instructions (those
+      * are PPC64-only). Use libgcc helpers, like ARM does. */
+     DEF(TOK___floatdisf, "__floatdisf")
+     DEF(TOK___floatdidf, "__floatdidf")
+     DEF(TOK___fixsfdi, "__fixsfdi")
+     DEF(TOK___fixdfdi, "__fixdfdi")
+#endif
+
      DEF(TOK_alloca, "alloca")
 
 #if defined TCC_TARGET_PE

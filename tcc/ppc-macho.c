@@ -857,7 +857,10 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     build_symtab(s1, &sb, smap, nsec);
 
     /* Per-section relocations. We emit them in section order; record
-     * each section's reloff/nreloc. */
+     * each section's reloff/nreloc. Mach-O relocation entries are 8-byte
+     * structs (two 32-bit words), and ld requires reloff to be 4-byte
+     * aligned, so pad section-data end up to a 4-byte boundary first. */
+    cur_off = (cur_off + 3u) & ~3u;
     reloc_file_off = cur_off;
     for (i = 0; i < nsec; i++) {
         size_t before = relbuf.len;
@@ -874,7 +877,10 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     }
     cur_off += (uint32_t)relbuf.len;
 
-    /* Symbol table, string table. */
+    /* Symbol table, string table. ld requires symoff to be 4-byte aligned;
+     * relbuf is always a multiple of 8 bytes, so cur_off is already aligned,
+     * but pad defensively in case future changes break that invariant. */
+    cur_off = (cur_off + 3u) & ~3u;
     sym_file_off = cur_off;
     cur_off += sb.nlist.len;
     str_file_off = cur_off;
@@ -1079,6 +1085,8 @@ ST_FUNC char *macho_tbd_soname(int fd)
  * it ourselves. The dcbst/sync/icbi/sync/isync sequence is the
  * canonical PPC cache-coherency dance. */
 #if defined __APPLE__ && defined __ppc__
+#ifndef __TINYC__
+/* GCC version: real PPC cache-flush sequence in inline asm. */
 void __clear_cache(void *begin, void *end)
 {
     char *p = (char *)begin;
@@ -1094,4 +1102,15 @@ void __clear_cache(void *begin, void *end)
     __asm__ volatile("sync" : : : "memory");
     __asm__ volatile("isync" : : : "memory");
 }
+#else
+/* When tcc compiles itself: tcc has no PPC inline-asm parser yet
+ * (ppc-asm.c deferred). Stub it so the bootstrap completes; the
+ * resulting tcc-self can produce object files but its own -run
+ * mode would skip cache flushing. To re-enable -run on tcc-self,
+ * link the gcc-built __clear_cache as a separate object. */
+void __clear_cache(void *begin, void *end)
+{
+    (void)begin; (void)end;
+}
+#endif
 #endif

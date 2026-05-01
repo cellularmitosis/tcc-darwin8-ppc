@@ -1096,12 +1096,18 @@ static void tok_str_add2(TokenString *s, int t, CValue *cv)
     case TOK_CUINT:
     case TOK_CCHAR:
     case TOK_LCHAR:
-    case TOK_CFLOAT:
     case TOK_LINENUM:
 #if LONG_SIZE == 4
     case TOK_CLONG:
     case TOK_CULONG:
 #endif
+        /* store the low 32 bits of the integer value (endian-safe;
+           cv->tab[0] aliases the high word on big-endian targets) */
+        str[len++] = (int)cv->i;
+        break;
+    case TOK_CFLOAT:
+        /* float bits are at byte offset 0 in the union (cv->f / cv->tab[0])
+           on both little- and big-endian targets */
         str[len++] = cv->tab[0];
         break;
     case TOK_PPNUM:

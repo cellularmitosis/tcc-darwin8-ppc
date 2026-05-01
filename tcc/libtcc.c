@@ -53,14 +53,20 @@
 #include "riscv64-gen.c"
 #include "riscv64-link.c"
 #include "riscv64-asm.c"
+#elif defined(TCC_TARGET_PPC)
+#include "ppc-gen.c"
+#include "ppc-link.c"
 #else
 #error unknown target
 #endif
 #ifdef TCC_TARGET_PE
 #include "tccpe.c"
 #endif
-#ifdef TCC_TARGET_MACHO
+#if defined(TCC_TARGET_MACHO) && !defined(TCC_TARGET_PPC)
 #include "tccmacho.c"
+#endif
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+#include "ppc-macho.c"
 #endif
 #endif /* ONE_SOURCE */
 
