@@ -1,0 +1,41 @@
+[01:35:20] session 018 started: chase tcc-self -v SIGBUS
+[02:30:00] root cause: PIC base setup was emitted lazily on first use,
+           which left r30 uninitialized when control flow reached a
+           PIC access via a path that hadn't taken the PIC-base setup
+           branch. Crash in tcc_compile's else-branch (`tcc_open_bf`
+           then `file->fd = fd`) where file's PIC slot load went
+           through r30 = main's PIC anchor (uninitialized for this
+           function).
+[02:30:00] fix in ppc-gen.c gfunc_prolog: emit ppc_emit_pic_base_setup
+           UNCONDITIONALLY at the start of every function body when
+           output_type == TCC_OUTPUT_OBJ. Costs 16 bytes per function.
+[02:30:00] also fixed several other latent bugs found during the chase:
+           * init_putv: data section bytes were written little-endian
+             on PPC, so initialized integer globals (like every
+             tcc_options entry) read as garbage at runtime.
+             Added TCC_TARGET_PPC branches that store MSB-first for
+             VT_SHORT, VT_LLONG and VT_INT/VT_PTR cases.
+           * load() / store() for global symbols: extra_off (struct
+             member offset) was ignored. Could not bake into lo16(sym)
+             immediate because the relocator overwrites that field; so
+             we materialize the full sym address with addi+lo16, then
+             use extra_off as the load/store displacement. One extra
+             instruction per non-zero-offset access.
+           * gfunc_call: long long arg passing was placing only the
+             LOW half in the assigned register slot; the HIGH half got
+             allocated to whatever the regalloc picked (often r3, then
+             clobbered by the next arg). Fixed by gv(RC_INT) the LL
+             value into a register pair, then mr-ing the HIGH half
+             into r(3+gslot) and the LOW half into r(3+gslot+1) per
+             Apple PPC ABI.
+[02:35:00] tcc-self -v now works: exits 0 with version string.
+[02:40:00] remaining: tcc-self -run /tmp/r42.c fails with
+           "tcc_get_symbol(_main) not defined". The .o produced by
+           tcc-self has _main as STB_LOCAL ('t') instead of STB_GLOBAL
+           ('T'). And `return 42` compiles to `li r3, 0x52` (=82) not
+           `li r3, 0x2a` (=42). Both are downstream of a deeper BE
+           long-long handling bug in tccgen.c's lexpand/gen_opl that
+           was NOT fully addressed -- tcc reads 64-bit values
+           swapping HIGH and LOW halves on BE in many code paths.
+           Documented as known limitation; full BE-LL refactor
+           deferred to a future session.

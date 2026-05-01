@@ -737,13 +737,75 @@ ST_FUNC void load(int r, SValue *sv)
         greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_HA);
         o(0x3c000000 | (addr_gpr << 21));
         if (!want_load) {
-            /* addi rD, addr_gpr, lo16(sym) */
+            /* addi rD, addr_gpr, lo16(sym) -- this gives &sym. If
+             * extra_off != 0 (e.g. &g.b for struct g), add it with a
+             * second addi; we can't fold into the lo16 immediate
+             * because the relocation overwrites it. */
             int dst_gpr = TREG_TO_GPR(r);
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
             o(0x38000000 | (dst_gpr << 21) | (addr_gpr << 16));
+            if (extra_off != 0) {
+                /* addi dst_gpr, dst_gpr, extra_off */
+                o(0x38000000 | (dst_gpr << 21) | (dst_gpr << 16)
+                             | (extra_off & 0xffff));
+            }
             return;
         }
-        /* Otherwise, emit the typed load with lo16(sym) as the disp. */
+        /* Otherwise, emit the typed load.
+         *
+         * If extra_off != 0 (struct member, array element, etc.), we
+         * must NOT bake it into the lo16(sym) immediate -- the linker
+         * overwrites that 16-bit field with lo16(sym) at link time and
+         * any addend stored there is lost. Instead, materialize the
+         * full symbol address into addr_gpr with `addi addr_gpr,
+         * addr_gpr, lo16(sym)`, then do the typed load with extra_off
+         * as the displacement. This costs one extra instruction per
+         * non-zero-offset access, which we accept for correctness. */
+        if (extra_off != 0) {
+            greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
+            /* addi addr_gpr, addr_gpr, lo16(sym) */
+            o(0x38000000 | (addr_gpr << 21) | (addr_gpr << 16));
+            if (IS_FREG(r)) {
+                int fpr = TREG_TO_FPR(r);
+                if (bt == VT_FLOAT) {
+                    o(0xc0000000 | (fpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+                    o(0xc8000000 | (fpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                } else {
+                    tcc_error("ppc-gen: FP load via sym+off of bt 0x%x", bt);
+                }
+                return;
+            }
+            gpr = TREG_TO_GPR(r);
+            switch (bt) {
+            case VT_BYTE:
+                o(0x88000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                if (!(sv->type.t & VT_UNSIGNED))
+                    o(0x7c000774 | (gpr << 21) | (gpr << 16));
+                return;
+            case VT_SHORT:
+                if (sv->type.t & VT_UNSIGNED)
+                    o(0xa0000000 | (gpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                else
+                    o(0xa8000000 | (gpr << 21) | (addr_gpr << 16)
+                                 | (extra_off & 0xffff));
+                return;
+            case VT_INT:
+            case VT_PTR:
+            case VT_FUNC:
+                o(0x80000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                return;
+            default:
+                tcc_error("ppc-gen: load via sym+off of bt 0x%x not yet supported", bt);
+            }
+        }
+
+        /* extra_off == 0: original two-instruction lis+lwz path. */
         if (IS_FREG(r)) {
             int fpr = TREG_TO_FPR(r);
             if (bt == VT_FLOAT) {
@@ -757,7 +819,6 @@ ST_FUNC void load(int r, SValue *sv)
             } else {
                 tcc_error("ppc-gen: FP load via sym of bt 0x%x", bt);
             }
-            (void)extra_off; /* TODO: handle nonzero c.i */
             return;
         }
         gpr = TREG_TO_GPR(r);
@@ -1018,9 +1079,59 @@ ST_FUNC void store(int r, SValue *sv)
 
         tmp_slot = get_reg(RC_INT);
         tmp_gpr = TREG_TO_GPR(tmp_slot);
-        /* lis rTMP, sym@ha  -- placeholder; relocator fills the half. */
+        /* lis rTMP, sym@ha  -- placeholder; relocator fills the half.
+         * The lo16 immediate of `lis` is irrelevant (lis ignores low
+         * 16 of the result anyway); leave it 0. */
         greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_HA);
-        o(0x3c000000 | (tmp_gpr << 21) | (((int32_t)addend) & 0xffff));
+        o(0x3c000000 | (tmp_gpr << 21));
+        /* If addend != 0 (struct member, array index, etc.), we cannot
+         * fold it into the lo16(sym) immediate of the store -- the
+         * relocator overwrites that 16-bit field with lo16(sym). So
+         * materialize the full sym address into tmp_gpr first via
+         * `addi tmp_gpr, tmp_gpr, lo16(sym)`, then do the store with
+         * addend as the displacement. */
+        if (addend != 0) {
+            greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
+            o(0x38000000 | (tmp_gpr << 21) | (tmp_gpr << 16));
+            if (IS_FREG(r)) {
+                int fpr = TREG_TO_FPR(r);
+                if (bt == VT_FLOAT)
+                    store_op = 0xd0000000;
+                else if (bt == VT_DOUBLE || bt == VT_LDOUBLE)
+                    store_op = 0xd8000000;
+                else
+                    tcc_error("ppc-gen: store global+off FP of bt 0x%x", bt);
+                o(store_op | (fpr << 21) | (tmp_gpr << 16)
+                           | (((int32_t)addend) & 0xffff));
+                return;
+            }
+            gpr = TREG_TO_GPR(r);
+            switch (bt) {
+            case VT_BYTE:  store_op = 0x98000000; break;
+            case VT_SHORT: store_op = 0xb0000000; break;
+            case VT_INT:
+            case VT_PTR:
+            case VT_FUNC:  store_op = 0x90000000; break;
+            case VT_LLONG: {
+                int hi_gpr;
+                if (sv->r2 >= VT_CONST)
+                    tcc_error("ppc-gen: store VT_LLONG to global with no r2");
+                hi_gpr = TREG_TO_GPR(sv->r2);
+                o(0x90000000 | (hi_gpr << 21) | (tmp_gpr << 16)
+                             | (((int32_t)addend) & 0xffff));
+                o(0x90000000 | (gpr << 21) | (tmp_gpr << 16)
+                             | (((int32_t)(addend + 4)) & 0xffff));
+                return;
+            }
+            default:
+                tcc_error("ppc-gen: store global+off of bt 0x%x not yet supported", bt);
+            }
+            o(store_op | (gpr << 21) | (tmp_gpr << 16)
+                       | (((int32_t)addend) & 0xffff));
+            return;
+        }
+
+        /* addend == 0: original lis+store path with lo16(sym) as disp. */
         if (IS_FREG(r)) {
             int fpr = TREG_TO_FPR(r);
             if (bt == VT_FLOAT)
@@ -1030,7 +1141,7 @@ ST_FUNC void store(int r, SValue *sv)
             else
                 tcc_error("ppc-gen: store global FP of bt 0x%x", bt);
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
-            o(store_op | (fpr << 21) | (tmp_gpr << 16) | (((int32_t)addend) & 0xffff));
+            o(store_op | (fpr << 21) | (tmp_gpr << 16));
             return;
         }
         gpr = TREG_TO_GPR(r);
@@ -1042,26 +1153,24 @@ ST_FUNC void store(int r, SValue *sv)
         case VT_FUNC:  store_op = 0x90000000; break;  /* stw */
         case VT_LLONG: {
             /* High half then low half. Two stws with two relocs;
-             * the second uses addend+4. */
+             * the second uses addend+4 (= 4 here). Per upstream
+             * PowerPC ABI: works as long as (addend+4)'s sign bit
+             * matches addend's; for addend=0, +4 still has bit15=0. */
             int hi_gpr;
             if (sv->r2 >= VT_CONST)
                 tcc_error("ppc-gen: store VT_LLONG to global with no r2");
             hi_gpr = TREG_TO_GPR(sv->r2);
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
-            o(0x90000000 | (hi_gpr << 21) | (tmp_gpr << 16) | (((int32_t)addend) & 0xffff));
-            /* Need to reload tmp_gpr with the @ha for offset+4? No —
-             * the upper half is the same; just LO with addend+4 works
-             * if (addend+4 & 0x8000) == (addend & 0x8000). For most
-             * cases (small addend) this holds; flag a warning otherwise. */
+            o(0x90000000 | (hi_gpr << 21) | (tmp_gpr << 16));
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
-            o(0x90000000 | (gpr << 21) | (tmp_gpr << 16) | (((int32_t)(addend + 4)) & 0xffff));
+            o(0x90000000 | (gpr << 21) | (tmp_gpr << 16) | (4 & 0xffff));
             return;
         }
         default:
             tcc_error("ppc-gen: store global of bt 0x%x not yet supported", bt);
         }
         greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
-        o(store_op | (gpr << 21) | (tmp_gpr << 16) | (((int32_t)addend) & 0xffff));
+        o(store_op | (gpr << 21) | (tmp_gpr << 16));
         return;
     }
 
@@ -1153,7 +1262,48 @@ ST_FUNC void gfunc_call(int nb_args)
         } else {
             int gslot = gpr_alloc[src_index];
             if (gslot < 8) {
-                gv(RC_R(gslot));
+                if (bt == VT_LLONG && gslot + 1 < 8) {
+                    /* Apple PPC ABI: a long long argument occupies TWO
+                     * consecutive GPR slots, HIGH in the lower-numbered
+                     * register (r3+gslot), LOW in the higher (r3+gslot+1).
+                     * Tcc's `gv(RC_R(slot))` only materializes ONE
+                     * register because our RC2_TYPE returns 0 for the
+                     * non-RC_IRET case, so the natural call sequence
+                     * loses the high half (it gets allocated to whatever
+                     * the regalloc picks, often r3, then gets overwritten
+                     * by the next arg).
+                     *
+                     * Strategy: materialize the LL value into a register
+                     * pair via gv(RC_INT), then `mr` each half into the
+                     * required ABI slot. tcc convention after gv(RC_INT)
+                     * for LL: vtop->r = LOW reg, vtop->r2 = HIGH reg.
+                     * Apple PPC ABI: r3+gslot = HIGH, r3+gslot+1 = LOW.
+                     */
+                    int lo_reg, hi_reg;
+                    int target_hi = gslot + 3;       /* r3..r10 */
+                    int target_lo = gslot + 1 + 3;
+                    gv(RC_INT);
+                    lo_reg = TREG_TO_GPR(vtop->r & VT_VALMASK);
+                    if (vtop->r2 < VT_CONST) {
+                        hi_reg = TREG_TO_GPR(vtop->r2);
+                    } else {
+                        hi_reg = -1;  /* shouldn't happen for LL after gv */
+                    }
+                    /* Move HIGH into target_hi (mr is `or rD,rS,rS`). */
+                    if (hi_reg >= 0 && hi_reg != target_hi) {
+                        o(0x7c000378 | (hi_reg << 21)
+                                     | (target_hi << 16)
+                                     | (hi_reg << 11));
+                    }
+                    /* Move LOW into target_lo. */
+                    if (lo_reg != target_lo) {
+                        o(0x7c000378 | (lo_reg << 21)
+                                     | (target_lo << 16)
+                                     | (lo_reg << 11));
+                    }
+                } else {
+                    gv(RC_R(gslot));
+                }
             } else {
                 /* Stack-passed. */
                 int stack_off = 24 + gslot * 4;
@@ -1429,10 +1579,25 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     func_vc = 0;
     ppc_fp_param_count = 0;
 
-    /* PIC base is emitted lazily on first need (only for -c output
-     * with externally-defined data refs). Reset per-function state. */
+    /* PIC base setup. Reset per-function state, then emit the
+     * mflr/bcl/mflr/mtlr sequence UNCONDITIONALLY at the start of
+     * the function body (when generating -c output). Lazy emission
+     * is unsafe: if the first PIC use is inside a conditional branch
+     * (e.g. `if (fd == -1) ... else (uses extern data)` ), the setup
+     * runs only on one path and r30 is uninitialized on the other --
+     * causing a crash when the other path tries to use the PIC anchor.
+     * The 16-byte cost per function is small.
+     *
+     * We pin the setup to function entry so r30 is valid for every
+     * subsequent PIC access regardless of control flow. For non
+     * TCC_OUTPUT_OBJ outputs (-run, full link) PIC is never needed,
+     * so we skip the setup entirely. */
     ppc_func_pic_base_emitted = 0;
     ppc_func_pic_base_anchor = 0;
+#if defined(TCC_TARGET_MACHO)
+    if (tcc_state->output_type == TCC_OUTPUT_OBJ)
+        ppc_emit_pic_base_setup();
+#endif
 
     /* Apple PPC ABI: all 8 GPR arg slots (r3..r10) get spilled to
      * the caller's parameter save area in our prologue. Body code

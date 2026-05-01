@@ -7870,7 +7870,17 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
 		*(char *)ptr = val;
 		break;
 	    case VT_SHORT:
+#if defined TCC_TARGET_PPC
+                /* PPC is big-endian: store MSB-first so a `lhz`/`lha`
+                 * load reads the correct value at runtime. */
+                {
+                    unsigned char *q = (unsigned char *)ptr;
+                    q[0] = (val >> 8) & 0xff;
+                    q[1] = val & 0xff;
+                }
+#else
                 write16le(ptr, val);
+#endif
 		break;
 	    case VT_FLOAT:
 #if defined TCC_TARGET_PPC
@@ -7956,13 +7966,47 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
                 break;
 #else
 	    case VT_LLONG:
+#if defined TCC_TARGET_PPC
+                /* PPC is big-endian: store MSB-first across both halves
+                 * so two `lwz` loads (hi half, lo half) read correctly. */
+                {
+                    uint64_t v64 = (uint64_t)val;
+                    unsigned char *q = (unsigned char *)ptr;
+                    q[0] = (v64 >> 56) & 0xff;
+                    q[1] = (v64 >> 48) & 0xff;
+                    q[2] = (v64 >> 40) & 0xff;
+                    q[3] = (v64 >> 32) & 0xff;
+                    q[4] = (v64 >> 24) & 0xff;
+                    q[5] = (v64 >> 16) & 0xff;
+                    q[6] = (v64 >> 8)  & 0xff;
+                    q[7] = v64 & 0xff;
+                }
+#else
                 write64le(ptr, val);
+#endif
                 break;
             case VT_PTR:
             case VT_INT:
 	        if (vtop->r & VT_SYM)
 	          greloc(sec, vtop->sym, c, R_DATA_PTR);
+#if defined TCC_TARGET_PPC
+                /* PPC is big-endian: store MSB-first so a `lwz` load
+                 * reads the correct value at runtime. The relocation
+                 * (if any) was emitted before this block, and PPC
+                 * relocations write big-endian instruction immediates
+                 * for PIC paths but R_DATA_PTR specifically writes a
+                 * 32-bit word -- which the linker will write big-endian
+                 * for PPC. */
+                {
+                    unsigned char *q = (unsigned char *)ptr;
+                    q[0] = (val >> 24) & 0xff;
+                    q[1] = (val >> 16) & 0xff;
+                    q[2] = (val >> 8)  & 0xff;
+                    q[3] = val & 0xff;
+                }
+#else
 	        write32le(ptr, val);
+#endif
 	        break;
 #endif
 	    default:
