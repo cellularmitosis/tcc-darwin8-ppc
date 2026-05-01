@@ -76,11 +76,19 @@
 #define S_REGULAR               0x0
 #define S_ZEROFILL              0x1
 #define S_CSTRING_LITERALS      0x2
+#define S_LAZY_SYMBOL_POINTERS  0x7
+#define S_SYMBOL_STUBS          0x8
 #define S_COALESCED             0xb
 
 /* Section attributes (top 24 bits of section.flags). */
 #define S_ATTR_PURE_INSTRUCTIONS    0x80000000
 #define S_ATTR_SOME_INSTRUCTIONS    0x00000400
+
+/* Reference flags (low 4 bits of n_desc). */
+#define REFERENCE_FLAG_UNDEFINED_NON_LAZY   0
+#define REFERENCE_FLAG_UNDEFINED_LAZY       1
+#define INDIRECT_SYMBOL_LOCAL               0x80000000
+#define INDIRECT_SYMBOL_ABS                 0x40000000
 
 /* nlist n_type values. */
 #define N_STAB                  0xe0  /* mask: any stab */
@@ -103,6 +111,17 @@
 #define PPC_RELOC_LO16          5   /* lower 16 bits */
 #define PPC_RELOC_HA16          6   /* upper 16 bits, "adjusted" for sign of low half */
 #define PPC_RELOC_LO14          7   /* lower 14 bits (load/store offset) */
+#define PPC_RELOC_SECTDIFF      8
+#define PPC_RELOC_PB_LA_PTR     9
+#define PPC_RELOC_HI16_SECTDIFF 10
+#define PPC_RELOC_LO16_SECTDIFF 11
+#define PPC_RELOC_HA16_SECTDIFF 12
+#define PPC_RELOC_JBSR          13
+#define PPC_RELOC_LO14_SECTDIFF 14
+#define PPC_RELOC_LOCAL_SECTDIFF 15
+
+/* Scattered-relocation high bit on r_address. */
+#define R_SCATTERED             0x80000000
 
 /* ====================================================================
  * Mach-O on-disk structures (32-bit, written big-endian via helpers).
@@ -260,7 +279,7 @@ static void put32be(obuf *b, uint32_t v)
  * ================================================================== */
 
 struct macho_secmap {
-    Section    *elf;        /* tcc's Section (read-only) */
+    Section    *elf;        /* tcc's Section (read-only); NULL for synthesized */
     const char *segname;    /* "__TEXT", "__DATA" */
     const char *sectname;   /* "__text", "__data", ... */
     uint32_t    flags;      /* Mach-O section flags */
@@ -270,7 +289,24 @@ struct macho_secmap {
     uint32_t    size;       /* section size (= elf->data_offset) */
     uint32_t    reloff;     /* file offset of relocations */
     uint32_t    nreloc;     /* number of relocation entries */
+    uint32_t    reserved1;  /* (indirect symbol table index for stubs/la_ptrs) */
+    uint32_t    reserved2;  /* (stub size in bytes for S_SYMBOL_STUBS) */
     int         msect_no;   /* 1-based Mach-O section index */
+    /* For synthesized sections (stubs / la_symbol_ptrs), data is owned
+     * by us and freed at cleanup. For ELF-backed sections, data is NULL
+     * and we read from elf->data instead. */
+    unsigned char *data;
+    int         is_stub;    /* 1 if this is __picsymbolstub1            */
+    int         is_la_ptr;  /* 1 if this is __la_symbol_ptr             */
+};
+
+/* Per-output extern-stub table. One entry per unique external function
+ * called via R_PPC_REL24 from any section in this object file. */
+struct extern_stub {
+    int      elfsym_idx;    /* index into s1->symtab */
+    uint32_t addr;          /* stub VA in __picsymbolstub1 (set at layout) */
+    uint32_t la_ptr_addr;   /* la_symbol_ptr VA (set at layout) */
+    int      machsym_idx;   /* idx into emitted nlist (set after build_symtab) */
 };
 
 /* Map a tcc section to its Mach-O (segname, sectname, flags).
@@ -344,6 +380,109 @@ static uint32_t addralign_log2(int align)
 }
 
 /* ====================================================================
+ * Extern-stub collection.
+ *
+ * Walk all sections once; for every R_PPC_REL24 relocation whose target
+ * is an undefined external symbol, register that symbol in a deduped
+ * table. We later synthesize one __picsymbolstub1 entry and one
+ * __la_symbol_ptr slot per registered external.
+ * ================================================================== */
+static int collect_extern_stubs(TCCState *s1,
+                                struct extern_stub **out_stubs,
+                                int **out_stub_for_elfsym)
+{
+    int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+    int *stub_for = tcc_mallocz(nsyms * sizeof(int));
+    struct extern_stub *stubs = NULL;
+    int nstubs = 0, capstubs = 0;
+    int i, k;
+
+    for (i = 0; i < nsyms; i++) stub_for[i] = -1;
+
+    for (i = 1; i < s1->nb_sections; i++) {
+        Section *s = s1->sections[i];
+        Section *sr;
+        int nrel;
+        if (!s) continue;
+        sr = s->reloc;
+        if (!sr) continue;
+        nrel = sr->data_offset / sizeof(ElfW_Rel);
+        for (k = 0; k < nrel; k++) {
+            ElfW_Rel *rel = (ElfW_Rel *)sr->data + k;
+            int type = ELFW(R_TYPE)(rel->r_info);
+            int symidx = ELFW(R_SYM)(rel->r_info);
+            ElfW(Sym) *esym;
+            if (symidx <= 0 || symidx >= nsyms) continue;
+            if (type != R_PPC_REL24) continue;
+            esym = (ElfW(Sym) *)s1->symtab->data + symidx;
+            if (esym->st_shndx != SHN_UNDEF) continue;
+            if (stub_for[symidx] >= 0) continue;
+            if (nstubs >= capstubs) {
+                capstubs = capstubs ? capstubs * 2 : 8;
+                stubs = tcc_realloc(stubs,
+                                    capstubs * sizeof(struct extern_stub));
+            }
+            stubs[nstubs].elfsym_idx = symidx;
+            stubs[nstubs].addr = 0;
+            stubs[nstubs].la_ptr_addr = 0;
+            stubs[nstubs].machsym_idx = -1;
+            stub_for[symidx] = nstubs;
+            nstubs++;
+        }
+    }
+    *out_stubs = stubs;
+    *out_stub_for_elfsym = stub_for;
+    return nstubs;
+}
+
+/* Build the 32-byte PIC stub for a single external function.
+ * `stub_addr` is the VA of the stub (= start of the 8-instruction
+ * sequence). `la_ptr_addr` is the VA of the corresponding lazy-bind
+ * pointer slot. The instructions are pre-filled with the displacement
+ * `(la_ptr_addr - anchor)` split into HA16/LO16 halves; the linker
+ * will recompute these via SECTDIFF relocs if it relocates either
+ * section. */
+static void emit_pic_stub_bytes(unsigned char *out, uint32_t stub_addr,
+                                uint32_t la_ptr_addr)
+{
+    uint32_t anchor = stub_addr + 8;     /* address of mflr r11 */
+    int32_t  delta = (int32_t)(la_ptr_addr - anchor);
+    uint16_t ha = (uint16_t)((delta + 0x8000) >> 16);
+    uint16_t lo = (uint16_t)(delta & 0xffff);
+    static const uint32_t prefix[] = {
+        0x7c0802a6,   /* mflr r0                */
+        0x429f0005,   /* bcl  20, 31, .+4       */
+        0x7d6802a6,   /* mflr r11               */
+    };
+    static const uint32_t suffix[] = {
+        0x7c0803a6,   /* mtlr r0                */
+        /* addis r11,r11,ha and lwz r12,lo(r11) inserted between */
+        0x7d8903a6,   /* mtctr r12              */
+        0x4e800420,   /* bctr                   */
+    };
+    uint32_t instrs[8];
+    int i;
+
+    instrs[0] = prefix[0];
+    instrs[1] = prefix[1];
+    instrs[2] = prefix[2];
+    instrs[3] = 0x3d6b0000u | ha;        /* addis r11,r11,ha */
+    instrs[4] = suffix[0];               /* mtlr r0 */
+    /* lwzu r12,lo(r11) -- load *and* update r11 to la_ptr address.
+     * dyld_stub_binding_helper expects r11 to hold the la_ptr slot
+     * it should overwrite with the bound function address. */
+    instrs[5] = 0x858b0000u | lo;
+    instrs[6] = suffix[1];               /* mtctr r12 */
+    instrs[7] = suffix[2];               /* bctr */
+    for (i = 0; i < 8; i++) {
+        out[i*4 + 0] = (instrs[i] >> 24) & 0xff;
+        out[i*4 + 1] = (instrs[i] >> 16) & 0xff;
+        out[i*4 + 2] = (instrs[i] >>  8) & 0xff;
+        out[i*4 + 3] =  instrs[i]        & 0xff;
+    }
+}
+
+/* ====================================================================
  * Relocation translation: ELF (R_PPC_*) -> Mach-O (PPC_RELOC_*)
  *
  * Mach-O classic reloc record (relocation_info, 8 bytes total):
@@ -359,6 +498,21 @@ static uint32_t addralign_log2(int align)
  * entry holds that other half (not a real address), and r_symbolnum
  * is 0xffffff.
  * ================================================================== */
+
+/* Emit a scattered relocation entry (8 bytes) into b. The first word
+ * carries the high R_SCATTERED bit + pcrel/length/type/address; the
+ * second word carries the symbol's value (its address). */
+static void emit_scattered(obuf *b, int pcrel, int length, int type,
+                           uint32_t address, uint32_t value)
+{
+    uint32_t w0 = R_SCATTERED
+                | ((pcrel & 1)     << 30)
+                | ((length & 3)    << 28)
+                | ((type & 0xf)    << 24)
+                | (address & 0xffffff);
+    put32be(b, w0);
+    put32be(b, value);
+}
 
 /* Pack a non-scattered Mach-O relocation into the second 32-bit word.
  *
@@ -386,17 +540,42 @@ static uint32_t pack_reloc_word(uint32_t r_symbolnum, int r_pcrel,
          | ((r_type & 0xf));
 }
 
+/* Bundled per-output context handed to emit_section_relocs(). Bundling
+ * keeps that helper at <=8 scalar parameters (a hard limit of tcc's
+ * own PPC backend, since System V PPC passes only 8 GPRs by reg). */
+struct reloc_ctx {
+    TCCState               *s1;
+    struct macho_secmap    *smap;
+    int                     nsec;
+    int                    *sym_xlat;
+    int                    *sym_isext;
+    int                    *xlat_present;
+    int                    *stub_for_elfsym;
+    int                     stub_msect_no;
+};
+
 /* Emit Mach-O relocations for one tcc section into b. Returns the
  * number of relocation_info records written. The mapping from tcc
- * symtab indices to Mach-O symtab indices is given by sym_xlat[].
+ * symtab indices to Mach-O symtab indices is given by ctx->sym_xlat[].
  * For local (non-extern) relocs, the Mach-O r_symbolnum field holds
  * the *section* number (1-based) rather than a symtab index, so we
- * also accept a sym->elf-section table. */
-static int emit_section_relocs(obuf *b, Section *s, TCCState *s1,
-                               struct macho_secmap *smap, int nsec,
-                               int *sym_xlat, int *sym_isext,
-                               int *xlat_present)
+ * also accept a sym->elf-section table.
+ *
+ * `ctx->stub_for_elfsym[]` (may be NULL) and `ctx->stub_msect_no` route
+ * external R_PPC_REL24 calls through the synthesized __picsymbolstub1
+ * section: the reloc becomes a *section-relative* (extern_bit=0) BR24
+ * against the stub section, with the in-instruction displacement
+ * already encoded by the caller's pre-relocation pass. */
+static int emit_section_relocs(obuf *b, Section *s, struct reloc_ctx *ctx)
 {
+    TCCState              *s1   = ctx->s1;
+    struct macho_secmap   *smap = ctx->smap;
+    int                    nsec = ctx->nsec;
+    int                   *sym_xlat        = ctx->sym_xlat;
+    int                   *sym_isext       = ctx->sym_isext;
+    int                   *xlat_present    = ctx->xlat_present;
+    int                   *stub_for_elfsym = ctx->stub_for_elfsym;
+    int                    stub_msect_no   = ctx->stub_msect_no;
     int i, count = 0;
     int nrel;
 
@@ -421,6 +600,19 @@ static int emit_section_relocs(obuf *b, Section *s, TCCState *s1,
         }
         esym = (ElfW(Sym) *)s1->symtab->data + elfsym;
         extern_bit = sym_isext[elfsym] ? 1 : 0;
+
+        /* External BR24: retarget to the stub section. */
+        if (extern_bit && type == R_PPC_REL24
+            && stub_for_elfsym && stub_for_elfsym[elfsym] >= 0
+            && stub_msect_no > 0) {
+            extern_bit = 0;
+            msym = stub_msect_no;
+            put32be(b, addr);
+            put32be(b, pack_reloc_word(msym, 1, 2, 0, PPC_RELOC_BR24));
+            count++;
+            continue;
+        }
+
         if (extern_bit) {
             /* External: r_symbolnum is the Mach-O symtab index. */
             msym = sym_xlat[elfsym];
@@ -430,7 +622,8 @@ static int emit_section_relocs(obuf *b, Section *s, TCCState *s1,
             int j;
             msym = 0;
             for (j = 0; j < nsec; j++) {
-                if (smap[j].elf->sh_num == esym->st_shndx) {
+                if (smap[j].elf
+                    && smap[j].elf->sh_num == esym->st_shndx) {
                     msym = smap[j].msect_no;
                     break;
                 }
@@ -588,9 +781,15 @@ static int classify_sym(TCCState *s1, ElfW(Sym) *sym,
 
 /* Build the Mach-O symbol/string tables and xlat array from
  * s1->symtab. Symbols are emitted in three passes (locals, extdef,
- * undef) so that LC_DYSYMTAB's contiguous-group invariant holds. */
+ * undef) so that LC_DYSYMTAB's contiguous-group invariant holds.
+ *
+ * `stub_for_elfsym[]` (may be NULL) is the same dedup map produced by
+ * collect_extern_stubs(); when an undef external symbol has a stub
+ * registered we set its n_desc to REFERENCE_FLAG_UNDEFINED_LAZY so the
+ * dynamic linker knows to bind it via the lazy pointer slot. */
 static void build_symtab(TCCState *s1, struct symtab_build *sb,
-                         struct macho_secmap *smap, int nsec)
+                         struct macho_secmap *smap, int nsec,
+                         int *stub_for_elfsym)
 {
     int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
     int pass, i;
@@ -632,6 +831,11 @@ static void build_symtab(TCCState *s1, struct symtab_build *sb,
                 int idx = n_sect - 1;
                 value += smap[idx].addr;
             }
+
+            /* Lazy-bound externals: dyld looks for n_desc bit 0 set to
+             * mean "bind via the la_symbol_ptr slot, not eagerly". */
+            if (kind == 2 && stub_for_elfsym && stub_for_elfsym[i] >= 0)
+                n_desc = REFERENCE_FLAG_UNDEFINED_LAZY;
 
             /* Emit nlist entry (12 bytes, big-endian). */
             obuf_reserve(&sb->nlist, MACHO_NLIST_SIZE);
@@ -699,7 +903,7 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
 {
     obuf out;
     struct macho_secmap *smap = NULL;
-    int nsec = 0;
+    int nsec = 0, smap_cap = 0;
     int i, j, ret = -1;
     FILE *fp = NULL;
     int fd;
@@ -709,6 +913,7 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     uint32_t vmaddr = 0;
     uint32_t total_filesize = 0, total_vmsize = 0;
     obuf relbuf;
+    obuf indirect_buf;     /* indirect symbol table (4-byte words) */
     struct symtab_build sb;
     /* Patch offsets within the load-command region: */
     size_t   lc_segment_off;
@@ -717,9 +922,18 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
                                        * for back-patching reloff/offset. */
     size_t   lc_symtab_off, lc_dysymtab_off;
     uint32_t reloc_file_off, sym_file_off, str_file_off;
+    uint32_t indirect_file_off = 0, n_indirect = 0;
+    /* External-stub bookkeeping (set up below). */
+    struct extern_stub *stubs = NULL;
+    int *stub_for_elfsym = NULL;
+    int  nstubs = 0;
+    int  stub_msect_no = 0;       /* 1-based mach-o section index of __picsymbolstub1 */
+    int  la_ptr_msect_no = 0;     /* ditto __la_symbol_ptr */
+    int  helper_elfsym_idx = 0;   /* dyld_stub_binding_helper in s1->symtab */
 
     memset(&out, 0, sizeof(out));
     memset(&relbuf, 0, sizeof(relbuf));
+    memset(&indirect_buf, 0, sizeof(indirect_buf));
     memset(&sb, 0, sizeof(sb));
 
     /* ---- Step 0: only handle MH_OBJECT for now. ---- */
@@ -729,10 +943,22 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         return -1;
     }
 
-    /* (relocate-bytes pass deferred: see Step 1.5 below.) */
+    /* ---- Step 0.5: collect external functions called via R_PPC_REL24
+     * and inject dyld_stub_binding_helper if any stubs are needed. */
+    nstubs = collect_extern_stubs(s1, &stubs, &stub_for_elfsym);
+    if (nstubs > 0) {
+        helper_elfsym_idx = set_elf_sym(s1->symtab, 0, 0,
+                                        ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE),
+                                        0, SHN_UNDEF,
+                                        "dyld_stub_binding_helper");
+        (void)helper_elfsym_idx;
+    }
 
-    /* ---- Step 1: collect Mach-O sections from tcc's section list. ---- */
-    smap = tcc_mallocz(s1->nb_sections * sizeof(*smap));
+    /* ---- Step 1: collect Mach-O sections from tcc's section list. ----
+     * Two extra slots reserved at the end for synthesized __picsymbolstub1
+     * and __la_symbol_ptr sections. */
+    smap_cap = s1->nb_sections + 2;
+    smap = tcc_mallocz(smap_cap * sizeof(*smap));
     for (i = 1; i < s1->nb_sections; i++) {
         Section *s = s1->sections[i];
         const char *segname = NULL, *sectname = NULL;
@@ -748,6 +974,47 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         smap[nsec].size = (uint32_t)s->data_offset;
         smap[nsec].align_log2 = addralign_log2(s->sh_addralign);
         smap[nsec].msect_no = nsec + 1;
+        nsec++;
+    }
+
+    /* ---- Step 1a: synthesize __picsymbolstub1 and __la_symbol_ptr if
+     * we have any external function calls. */
+    if (nstubs > 0) {
+        struct macho_secmap *m;
+
+        /* __TEXT,__picsymbolstub1: 32-byte stubs, align 2^5 not strictly
+         * necessary (gcc uses 2^5 because indirect-symbol-table tools
+         * historically expected it). */
+        m = &smap[nsec];
+        m->elf = NULL;
+        m->segname = "__TEXT";
+        m->sectname = "__picsymbolstub1";
+        m->flags = S_SYMBOL_STUBS | S_ATTR_PURE_INSTRUCTIONS
+                 | S_ATTR_SOME_INSTRUCTIONS;
+        m->size = (uint32_t)nstubs * 32u;
+        m->align_log2 = 5;
+        m->msect_no = nsec + 1;
+        m->is_stub = 1;
+        m->reserved2 = 32;          /* bytes per stub */
+        m->data = tcc_mallocz(m->size);
+        stub_msect_no = m->msect_no;
+        nsec++;
+
+        /* __DATA,__la_symbol_ptr: 4-byte slots, align 2^2. */
+        m = &smap[nsec];
+        m->elf = NULL;
+        m->segname = "__DATA";
+        m->sectname = "__la_symbol_ptr";
+        m->flags = S_LAZY_SYMBOL_POINTERS;
+        m->size = (uint32_t)nstubs * 4u;
+        m->align_log2 = 2;
+        m->msect_no = nsec + 1;
+        m->is_la_ptr = 1;
+        m->reserved1 = nstubs;      /* indirect-symtab index of first la_ptr
+                                     * entry: stubs occupy [0, nstubs),
+                                     * la_ptrs occupy [nstubs, 2*nstubs). */
+        m->data = tcc_mallocz(m->size);
+        la_ptr_msect_no = m->msect_no;
         nsec++;
     }
 
@@ -800,6 +1067,23 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     }
     total_vmsize = vmaddr;
 
+    /* ---- Step 2.4: now that section addresses are set, fill in
+     * stubs[].addr / stubs[].la_ptr_addr. Done before the
+     * relocate-bytes pass so external R_PPC_REL24 relocs can encode
+     * the bl displacement to the correct stub address. */
+    if (nstubs > 0) {
+        int sidx;
+        struct macho_secmap *stub_sect = NULL, *la_sect = NULL;
+        for (j = 0; j < nsec; j++) {
+            if (smap[j].is_stub)   stub_sect = &smap[j];
+            if (smap[j].is_la_ptr) la_sect   = &smap[j];
+        }
+        for (sidx = 0; sidx < nstubs; sidx++) {
+            stubs[sidx].addr        = stub_sect->addr + (uint32_t)sidx * 32u;
+            stubs[sidx].la_ptr_addr = la_sect->addr   + (uint32_t)sidx * 4u;
+        }
+    }
+
     /* ---- Step 2.5: pre-apply same-section relocations to section
      * bytes.
      *
@@ -816,9 +1100,11 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
      * The Mach-O linker resolves them at link time using the symbol
      * value. */
     for (i = 0; i < nsec; i++) {
-        Section *sr = smap[i].elf->reloc;
+        Section *sr;
         Section *s = smap[i].elf;
         int k;
+        if (!s) continue;     /* synthesized section: no relocs of its own */
+        sr = s->reloc;
         if (!sr || !s->data)
             continue;
         for (k = 0; k < (int)(sr->data_offset / sizeof(ElfW_Rel)); k++) {
@@ -830,8 +1116,20 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
             addr_t reloc_addr, sym_val;
 
             if (esym->st_shndx == SHN_UNDEF) {
-                /* External: leave bits as-is. The Mach-O linker will
-                 * use the reloc record + symbol entry to resolve. */
+                /* External REL24: route to a stub if we have one. The
+                 * `bl` displacement encoded here (stub_addr - reloc_addr)
+                 * is what the BR24 reloc carries as its addend. */
+                if (type == R_PPC_REL24
+                    && stub_for_elfsym
+                    && stub_for_elfsym[symidx] >= 0) {
+                    int sidx = stub_for_elfsym[symidx];
+                    sym_val = stubs[sidx].addr;
+                    reloc_addr = smap[i].addr + rel->r_offset;
+                    ptr = s->data + rel->r_offset;
+                    relocate(s1, rel, type, ptr, reloc_addr, sym_val);
+                }
+                /* Other external relocs (HA16/LO16 to globals, ADDR32):
+                 * leave the bits as their addend; ld will fix up. */
                 continue;
             }
             /* Compute the symbol's final address in our layout. */
@@ -839,7 +1137,8 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
             {
                 int j;
                 for (j = 0; j < nsec; j++) {
-                    if (smap[j].elf->sh_num == esym->st_shndx) {
+                    if (smap[j].elf
+                        && smap[j].elf->sh_num == esym->st_shndx) {
                         sym_val = smap[j].addr + esym->st_value;
                         break;
                     }
@@ -853,8 +1152,28 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         }
     }
 
+    /* Materialize the synthesized stub bytes (la_symbol_ptr slots
+     * stay zero; ld fixes them via VANILLA reloc). */
+    if (nstubs > 0) {
+        int sidx;
+        struct macho_secmap *stub_sect = NULL;
+        for (j = 0; j < nsec; j++)
+            if (smap[j].is_stub) { stub_sect = &smap[j]; break; }
+        for (sidx = 0; sidx < nstubs; sidx++)
+            emit_pic_stub_bytes(stub_sect->data + sidx * 32,
+                                stubs[sidx].addr,
+                                stubs[sidx].la_ptr_addr);
+    }
+
     /* Build symbol table now that section addresses are known. */
-    build_symtab(s1, &sb, smap, nsec);
+    build_symtab(s1, &sb, smap, nsec, stub_for_elfsym);
+    if (nstubs > 0) {
+        int sidx;
+        for (sidx = 0; sidx < nstubs; sidx++) {
+            int eidx = stubs[sidx].elfsym_idx;
+            stubs[sidx].machsym_idx = sb.xlat[eidx];
+        }
+    }
 
     /* Per-section relocations. We emit them in section order; record
      * each section's reloff/nreloc. Mach-O relocation entries are 8-byte
@@ -864,9 +1183,65 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     reloc_file_off = cur_off;
     for (i = 0; i < nsec; i++) {
         size_t before = relbuf.len;
-        int n = emit_section_relocs(&relbuf, smap[i].elf, s1,
-                                    smap, nsec,
-                                    sb.xlat, sb.isext, sb.xlat_present);
+        int n = 0;
+
+        if (smap[i].is_stub) {
+            /* For each stub: emit scattered HA16_SECTDIFF + PAIR + LO16
+             * + PAIR. The Mach-O ABI splits the displacement
+             * (la_ptr - anchor) across the pair: the *primary* entry's
+             * r_value is the la_ptr (target) address, and the PAIR
+             * entry's r_value is the anchor address. The PAIR's
+             * r_address (a 24-bit field, repurposed in scattered relocs)
+             * carries the *other half* of the displacement so the
+             * linker can recompute it after section relocation. */
+            int sidx;
+            for (sidx = 0; sidx < nstubs; sidx++) {
+                uint32_t stub_off = (uint32_t)sidx * 32u;
+                uint32_t addis_addr = stub_off + 0xc;
+                uint32_t lwz_addr   = stub_off + 0x14;
+                uint32_t anchor     = stubs[sidx].addr + 8;
+                uint32_t la_ptr     = stubs[sidx].la_ptr_addr;
+                int32_t  delta      = (int32_t)(la_ptr - anchor);
+                uint16_t lo         = (uint16_t)(delta & 0xffff);
+                uint16_t ha         = (uint16_t)((delta + 0x8000) >> 16);
+
+                /* HA16_SECTDIFF on the addis: PAIR's r_address = lo. */
+                emit_scattered(&relbuf, 0, 2, PPC_RELOC_HA16_SECTDIFF,
+                               addis_addr, la_ptr);
+                emit_scattered(&relbuf, 0, 2, PPC_RELOC_PAIR,
+                               (uint32_t)lo, anchor);
+                /* LO16_SECTDIFF on the lwz: PAIR's r_address = ha. */
+                emit_scattered(&relbuf, 0, 2, PPC_RELOC_LO16_SECTDIFF,
+                               lwz_addr, la_ptr);
+                emit_scattered(&relbuf, 0, 2, PPC_RELOC_PAIR,
+                               (uint32_t)ha, anchor);
+                n += 4;
+            }
+        } else if (smap[i].is_la_ptr) {
+            /* Each la_symbol_ptr slot needs a VANILLA reloc against
+             * dyld_stub_binding_helper so dyld knows what to write
+             * the first time the stub is called. */
+            int sidx;
+            int helper_machsym = sb.xlat[helper_elfsym_idx];
+            for (sidx = 0; sidx < nstubs; sidx++) {
+                uint32_t la_off = (uint32_t)sidx * 4u;
+                put32be(&relbuf, la_off);
+                put32be(&relbuf, pack_reloc_word((uint32_t)helper_machsym,
+                                                 0, 2, 1, PPC_RELOC_VANILLA));
+                n++;
+            }
+        } else if (smap[i].elf) {
+            struct reloc_ctx ctx;
+            ctx.s1 = s1;
+            ctx.smap = smap;
+            ctx.nsec = nsec;
+            ctx.sym_xlat = sb.xlat;
+            ctx.sym_isext = sb.isext;
+            ctx.xlat_present = sb.xlat_present;
+            ctx.stub_for_elfsym = stub_for_elfsym;
+            ctx.stub_msect_no = stub_msect_no;
+            n = emit_section_relocs(&relbuf, smap[i].elf, &ctx);
+        }
         if (n > 0) {
             smap[i].reloff = reloc_file_off + (uint32_t)before;
             smap[i].nreloc = n;
@@ -876,6 +1251,21 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         }
     }
     cur_off += (uint32_t)relbuf.len;
+
+    /* Build the indirect symbol table (one entry per stub + one per
+     * la_ptr slot, both pointing back at the corresponding undef
+     * external in nlist). */
+    if (nstubs > 0) {
+        int sidx;
+        for (sidx = 0; sidx < nstubs; sidx++)
+            put32be(&indirect_buf, (uint32_t)stubs[sidx].machsym_idx);
+        for (sidx = 0; sidx < nstubs; sidx++)
+            put32be(&indirect_buf, (uint32_t)stubs[sidx].machsym_idx);
+        n_indirect = (uint32_t)nstubs * 2u;
+    }
+    cur_off = (cur_off + 3u) & ~3u;
+    indirect_file_off = cur_off;
+    cur_off += (uint32_t)indirect_buf.len;
 
     /* Symbol table, string table. ld requires symoff to be 4-byte aligned;
      * relbuf is always a multiple of 8 bytes, so cur_off is already aligned,
@@ -953,8 +1343,8 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         put32be(&out, smap[i].reloff);
         put32be(&out, smap[i].nreloc);
         put32be(&out, smap[i].flags);
-        put32be(&out, 0);  /* reserved1 */
-        put32be(&out, 0);  /* reserved2 */
+        put32be(&out, smap[i].reserved1);
+        put32be(&out, smap[i].reserved2);
     }
 
     /* LC_SYMTAB. */
@@ -976,10 +1366,18 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     put32be(&out, sb.nextdef);       /* nextdefsym */
     put32be(&out, sb.nlocal + sb.nextdef);  /* iundefsym  */
     put32be(&out, sb.nundef);        /* nundefsym  */
-    /* Everything else 0: tocoff, ntoc, modtaboff, nmodtab,
-     * extrefsymoff, nextrefsyms, indirectsymoff, nindirectsyms,
-     * extreloff, nextrel, locreloff, nlocrel. */
-    for (j = 0; j < 12; j++) put32be(&out, 0);
+    put32be(&out, 0);                /* tocoff       */
+    put32be(&out, 0);                /* ntoc         */
+    put32be(&out, 0);                /* modtaboff    */
+    put32be(&out, 0);                /* nmodtab      */
+    put32be(&out, 0);                /* extrefsymoff */
+    put32be(&out, 0);                /* nextrefsyms  */
+    put32be(&out, n_indirect ? indirect_file_off : 0); /* indirectsymoff */
+    put32be(&out, n_indirect);       /* nindirectsyms */
+    put32be(&out, 0);                /* extreloff    */
+    put32be(&out, 0);                /* nextrel      */
+    put32be(&out, 0);                /* locreloff    */
+    put32be(&out, 0);                /* nlocrel      */
 
     /* (suppress unused warnings) */
     (void)lc_segment_off; (void)lc_symtab_off; (void)lc_dysymtab_off;
@@ -993,14 +1391,19 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     /* Section data, in the order we assigned offsets. */
     for (i = 0; i < nsec; i++) {
         uint32_t a;
+        const unsigned char *src = NULL;
         if ((smap[i].flags & 0xff) == S_ZEROFILL)
             continue;
         a = 1u << smap[i].align_log2;
         while (out.len < smap[i].offset)
             put8(&out, 0);
         (void)a;
-        if (smap[i].elf->data && smap[i].size)
-            obuf_put(&out, smap[i].elf->data, smap[i].size);
+        if (smap[i].data)
+            src = smap[i].data;             /* synthesized section */
+        else if (smap[i].elf && smap[i].elf->data)
+            src = smap[i].elf->data;
+        if (src && smap[i].size)
+            obuf_put(&out, src, smap[i].size);
     }
 
     /* Relocations. */
@@ -1008,6 +1411,13 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         while (out.len < reloc_file_off)
             put8(&out, 0);
         obuf_put(&out, relbuf.buf, relbuf.len);
+    }
+
+    /* Indirect symbol table (if any stubs). */
+    if (n_indirect) {
+        while (out.len < indirect_file_off)
+            put8(&out, 0);
+        obuf_put(&out, indirect_buf.buf, indirect_buf.len);
     }
 
     /* Symbol table, string table. */
@@ -1040,8 +1450,15 @@ cleanup:
     if (fp) fclose(fp);
     free_symtab(&sb);
     tcc_free(relbuf.buf);
+    tcc_free(indirect_buf.buf);
     tcc_free(out.buf);
-    tcc_free(smap);
+    if (smap) {
+        for (i = 0; i < nsec; i++)
+            tcc_free(smap[i].data);
+        tcc_free(smap);
+    }
+    tcc_free(stubs);
+    tcc_free(stub_for_elfsym);
     tcc_free(section_lc_off);
     return ret;
 }

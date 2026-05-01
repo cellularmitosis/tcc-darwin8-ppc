@@ -19,6 +19,7 @@ tarball), demos for new capabilities use `v<X>.<Y>.<Z>-<slug>.c`.
 | [s011-struct.c](s011-struct.c) | [011 — structs](../docs/sessions/011-structs/README.md) | `42` | Two struct types, member access (`.` and `->`), pass-by-pointer to helpers, struct holding pointer-to-array. Confirms structs work for the patterns tcc itself uses. |
 | [s012-varargs.c](s012-varargs.c) | [012 — varargs](../docs/sessions/012-varargs/README.md) | `42` | `sum_n(7, 1..7) + 14 = 42`. Standard `<stdarg.h>`. Prolog now spills all 8 GPR arg slots to caller's parameter save area so the standard char*-based va_list machinery walks forward correctly. |
 | [s013-floating-point.c](s013-floating-point.c) | [013 — IEEE 754 single + double FP](../docs/sessions/013-floating-point/README.md) | `27` | `poly(a, b, c, x) = a*x*x + b*x + c` evaluated as `poly(1, 2, 3, 4)`. FP load/store/arithmetic, FP arg passing (f1..f8), int↔FP conversions, FP comparisons. |
+| [s016-hello-printf.sh](s016-hello-printf.sh) | [016 — PPC PIC stubs](../docs/sessions/016-ppc-plt-stubs/README.md) | prints `hello from tcc-built program` | First-ever `printf` from tcc-emitted code on G3. PowerPC `__picsymbolstub1` + `__la_symbol_ptr` + indirect symbol table for late-binding external function calls. |
 
 ## How to run any demo
 

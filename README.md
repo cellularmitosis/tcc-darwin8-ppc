@@ -31,7 +31,9 @@ self-hosts on Tiger.
 | ✅ | Varargs (`<stdarg.h>`, `va_start`/`va_arg`/`va_end`) ([012](docs/sessions/012-varargs/README.md), [demo](demos/s012-varargs.c)) |
 | ✅ | IEEE 754 single + double floating point ([013](docs/sessions/013-floating-point/README.md), [demo](demos/s013-floating-point.c)) |
 | 🟡 | **Bootstrap attempt: every tcc source file compiles to .o with our tcc** ([014](docs/sessions/014-bootstrap-attempt/README.md)) — 2 codegen gaps + 1 macho bug remain before self-host links |
-| ⏳ | Dylib loading (printf), G3 tarball |
+| 🟡 | **Bootstrap link: 11/11 .o files link to a 463KB tcc-self binary** ([015](docs/sessions/015-bootstrap-gaps/README.md)) — needs PLT stubs to actually run |
+| ✅ | **PPC PIC stubs — tcc-emitted `printf` works** ([016](docs/sessions/016-ppc-plt-stubs/README.md), [demo](demos/s016-hello-printf.sh)) |
+| ⏳ | External-data PIC indirection (final blocker for tcc-self), G3 tarball |
 | ⏳ | Dylib loading (printf et al), executable output |
 | ❌ | Self-host bootstrap on Tiger |
 | ❌ | G3 tarball |
