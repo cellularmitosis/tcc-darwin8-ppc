@@ -77,6 +77,7 @@ ST_FUNC void ppc_pic_pairs_reset(void);
 #define MH_EXECUTE              2
 #define MH_NOUNDEFS             0x1
 #define MH_DYLDLINK             0x4
+#define MH_BINDATLOAD           0x8
 #define MH_TWOLEVEL             0x80
 
 /* PPC thread state (for LC_UNIXTHREAD; matches /usr/include/mach/ppc/thread_status.h). */
@@ -1081,30 +1082,38 @@ static void free_symtab(struct symtab_build *sb)
  * ================================================================== */
 
 /* ====================================================================
- * MH_EXECUTE writer (Phase A)
+ * MH_EXECUTE writer
  *
- * Writes a self-contained Mach-O executable for the simplest case:
- * a single text section, no external/libSystem references, no global
- * data. Layout:
- *   __PAGEZERO  vmaddr 0          vmsize 0x1000   no file content
- *   __TEXT      vmaddr 0x1000     contains header+cmds + .text + crt-shim
- *   __LINKEDIT  vmaddr next-page  contains symtab+strtab
+ * Writes a self-contained Mach-O executable. Layout:
+ *   __PAGEZERO  vmaddr 0           vmsize 0x1000     no file content
+ *   __TEXT      vmaddr 0x1000      file 0..N
+ *                 header+cmds, __text + crt-shim, __const, __picsymbolstub1
+ *   __DATA      vmaddr next-page   file N..M
+ *                 __data, __nl_symbol_ptr (function ptrs for libSystem),
+ *                 __bss
+ *   __LINKEDIT  vmaddr next-page   file M..
+ *                 indirect symtab, symtab, strtab
  *
- * The crt-shim is a tiny stub appended to .text:
- *     bl   _main          ; call user's main
- *     li   r0, 1          ; SYS_exit
- *     sc                  ; trap to kernel; r3 = main's return value
+ * Plus LC_LOAD_DYLINKER, LC_LOAD_DYLIB libSystem, LC_SYMTAB,
+ * LC_DYSYMTAB, LC_UNIXTHREAD with srr0 = entry.
+ *
+ * The crt-shim is a 4-instruction tail appended to .text:
+ *     bl   _main              ; r3 = main's return value
+ *     li   r0, 1              ; SYS_exit
+ *     sc                      ; trap to kernel
+ *     trap                    ; defensive
  * Entry point (LC_UNIXTHREAD srr0) is set to the shim.
  *
- * Phase B will extend this for libSystem stubs (printf et al.).
+ * Stubs use NON-LAZY binding: each stub is 4 instructions
+ * (lis/lwz/mtctr/bctr) that loads the function ptr from a __nl_symbol_ptr
+ * slot; dyld resolves all such slots at load time.
  * ================================================================== */
 
 #define EXE_PAGEZERO_VMSIZE     0x1000
 #define EXE_TEXT_VMADDR_BASE    0x1000
 #define EXE_PAGE_SIZE           0x1000
 
-/* Helper: locate _main's offset within the .text section. Returns -1 if
- * not found. */
+/* Helper: locate _main's offset within the .text section. */
 static int exe_find_main_offset(TCCState *s1, Section *text)
 {
     int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
@@ -1112,8 +1121,6 @@ static int exe_find_main_offset(TCCState *s1, Section *text)
     for (i = 1; i < nsyms; i++) {
         ElfW(Sym) *sym = &((ElfW(Sym) *)s1->symtab->data)[i];
         const char *name = (char *)s1->symtab->link->data + sym->st_name;
-        /* Names in s1->symtab already have leading underscores on
-         * Mach-O (s1->leading_underscore is set in libtcc.c). */
         if (sym->st_shndx == text->sh_num && name
             && (!strcmp(name, "_main") || !strcmp(name, "main")))
             return (int)sym->st_value;
@@ -1121,12 +1128,26 @@ static int exe_find_main_offset(TCCState *s1, Section *text)
     return -1;
 }
 
-/* Helper: emit the crt-shim into `text` after the user code. The shim:
- *   bl   _main            (REL24, displacement = main_off - shim_off)
- *   li   r0, 1            (SYS_exit)
+/* Helper: emit the crt-shim into `text` after the user code.
+ *
+ * Apple's crt1 (the standard /usr/lib/crt1.o) does considerably more
+ * than this: it aligns r1 to a 32-byte boundary, parses argc/argv/envp
+ * off the kernel stack and stashes them in libSystem globals
+ * (_NXArgc, _NXArgv, _environ), and chains into __dyld_init to ensure
+ * library initializers have run. We replicate the bare minimum:
+ *
+ *   addi r1, r1, -4           ; the kernel hands us r1 pointing at argc
+ *   rlwinm r1, r1, 0, 0, 26   ; align r1 down to 32 bytes
+ *   li   r0, 0
+ *   stw  r0, 0(r1)            ; clear the back-chain word
+ *   stwu r1, -64(r1)          ; reserve a small linkage frame
+ *   bl   _main                ; r3 = main's return value
+ *   li   r0, 1                ; SYS_exit
  *   sc
- *   trap                  (defensive, sc shouldn't return)
- * Returns the shim's offset within text (= entry point offset). */
+ *   trap                      ; defensive (sc doesn't return)
+ *
+ * 9 instructions, 36 bytes.
+ */
 static int exe_emit_crt_shim(TCCState *s1, unsigned char *text_data,
                              int *text_size, int main_off)
 {
@@ -1134,47 +1155,116 @@ static int exe_emit_crt_shim(TCCState *s1, unsigned char *text_data,
     int disp;
     uint32_t bl_word;
     uint32_t i;
+    int bl_off;
 
-    disp = main_off - shim_off;  /* relative branch displacement */
+    /* bl is the 6th instruction of the shim (offset 20). */
+    bl_off = shim_off + 20;
+    disp = main_off - bl_off;
     if (disp < -(1 << 25) || disp >= (1 << 25)) {
         tcc_error_noabort("ppc-macho: crt shim too far from main (disp=0x%x)",
                           (unsigned)disp);
         return -1;
     }
-    /* bl: opcode 18, AA=0, LK=1; displacement in bits 6..29 (4-byte aligned). */
     bl_word = 0x48000001u | ((uint32_t)disp & 0x03fffffc);
 
     i = shim_off;
-    text_data[i+0] = (bl_word >> 24) & 0xff;
-    text_data[i+1] = (bl_word >> 16) & 0xff;
-    text_data[i+2] = (bl_word >>  8) & 0xff;
-    text_data[i+3] =  bl_word        & 0xff;
-    /* li r0, 1  -> addi r0, 0, 1 = 0x38000001 */
-    text_data[i+4] = 0x38; text_data[i+5] = 0x00;
-    text_data[i+6] = 0x00; text_data[i+7] = 0x01;
-    /* sc       -> 0x44000002 */
-    text_data[i+8] = 0x44; text_data[i+9] = 0x00;
-    text_data[i+10]= 0x00; text_data[i+11]= 0x02;
-    /* trap (tw 31, 0, 0)  -> 0x7fe00008  (defensive; sc shouldn't return) */
-    text_data[i+12]= 0x7f; text_data[i+13]= 0xe0;
-    text_data[i+14]= 0x00; text_data[i+15]= 0x08;
+    /* addi r1, r1, -4   ->  0x3821fffc */
+    text_data[i+0]  = 0x38; text_data[i+1]  = 0x21;
+    text_data[i+2]  = 0xff; text_data[i+3]  = 0xfc;
+    /* rlwinm r1, r1, 0, 0, 26  ->  0x54210034
+       (rotate by 0, mask bits 0..26 = clear bottom 5 bits = 32-byte align)
+       Encoding: opcode 21, rS=1, rA=1, SH=0, MB=0, ME=26, Rc=0:
+         0x54000000 | (1<<21) | (1<<16) | (0<<11) | (0<<6) | (26<<1) | 0
+         = 0x54210034 */
+    text_data[i+4]  = 0x54; text_data[i+5]  = 0x21;
+    text_data[i+6]  = 0x00; text_data[i+7]  = 0x34;
+    /* li r0, 0  ->  0x38000000 */
+    text_data[i+8]  = 0x38; text_data[i+9]  = 0x00;
+    text_data[i+10] = 0x00; text_data[i+11] = 0x00;
+    /* stw r0, 0(r1)  ->  0x90010000 */
+    text_data[i+12] = 0x90; text_data[i+13] = 0x01;
+    text_data[i+14] = 0x00; text_data[i+15] = 0x00;
+    /* stwu r1, -64(r1)  ->  0x9421ffc0 */
+    text_data[i+16] = 0x94; text_data[i+17] = 0x21;
+    text_data[i+18] = 0xff; text_data[i+19] = 0xc0;
+    /* bl _main */
+    text_data[i+20] = (bl_word >> 24) & 0xff;
+    text_data[i+21] = (bl_word >> 16) & 0xff;
+    text_data[i+22] = (bl_word >>  8) & 0xff;
+    text_data[i+23] =  bl_word        & 0xff;
+    /* li r0, 1 */
+    text_data[i+24] = 0x38; text_data[i+25] = 0x00;
+    text_data[i+26] = 0x00; text_data[i+27] = 0x01;
+    /* sc */
+    text_data[i+28] = 0x44; text_data[i+29] = 0x00;
+    text_data[i+30] = 0x00; text_data[i+31] = 0x02;
+    /* trap */
+    text_data[i+32] = 0x7f; text_data[i+33] = 0xe0;
+    text_data[i+34] = 0x00; text_data[i+35] = 0x08;
 
-    *text_size = shim_off + 16;
+    *text_size = shim_off + 36;
     return shim_off;
 }
 
-/* Resolve any internal R_PPC_REL24 relocations in the text section
- * against the absolute VM addresses of their target symbols. Returns 0
- * on success, -1 on error (e.g. external reference encountered).
- *
- * `text_vmaddr` is the VM address where the text section will be loaded.
- * Symbols are looked up in s1->symtab; defined symbols get their
- * st_value + text_vmaddr; undef symbols are an error in Phase A. */
-static int exe_resolve_text_relocs(TCCState *s1, Section *text,
-                                   uint32_t text_vmaddr,
-                                   unsigned char *text_data)
+/* Per-section layout info used during EXE writing. */
+struct exe_sect {
+    Section  *elf;          /* tcc Section, or NULL for synthesized */
+    uint32_t  vmaddr;       /* assigned VM address */
+    uint32_t  size;         /* size in bytes */
+    uint32_t  file_off;     /* file offset (or 0 for zerofill) */
+    int       is_zerofill;
+};
+
+/* Look up the VM address of a symbol given the laid-out sections.
+ * For external (undef) symbols that have a stub assigned, returns
+ * the stub address. Returns 0 and sets *err on error. */
+static uint32_t exe_sym_addr(TCCState *s1, int symidx,
+                             struct exe_sect *sects, int nsec,
+                             struct extern_stub *stubs, int nstubs,
+                             int *stub_for_elfsym,
+                             const char **err_name)
 {
-    Section *rel = text->reloc;
+    ElfW(Sym) *sym = &((ElfW(Sym) *)s1->symtab->data)[symidx];
+    int j;
+    if (sym->st_shndx == SHN_UNDEF) {
+        if (stub_for_elfsym && stub_for_elfsym[symidx] >= 0)
+            return stubs[stub_for_elfsym[symidx]].addr;
+        *err_name = (char *)s1->symtab->link->data + sym->st_name;
+        return 0;
+    }
+    for (j = 0; j < nsec; j++) {
+        if (sects[j].elf && sects[j].elf->sh_num == sym->st_shndx)
+            return sects[j].vmaddr + sym->st_value;
+    }
+    *err_name = (char *)s1->symtab->link->data + sym->st_name;
+    return 0;
+}
+
+/* Bundled context for exe_resolve_section_relocs(); keeps the param
+ * count to 5 so it stays within tcc's PPC backend's 8-GPR-slot
+ * function call limit. */
+struct exe_reloc_ctx {
+    struct exe_sect    *all_sects;
+    int                 nsec;
+    struct extern_stub *stubs;
+    int                 nstubs;
+    int                *stub_for_elfsym;
+};
+
+/* Resolve relocations within `s` against the laid-out sections and
+ * stubs. Modifies the section data buffer in place. Returns 0 on
+ * success, -1 on error. */
+static int exe_resolve_section_relocs(TCCState *s1, Section *s,
+                                      uint32_t sect_vmaddr,
+                                      unsigned char *sect_data,
+                                      struct exe_reloc_ctx *ctx)
+{
+    struct exe_sect *all_sects = ctx->all_sects;
+    int nsec = ctx->nsec;
+    struct extern_stub *stubs = ctx->stubs;
+    int nstubs = ctx->nstubs;
+    int *stub_for_elfsym = ctx->stub_for_elfsym;
+    Section *rel = s->reloc;
     int nrel, i;
     ElfW_Rel *rels;
     if (!rel || !rel->data_offset)
@@ -1184,290 +1274,629 @@ static int exe_resolve_text_relocs(TCCState *s1, Section *text,
     for (i = 0; i < nrel; i++) {
         int type = ELFW(R_TYPE)(rels[i].r_info);
         int symidx = ELFW(R_SYM)(rels[i].r_info);
-        ElfW(Sym) *sym = &((ElfW(Sym) *)s1->symtab->data)[symidx];
         uint32_t reloc_off = rels[i].r_offset;
         uint32_t target_addr;
-        uint32_t inst, disp;
+        const char *err_name = NULL;
+        uint32_t inst;
 
-        if (sym->st_shndx == SHN_UNDEF) {
-            const char *name = (char *)s1->symtab->link->data + sym->st_name;
-            tcc_error_noabort("ppc-macho: undefined external symbol '%s' "
-                              "in -o exe mode (Phase A doesn't link libSystem)",
-                              name && name[0] ? name : "?");
+        target_addr = exe_sym_addr(s1, symidx, all_sects, nsec,
+                                    stubs, nstubs, stub_for_elfsym,
+                                    &err_name);
+        if (err_name) {
+            tcc_error_noabort("ppc-macho: undefined symbol '%s' "
+                              "(no stub allocated; only function "
+                              "calls via REL24 get stubs in -o exe)",
+                              err_name);
             return -1;
         }
-        if (sym->st_shndx != text->sh_num) {
-            tcc_error_noabort("ppc-macho: cross-section reloc not yet "
-                              "supported in -o exe (sym shndx %d, text %d)",
-                              sym->st_shndx, text->sh_num);
-            return -1;
-        }
-        target_addr = text_vmaddr + sym->st_value;
 
         switch (type) {
         case R_PPC_REL24: {
-            int32_t bdisp = (int32_t)(target_addr - (text_vmaddr + reloc_off));
+            int32_t bdisp = (int32_t)(target_addr - (sect_vmaddr + reloc_off));
             if (bdisp < -(1 << 25) || bdisp >= (1 << 25)) {
                 tcc_error_noabort("ppc-macho: REL24 out of range");
                 return -1;
             }
-            inst = ((uint32_t)text_data[reloc_off] << 24)
-                 | ((uint32_t)text_data[reloc_off+1] << 16)
-                 | ((uint32_t)text_data[reloc_off+2] <<  8)
-                 |  (uint32_t)text_data[reloc_off+3];
+            inst = ((uint32_t)sect_data[reloc_off] << 24)
+                 | ((uint32_t)sect_data[reloc_off+1] << 16)
+                 | ((uint32_t)sect_data[reloc_off+2] <<  8)
+                 |  (uint32_t)sect_data[reloc_off+3];
             inst = (inst & ~0x03fffffc) | ((uint32_t)bdisp & 0x03fffffc);
-            text_data[reloc_off+0] = (inst >> 24) & 0xff;
-            text_data[reloc_off+1] = (inst >> 16) & 0xff;
-            text_data[reloc_off+2] = (inst >>  8) & 0xff;
-            text_data[reloc_off+3] =  inst        & 0xff;
+            sect_data[reloc_off+0] = (inst >> 24) & 0xff;
+            sect_data[reloc_off+1] = (inst >> 16) & 0xff;
+            sect_data[reloc_off+2] = (inst >>  8) & 0xff;
+            sect_data[reloc_off+3] =  inst        & 0xff;
             break;
         }
         case R_PPC_ADDR16_HA:
         case R_PPC_ADDR16_LO:
         case R_PPC_ADDR32: {
             uint16_t imm;
-            inst = ((uint32_t)text_data[reloc_off] << 24)
-                 | ((uint32_t)text_data[reloc_off+1] << 16)
-                 | ((uint32_t)text_data[reloc_off+2] <<  8)
-                 |  (uint32_t)text_data[reloc_off+3];
-            (void)disp;
+            inst = ((uint32_t)sect_data[reloc_off] << 24)
+                 | ((uint32_t)sect_data[reloc_off+1] << 16)
+                 | ((uint32_t)sect_data[reloc_off+2] <<  8)
+                 |  (uint32_t)sect_data[reloc_off+3];
             if (type == R_PPC_ADDR32) {
                 inst = target_addr;
             } else if (type == R_PPC_ADDR16_HA) {
                 imm = ((target_addr + 0x8000) >> 16) & 0xffff;
                 inst = (inst & ~0xffff) | imm;
-            } else {  /* R_PPC_ADDR16_LO */
+            } else {
                 imm = target_addr & 0xffff;
                 inst = (inst & ~0xffff) | imm;
             }
-            text_data[reloc_off+0] = (inst >> 24) & 0xff;
-            text_data[reloc_off+1] = (inst >> 16) & 0xff;
-            text_data[reloc_off+2] = (inst >>  8) & 0xff;
-            text_data[reloc_off+3] =  inst        & 0xff;
+            sect_data[reloc_off+0] = (inst >> 24) & 0xff;
+            sect_data[reloc_off+1] = (inst >> 16) & 0xff;
+            sect_data[reloc_off+2] = (inst >>  8) & 0xff;
+            sect_data[reloc_off+3] =  inst        & 0xff;
             break;
         }
+        case R_PPC_NONE:
+            break;
         default:
-            tcc_error_noabort("ppc-macho: reloc type %d not supported in "
-                              "-o exe yet", type);
+            tcc_error_noabort("ppc-macho: reloc type %d in -o exe "
+                              "not yet handled (sym '%s')", type,
+                              (char *)s1->symtab->link->data
+                              + ((ElfW(Sym) *)s1->symtab->data)[symidx].st_name);
             return -1;
         }
     }
     return 0;
 }
 
-/* Emit the actual MH_EXECUTE file. Returns 0 on success, -1 on error. */
+/* Write a 16-byte section name padded with NULs. */
+static void put_sectname(obuf *out, const char *name)
+{
+    char nm[16];
+    memset(nm, 0, sizeof(nm));
+    strncpy(nm, name, sizeof(nm));
+    obuf_put(out, nm, 16);
+}
+
+/* Write a Mach-O nlist entry (12 bytes). */
+static void put_nlist(obuf *nlist, uint32_t strx, uint8_t n_type,
+                      uint8_t n_sect, uint16_t n_desc, uint32_t n_value)
+{
+    put32be(nlist, strx);
+    put8(nlist, n_type);
+    put8(nlist, n_sect);
+    put8(nlist, (n_desc >> 8) & 0xff);
+    put8(nlist, n_desc & 0xff);
+    put32be(nlist, n_value);
+}
+
+/* The big one. */
 static int macho_output_exe(TCCState *s1, const char *filename)
 {
     obuf out;
-    Section *text = NULL;
+    obuf nlist, strtab, indirect;
+    Section *text = NULL, *rodata = NULL;
     int main_off, shim_off;
     int i, ret = -1;
     FILE *fp = NULL;
     int fd;
-    uint32_t text_seg_vmaddr = EXE_TEXT_VMADDR_BASE;  /* segment base */
-    uint32_t text_sect_vmaddr;                        /* section base = seg + hdr+cmds */
-    uint32_t text_data_size, text_seg_filesize, text_seg_vmsize;
-    uint32_t linkedit_file_off, linkedit_vmaddr;
+
+    /* External-stub bookkeeping (matches the OBJ writer). */
+    struct extern_stub *stubs = NULL;
+    int *stub_for_elfsym = NULL;
+    int nstubs = 0;
+    unsigned char *stub_data = NULL;
+    unsigned char *nl_ptr_data = NULL;
+
+    /* Section index ranges (1-based: __text=1). */
+    enum { SECT_TEXT = 1 };
+    int sect_const = 0, sect_stub = 0, sect_nlptr = 0;
+    int n_text_sects, n_data_sects, total_msects;
+
+    struct exe_sect sects[8];   /* generous; we never use more than 4 */
+    int nsec = 0;
+    int sect_idx_text = -1, sect_idx_rodata = -1;
+    int sect_idx_stub = -1, sect_idx_nlptr = -1;
+
+    /* Layout. */
+    uint32_t text_seg_vmaddr = EXE_TEXT_VMADDR_BASE;
+    uint32_t text_sect_vmaddr;
+    uint32_t hdr_and_lc_size, ncmds, total_cmds_size;
+    uint32_t text_data_size;
+    uint32_t cur_va, cur_off;
+    uint32_t text_seg_filesize, text_seg_vmsize;
+    uint32_t data_seg_vmaddr = 0, data_seg_file_off = 0;
+    uint32_t data_seg_filesize = 0;
+    uint32_t linkedit_vmaddr, linkedit_file_off, linkedit_filesize;
     uint32_t entry_addr;
-    uint32_t hdr_and_lc_size;
-    uint32_t ncmds = 4;          /* PAGEZERO, TEXT, LINKEDIT, SYMTAB, UNIXTHREAD = 5 */
-    /* (actually 5; bumped below) */
-    uint32_t pagezero_cmd_size = 56;     /* segment header sans sections */
-    uint32_t text_seg_cmd_size = 56 + 68; /* segment header + 1 section */
+    uint32_t indirect_file_off = 0, sym_file_off, str_file_off;
+
+    /* LC sizes. */
+    uint32_t pagezero_cmd_size = 56;
+    uint32_t text_seg_cmd_size, data_seg_cmd_size = 0;
     uint32_t linkedit_cmd_size = 56;
-    uint32_t symtab_cmd_size   = 24;
-    uint32_t unixthread_cmd_size = 8 + 8 + PPC_THREAD_STATE_COUNT * 4;
-    uint32_t total_cmds_size;
-    obuf nlist, strtab;
-    uint32_t main_str_off, start_str_off;
-    int nsyms_emit = 2;          /* _main + _start */
-    unsigned char *text_data = NULL;
+    uint32_t symtab_cmd_size = 24;
+    uint32_t dysymtab_cmd_size = 80;
+    uint32_t unixthread_cmd_size = 8 + 8 + 40 * 4;
+    /* dyld and dylib paths (always nul-terminated, then padded to 4). */
+    static const char dylib_path[] = "/usr/lib/libSystem.B.dylib";
+    static const char dyld_path[]  = "/usr/lib/dyld";
+    uint32_t dylib_path_aligned = (sizeof(dylib_path) + 3u) & ~3u;
+    uint32_t dyld_path_aligned  = (sizeof(dyld_path)  + 3u) & ~3u;
+    uint32_t dylib_cmd_size = 24 + dylib_path_aligned;
+    uint32_t dyld_cmd_size  = 12 + dyld_path_aligned;
+
+    /* Symtab counts. */
+    int n_localsym = 0, n_extdefsym = 0, n_undefsym = 0;
+    /* For each stub, the index of its symbol within nlist. */
+    int *stub_sym_idx = NULL;
+
+    unsigned char *text_data = NULL, *rodata_data = NULL;
     int new_text_size;
 
-    memset(&out,    0, sizeof(out));
-    memset(&nlist,  0, sizeof(nlist));
-    memset(&strtab, 0, sizeof(strtab));
-    ncmds = 5;
+    memset(&out,      0, sizeof(out));
+    memset(&nlist,    0, sizeof(nlist));
+    memset(&strtab,   0, sizeof(strtab));
+    memset(&indirect, 0, sizeof(indirect));
+    memset(sects,     0, sizeof(sects));
 
-    /* Locate the .text section. */
+    /* ---- Find sections. ---- */
     for (i = 1; i < s1->nb_sections; i++) {
-        if (s1->sections[i]->sh_type == SHT_PROGBITS
-            && (s1->sections[i]->sh_flags & SHF_EXECINSTR)
-            && !strcmp(s1->sections[i]->name, ".text")) {
-            text = s1->sections[i];
-            break;
-        }
+        Section *s = s1->sections[i];
+        if (!s) continue;
+        if (s->sh_type == SHT_PROGBITS && (s->sh_flags & SHF_EXECINSTR)
+            && !strcmp(s->name, ".text"))
+            text = s;
+        else if (s->sh_type == SHT_PROGBITS && s->data_offset > 0
+            && (!strcmp(s->name, ".rodata") || !strcmp(s->name, ".data.ro")))
+            rodata = s;
     }
     if (!text || text->data_offset == 0) {
         tcc_error_noabort("ppc-macho: empty or missing .text section");
         return -1;
     }
-
-    /* Locate _main. */
     main_off = exe_find_main_offset(s1, text);
     if (main_off < 0) {
         tcc_error_noabort("ppc-macho: _main not defined in .text");
         return -1;
     }
 
-    /* Compute load-command region size first so we know where the
-     * text section actually lands within the __TEXT segment (right
-     * after the header + load commands). */
+    /* ---- Collect external function calls. ---- */
+    nstubs = collect_extern_stubs(s1, &stubs, &stub_for_elfsym);
+
+    /* ---- Plan section layout. ---- */
+    n_text_sects = 1;       /* __text */
+    if (rodata)
+        n_text_sects++;     /* __const */
+    if (nstubs > 0)
+        n_text_sects++;     /* __picsymbolstub1 (well, plain stub) */
+    n_data_sects = 0;
+    if (nstubs > 0)
+        n_data_sects++;     /* __nl_symbol_ptr */
+
+    total_msects = n_text_sects + n_data_sects;
+
+    /* ---- LC sizes -> hdr_and_lc_size. ---- */
+    text_seg_cmd_size = 56 + 68u * n_text_sects;
+    if (n_data_sects > 0)
+        data_seg_cmd_size = 56 + 68u * n_data_sects;
+
+    ncmds = 4;  /* PAGEZERO, TEXT, LINKEDIT, UNIXTHREAD */
     total_cmds_size = pagezero_cmd_size + text_seg_cmd_size
                     + linkedit_cmd_size + symtab_cmd_size
                     + unixthread_cmd_size;
+    if (n_data_sects > 0) {
+        ncmds++;
+        total_cmds_size += data_seg_cmd_size;
+    }
+    /* LC_SYMTAB is included in total_cmds_size above and ncmds+1 below. */
+    ncmds++;
+    if (nstubs > 0) {
+        ncmds += 3;  /* LC_LOAD_DYLINKER, LC_LOAD_DYLIB, LC_DYSYMTAB */
+        total_cmds_size += dyld_cmd_size + dylib_cmd_size + dysymtab_cmd_size;
+    }
     hdr_and_lc_size = 28 + total_cmds_size;
+
+    /* ---- Layout sections within __TEXT. ---- */
     text_sect_vmaddr = text_seg_vmaddr + hdr_and_lc_size;
+    /* Reserve room for the crt-shim (36 bytes); pad up to 4-byte
+     * alignment for the next section's start. */
+    text_data_size = (text->data_offset + 36u + 3u) & ~3u;
+    cur_va = text_sect_vmaddr + text_data_size;
+    cur_off = hdr_and_lc_size + text_data_size;
 
-    /* Make a writable copy of text + room for the crt shim (16 bytes). */
+    sect_idx_text = nsec;
+    sects[nsec].elf = text;
+    sects[nsec].vmaddr = text_sect_vmaddr;
+    sects[nsec].size = text_data_size;
+    sects[nsec].file_off = hdr_and_lc_size;
+    sects[nsec].is_zerofill = 0;
+    nsec++;
+
+    if (rodata) {
+        cur_va = (cur_va + 3u) & ~3u;
+        cur_off = (cur_off + 3u) & ~3u;
+        sect_idx_rodata = nsec;
+        sects[nsec].elf = rodata;
+        sects[nsec].vmaddr = cur_va;
+        sects[nsec].size = rodata->data_offset;
+        sects[nsec].file_off = cur_off;
+        sects[nsec].is_zerofill = 0;
+        nsec++;
+        cur_va += rodata->data_offset;
+        cur_off += rodata->data_offset;
+    }
+
+    if (nstubs > 0) {
+        /* Stubs are 16 bytes each (4 instructions). Align to 16. */
+        cur_va  = (cur_va  + 15u) & ~15u;
+        cur_off = (cur_off + 15u) & ~15u;
+        sect_idx_stub = nsec;
+        sects[nsec].elf = NULL;
+        sects[nsec].vmaddr = cur_va;
+        sects[nsec].size = nstubs * 16u;
+        sects[nsec].file_off = cur_off;
+        sects[nsec].is_zerofill = 0;
+        nsec++;
+        cur_va  += nstubs * 16u;
+        cur_off += nstubs * 16u;
+    }
+
+    /* Round up __TEXT segment to page. */
+    text_seg_filesize = (cur_off + EXE_PAGE_SIZE - 1u) & ~(uint32_t)(EXE_PAGE_SIZE - 1);
+    text_seg_vmsize   = text_seg_filesize;
+
+    /* ---- Layout __DATA. ---- */
+    if (n_data_sects > 0) {
+        data_seg_vmaddr   = text_seg_vmaddr + text_seg_filesize;
+        data_seg_file_off = text_seg_filesize;
+
+        sect_idx_nlptr = nsec;
+        sects[nsec].elf = NULL;
+        sects[nsec].vmaddr = data_seg_vmaddr;
+        sects[nsec].size = nstubs * 4u;
+        sects[nsec].file_off = data_seg_file_off;
+        sects[nsec].is_zerofill = 0;
+        nsec++;
+
+        data_seg_filesize = (nstubs * 4u + EXE_PAGE_SIZE - 1u)
+                          & ~(uint32_t)(EXE_PAGE_SIZE - 1);
+    }
+
+    /* ---- Layout __LINKEDIT. ---- */
+    linkedit_file_off = text_seg_filesize + data_seg_filesize;
+    linkedit_vmaddr   = text_seg_vmaddr + text_seg_filesize + data_seg_filesize;
+
+    /* Now we know the stub addresses; set them in `stubs[]`. */
+    if (nstubs > 0) {
+        for (i = 0; i < nstubs; i++) {
+            stubs[i].addr = sects[sect_idx_stub].vmaddr + i * 16u;
+            stubs[i].la_ptr_addr = sects[sect_idx_nlptr].vmaddr + i * 4u;
+        }
+    }
+
+    /* ---- Allocate writable copies of section data. ---- */
     new_text_size = text->data_offset;
-    text_data = tcc_malloc(new_text_size + 16);
+    text_data = tcc_malloc(new_text_size + 64);
     memcpy(text_data, text->data, new_text_size);
-    memset(text_data + new_text_size, 0, 16);
+    memset(text_data + new_text_size, 0, 64);
 
-    /* Resolve REL24 relocations within text (all internal in Phase A). */
-    if (exe_resolve_text_relocs(s1, text, text_sect_vmaddr, text_data) < 0)
-        goto cleanup;
+    if (rodata) {
+        rodata_data = tcc_malloc(rodata->data_offset);
+        memcpy(rodata_data, rodata->data, rodata->data_offset);
+    }
 
-    /* Append crt shim. shim_off is its byte-offset in the section data
-     * (and thus also relative to text_sect_vmaddr). */
+    /* ---- Resolve relocations in text and rodata. ---- */
+    {
+        struct exe_reloc_ctx ctx;
+        ctx.all_sects = sects;
+        ctx.nsec = nsec;
+        ctx.stubs = stubs;
+        ctx.nstubs = nstubs;
+        ctx.stub_for_elfsym = stub_for_elfsym;
+        if (exe_resolve_section_relocs(s1, text, text_sect_vmaddr,
+                                        text_data, &ctx) < 0)
+            goto cleanup;
+        if (rodata && exe_resolve_section_relocs(s1, rodata,
+                                                  sects[sect_idx_rodata].vmaddr,
+                                                  rodata_data, &ctx) < 0)
+            goto cleanup;
+    }
+
+    /* ---- Append crt-shim. ---- */
     shim_off = exe_emit_crt_shim(s1, text_data, &new_text_size, main_off);
     if (shim_off < 0)
         goto cleanup;
-    text_data_size = (uint32_t)new_text_size;
+    /* text_data_size already accounts for the +16 shim; size is fixed. */
     entry_addr = text_sect_vmaddr + (uint32_t)shim_off;
-    /* The text segment needs to start with the header + cmds, then the
-     * actual code. The whole thing fits in the first page (we'll error
-     * out otherwise). */
-    if (hdr_and_lc_size + text_data_size > EXE_PAGE_SIZE) {
-        tcc_error_noabort("ppc-macho: text + headers exceed one page "
-                          "(%u bytes); exe layout needs to span pages "
-                          "(deferred)", hdr_and_lc_size + text_data_size);
-        goto cleanup;
+
+    /* ---- Generate stub bytes (4 instructions per stub):
+     *      lis   r12, ha(slot)
+     *      lwz   r12, lo(slot)(r12)
+     *      mtctr r12
+     *      bctr
+     */
+    if (nstubs > 0) {
+        stub_data = tcc_mallocz(nstubs * 16);
+        nl_ptr_data = tcc_mallocz(nstubs * 4);  /* zero-filled; dyld writes */
+        for (i = 0; i < nstubs; i++) {
+            uint32_t slot = stubs[i].la_ptr_addr;
+            uint16_t ha = (uint16_t)((slot + 0x8000) >> 16);
+            uint16_t lo = (uint16_t)(slot & 0xffff);
+            uint32_t insns[4];
+            int j;
+            insns[0] = 0x3d800000u | ha;        /* lis r12, ha */
+            insns[1] = 0x818c0000u | lo;        /* lwz r12, lo(r12) */
+            insns[2] = 0x7d8903a6u;             /* mtctr r12 */
+            insns[3] = 0x4e800420u;             /* bctr */
+            for (j = 0; j < 4; j++) {
+                stub_data[i*16 + j*4 + 0] = (insns[j] >> 24) & 0xff;
+                stub_data[i*16 + j*4 + 1] = (insns[j] >> 16) & 0xff;
+                stub_data[i*16 + j*4 + 2] = (insns[j] >>  8) & 0xff;
+                stub_data[i*16 + j*4 + 3] =  insns[j]        & 0xff;
+            }
+        }
     }
-    text_seg_filesize = EXE_PAGE_SIZE;       /* round up to page */
-    text_seg_vmsize   = EXE_PAGE_SIZE;
-    linkedit_file_off = EXE_PAGE_SIZE;
-    linkedit_vmaddr   = text_seg_vmaddr + EXE_PAGE_SIZE;
 
-    /* Build minimal symbol table: _main and _start. */
-    obuf_put(&strtab, "", 1);                /* offset 0 = empty */
-    main_str_off = (uint32_t)strtab.len;
-    obuf_put(&strtab, "_main", 6);
-    start_str_off = (uint32_t)strtab.len;
-    obuf_put(&strtab, "_start", 7);
-    /* nlist entries (12 bytes each: n_strx, n_type, n_sect, n_desc, n_value). */
-    /* _main */
-    put32be(&nlist, main_str_off);
-    put8(&nlist, N_SECT | N_EXT);
-    put8(&nlist, 1);                                /* n_sect = 1 (__text) */
-    put8(&nlist, 0); put8(&nlist, 0);                /* n_desc */
-    put32be(&nlist, text_sect_vmaddr + main_off);    /* n_value */
-    /* _start */
-    put32be(&nlist, start_str_off);
-    put8(&nlist, N_SECT | N_EXT);
-    put8(&nlist, 1);
-    put8(&nlist, 0); put8(&nlist, 0);
-    put32be(&nlist, entry_addr);
+    /* ---- Build symbol table.
+     *
+     * Three groups required by Mach-O DYSYMTAB:
+     *   1. local syms (defined, non-external)
+     *   2. extdef syms (defined, external) — _main, _start
+     *   3. undef syms — one per stub (e.g. _printf)
+     *
+     * We only emit the canonical entries: _main, _start, and one undef
+     * per stub. Local syms not strictly required for an executable. */
+    obuf_put(&strtab, "", 1);
 
-    /* ---- Mach header. ---- */
+    /* No locals in our minimal symtab. */
+    n_localsym = 0;
+
+    /* Externally-defined: _main, _start. */
+    {
+        uint32_t main_strx = (uint32_t)strtab.len;
+        obuf_put(&strtab, "_main", 6);
+        put_nlist(&nlist, main_strx, N_SECT | N_EXT, SECT_TEXT, 0,
+                  text_sect_vmaddr + main_off);
+        n_extdefsym++;
+    }
+    {
+        uint32_t start_strx = (uint32_t)strtab.len;
+        obuf_put(&strtab, "_start", 7);
+        put_nlist(&nlist, start_strx, N_SECT | N_EXT, SECT_TEXT, 0,
+                  entry_addr);
+        n_extdefsym++;
+    }
+
+    /* Undef externals: one per stub. n_desc carries the two-level
+     * namespace library ordinal in its high byte; ord 1 = first
+     * LC_LOAD_DYLIB (libSystem in our case). Without this dyld
+     * looks for the symbol in our own executable and fails. */
+    if (nstubs > 0) {
+        stub_sym_idx = tcc_mallocz(nstubs * sizeof(int));
+        for (i = 0; i < nstubs; i++) {
+            ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + stubs[i].elfsym_idx;
+            const char *name = (char *)s1->symtab->link->data + esym->st_name;
+            uint32_t strx = (uint32_t)strtab.len;
+            uint16_t n_desc = (1u << 8);   /* LIBRARY_ORDINAL = 1 */
+            obuf_put(&strtab, name, strlen(name) + 1);
+            stub_sym_idx[i] = n_localsym + n_extdefsym + n_undefsym;
+            put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
+            n_undefsym++;
+        }
+    }
+
+    /* ---- Build indirect symbol table.
+     *
+     * One entry per __nl_symbol_ptr slot: the symbol index of the
+     * corresponding undef-external. dyld uses this to know which
+     * symbol to bind the slot to. (For non-lazy ptrs, dyld resolves
+     * at load time.) */
+    if (nstubs > 0) {
+        for (i = 0; i < nstubs; i++)
+            put32be(&indirect, stub_sym_idx[i]);
+    }
+
+    /* ---- Compute __LINKEDIT layout. ---- */
+    {
+        uint32_t loff = linkedit_file_off;
+        if (nstubs > 0) {
+            indirect_file_off = loff;
+            loff += (uint32_t)indirect.len;
+        }
+        sym_file_off = loff;
+        loff += (uint32_t)nlist.len;
+        str_file_off = loff;
+        loff += (uint32_t)strtab.len;
+        linkedit_filesize = loff - linkedit_file_off;
+    }
+
+    /* ---- Serialize: Mach header. ---- */
     put32be(&out, MH_MAGIC);
     put32be(&out, CPU_TYPE_POWERPC);
     put32be(&out, CPU_SUBTYPE_POWERPC_ALL);
     put32be(&out, MH_EXECUTE);
     put32be(&out, ncmds);
     put32be(&out, total_cmds_size);
-    put32be(&out, MH_NOUNDEFS);              /* no dyld needed for Phase A */
+    put32be(&out, (nstubs > 0)
+                  ? (MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL)
+                  : MH_NOUNDEFS);
 
-    /* ---- LC_SEGMENT __PAGEZERO ---- */
+    /* ---- LC_SEGMENT __PAGEZERO. ---- */
     put32be(&out, LC_SEGMENT);
     put32be(&out, pagezero_cmd_size);
-    {
-        char nm[16] = "__PAGEZERO";
-        obuf_put(&out, nm, 16);
-    }
-    put32be(&out, 0);                        /* vmaddr */
-    put32be(&out, EXE_PAGEZERO_VMSIZE);      /* vmsize */
-    put32be(&out, 0);                        /* fileoff */
-    put32be(&out, 0);                        /* filesize */
-    put32be(&out, 0);                        /* maxprot */
-    put32be(&out, 0);                        /* initprot */
-    put32be(&out, 0);                        /* nsects */
-    put32be(&out, 0);                        /* flags */
+    put_sectname(&out, "__PAGEZERO");
+    put32be(&out, 0);
+    put32be(&out, EXE_PAGEZERO_VMSIZE);
+    put32be(&out, 0);
+    put32be(&out, 0);
+    put32be(&out, 0);
+    put32be(&out, 0);
+    put32be(&out, 0);
+    put32be(&out, 0);
 
-    /* ---- LC_SEGMENT __TEXT ---- */
+    /* ---- LC_SEGMENT __TEXT. ---- */
     put32be(&out, LC_SEGMENT);
     put32be(&out, text_seg_cmd_size);
-    {
-        char nm[16] = "__TEXT";
-        obuf_put(&out, nm, 16);
-    }
+    put_sectname(&out, "__TEXT");
     put32be(&out, text_seg_vmaddr);
     put32be(&out, text_seg_vmsize);
-    put32be(&out, 0);                        /* fileoff: start of file */
+    put32be(&out, 0);
     put32be(&out, text_seg_filesize);
     put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
     put32be(&out, VM_PROT_READ | VM_PROT_EXECUTE);
-    put32be(&out, 1);                        /* nsects */
-    put32be(&out, 0);                        /* flags */
-    /* one section: __text */
-    {
-        char nm[16] = "__text";
-        obuf_put(&out, nm, 16);
-    }
-    {
-        char nm[16] = "__TEXT";
-        obuf_put(&out, nm, 16);
-    }
-    put32be(&out, text_sect_vmaddr);                 /* addr */
-    put32be(&out, text_data_size);                  /* size */
-    put32be(&out, hdr_and_lc_size);                 /* offset */
-    put32be(&out, 2);                                /* align (2^2) */
-    put32be(&out, 0);                                /* reloff */
-    put32be(&out, 0);                                /* nreloc */
+    put32be(&out, n_text_sects);
+    put32be(&out, 0);
+    /* __text section header */
+    put_sectname(&out, "__text");
+    put_sectname(&out, "__TEXT");
+    put32be(&out, sects[sect_idx_text].vmaddr);
+    put32be(&out, sects[sect_idx_text].size);
+    put32be(&out, sects[sect_idx_text].file_off);
+    put32be(&out, 2);   /* align 2^2 */
+    put32be(&out, 0);
+    put32be(&out, 0);
     put32be(&out, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS);
-    put32be(&out, 0);                                /* reserved1 */
-    put32be(&out, 0);                                /* reserved2 */
+    put32be(&out, 0);
+    put32be(&out, 0);
+    /* __const if present */
+    if (rodata) {
+        put_sectname(&out, "__const");
+        put_sectname(&out, "__TEXT");
+        put32be(&out, sects[sect_idx_rodata].vmaddr);
+        put32be(&out, sects[sect_idx_rodata].size);
+        put32be(&out, sects[sect_idx_rodata].file_off);
+        put32be(&out, 2);
+        put32be(&out, 0);
+        put32be(&out, 0);
+        put32be(&out, S_REGULAR);
+        put32be(&out, 0);
+        put32be(&out, 0);
+    }
+    /* stub section if present. We use plain S_REGULAR (not
+     * S_SYMBOL_STUBS) because our stubs are simple PIC-free loader
+     * code that reads from the __nl_symbol_ptr slot — they don't
+     * need binding themselves; only the slots do. That keeps the
+     * indirect symbol table to N entries (one per nl_ptr). */
+    if (nstubs > 0) {
+        put_sectname(&out, "__symbol_stub");
+        put_sectname(&out, "__TEXT");
+        put32be(&out, sects[sect_idx_stub].vmaddr);
+        put32be(&out, sects[sect_idx_stub].size);
+        put32be(&out, sects[sect_idx_stub].file_off);
+        put32be(&out, 4);     /* align 2^4 = 16 */
+        put32be(&out, 0);
+        put32be(&out, 0);
+        put32be(&out, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS
+                       | S_ATTR_SOME_INSTRUCTIONS);
+        put32be(&out, 0);
+        put32be(&out, 0);
+    }
 
-    /* ---- LC_SEGMENT __LINKEDIT ---- */
+    /* ---- LC_SEGMENT __DATA. ---- */
+    if (n_data_sects > 0) {
+        put32be(&out, LC_SEGMENT);
+        put32be(&out, data_seg_cmd_size);
+        put_sectname(&out, "__DATA");
+        put32be(&out, data_seg_vmaddr);
+        put32be(&out, data_seg_filesize);
+        put32be(&out, data_seg_file_off);
+        put32be(&out, data_seg_filesize);
+        put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        put32be(&out, VM_PROT_READ | VM_PROT_WRITE);
+        put32be(&out, n_data_sects);
+        put32be(&out, 0);
+        /* __nl_symbol_ptr */
+        put_sectname(&out, "__nl_symbol_ptr");
+        put_sectname(&out, "__DATA");
+        put32be(&out, sects[sect_idx_nlptr].vmaddr);
+        put32be(&out, sects[sect_idx_nlptr].size);
+        put32be(&out, sects[sect_idx_nlptr].file_off);
+        put32be(&out, 2);
+        put32be(&out, 0);
+        put32be(&out, 0);
+        put32be(&out, S_NON_LAZY_SYMBOL_POINTERS);
+        put32be(&out, 0);     /* reserved1: indirect symtab base index */
+        put32be(&out, 0);
+    }
+
+    /* ---- LC_SEGMENT __LINKEDIT. ---- */
     put32be(&out, LC_SEGMENT);
     put32be(&out, linkedit_cmd_size);
-    {
-        char nm[16] = "__LINKEDIT";
-        obuf_put(&out, nm, 16);
-    }
+    put_sectname(&out, "__LINKEDIT");
     put32be(&out, linkedit_vmaddr);
-    put32be(&out, EXE_PAGE_SIZE);            /* round up vm size */
+    put32be(&out, (linkedit_filesize + EXE_PAGE_SIZE - 1u)
+                  & ~(uint32_t)(EXE_PAGE_SIZE - 1));
     put32be(&out, linkedit_file_off);
-    put32be(&out, (uint32_t)(nlist.len + strtab.len));
+    put32be(&out, linkedit_filesize);
     put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
     put32be(&out, VM_PROT_READ);
-    put32be(&out, 0);                        /* nsects */
-    put32be(&out, 0);                        /* flags */
+    put32be(&out, 0);
+    put32be(&out, 0);
 
-    /* ---- LC_SYMTAB ---- */
+    /* ---- LC_LOAD_DYLINKER (only if we use libSystem). ---- */
+    if (nstubs > 0) {
+        uint32_t k;
+        put32be(&out, LC_LOAD_DYLINKER);
+        put32be(&out, dyld_cmd_size);
+        put32be(&out, 12);    /* offset of name in this lc */
+        obuf_put(&out, dyld_path, sizeof(dyld_path));
+        for (k = sizeof(dyld_path); k < dyld_path_aligned; k++)
+            put8(&out, 0);
+    }
+
+    /* ---- LC_LOAD_DYLIB libSystem. ---- */
+    if (nstubs > 0) {
+        uint32_t k;
+        put32be(&out, LC_LOAD_DYLIB);
+        put32be(&out, dylib_cmd_size);
+        put32be(&out, 24);    /* name offset */
+        put32be(&out, 0);     /* timestamp */
+        put32be(&out, 0x00580000);   /* current_version (88.0.0) */
+        put32be(&out, 0x00010000);   /* compat_version  (1.0.0) */
+        obuf_put(&out, dylib_path, sizeof(dylib_path));
+        for (k = sizeof(dylib_path); k < dylib_path_aligned; k++)
+            put8(&out, 0);
+    }
+
+    /* ---- LC_SYMTAB. ---- */
     put32be(&out, LC_SYMTAB);
     put32be(&out, symtab_cmd_size);
-    put32be(&out, linkedit_file_off);                /* symoff */
-    put32be(&out, nsyms_emit);                       /* nsyms */
-    put32be(&out, linkedit_file_off + (uint32_t)nlist.len);  /* stroff */
-    put32be(&out, (uint32_t)strtab.len);             /* strsize */
+    put32be(&out, sym_file_off);
+    put32be(&out, n_localsym + n_extdefsym + n_undefsym);
+    put32be(&out, str_file_off);
+    put32be(&out, (uint32_t)strtab.len);
 
-    /* ---- LC_UNIXTHREAD with PPC_THREAD_STATE ---- */
+    /* ---- LC_DYSYMTAB. ---- */
+    if (nstubs > 0) {
+        put32be(&out, LC_DYSYMTAB);
+        put32be(&out, dysymtab_cmd_size);
+        put32be(&out, 0);                            /* ilocalsym */
+        put32be(&out, n_localsym);                   /* nlocalsym */
+        put32be(&out, n_localsym);                   /* iextdefsym */
+        put32be(&out, n_extdefsym);                  /* nextdefsym */
+        put32be(&out, n_localsym + n_extdefsym);     /* iundefsym */
+        put32be(&out, n_undefsym);                   /* nundefsym */
+        put32be(&out, 0);                            /* tocoff */
+        put32be(&out, 0);                            /* ntoc */
+        put32be(&out, 0);                            /* modtaboff */
+        put32be(&out, 0);                            /* nmodtab */
+        put32be(&out, 0);                            /* extrefsymoff */
+        put32be(&out, 0);                            /* nextrefsyms */
+        put32be(&out, indirect_file_off);            /* indirectsymoff */
+        put32be(&out, nstubs);                       /* nindirectsyms */
+        put32be(&out, 0);                            /* extreloff */
+        put32be(&out, 0);                            /* nextrel */
+        put32be(&out, 0);                            /* locreloff */
+        put32be(&out, 0);                            /* nlocrel */
+    }
+
+    /* ---- LC_UNIXTHREAD with PPC_THREAD_STATE. ---- */
     put32be(&out, LC_UNIXTHREAD);
     put32be(&out, unixthread_cmd_size);
     put32be(&out, PPC_THREAD_STATE);
     put32be(&out, PPC_THREAD_STATE_COUNT);
-    /* PPC_THREAD_STATE storage layout (40 32-bit words):
-     *   srr0, srr1, r0..r31, cr, xer, lr, ctr, mq, vrsave.
-     * (otool's display renames index 0 as "srr0" but prints registers
-     * in a different visual order.) srr0 holds the entry PC. */
     {
         int wi;
         for (wi = 0; wi < PPC_THREAD_STATE_COUNT; wi++) {
             uint32_t v = 0;
             if (wi == 0)
-                v = entry_addr;     /* srr0 */
+                v = entry_addr;       /* srr0 = entry PC */
             put32be(&out, v);
         }
     }
@@ -1477,10 +1906,40 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         put8(&out, 0);
     obuf_put(&out, text_data, text_data_size);
 
-    /* ---- Pad to LINKEDIT page, then write nlist + strtab. ---- */
+    /* ---- rodata. ---- */
+    if (rodata) {
+        while (out.len < sects[sect_idx_rodata].file_off)
+            put8(&out, 0);
+        obuf_put(&out, rodata_data, sects[sect_idx_rodata].size);
+    }
+
+    /* ---- stubs. ---- */
+    if (nstubs > 0) {
+        while (out.len < sects[sect_idx_stub].file_off)
+            put8(&out, 0);
+        obuf_put(&out, stub_data, sects[sect_idx_stub].size);
+    }
+
+    /* ---- Pad to __DATA boundary. ---- */
+    if (n_data_sects > 0) {
+        while (out.len < data_seg_file_off)
+            put8(&out, 0);
+        obuf_put(&out, nl_ptr_data, sects[sect_idx_nlptr].size);
+    }
+
+    /* ---- Pad to __LINKEDIT, then indirect/sym/strtab. ---- */
     while (out.len < linkedit_file_off)
         put8(&out, 0);
+    if (nstubs > 0) {
+        while (out.len < indirect_file_off)
+            put8(&out, 0);
+        obuf_put(&out, indirect.buf, indirect.len);
+    }
+    while (out.len < sym_file_off)
+        put8(&out, 0);
     obuf_put(&out, nlist.buf, nlist.len);
+    while (out.len < str_file_off)
+        put8(&out, 0);
     obuf_put(&out, strtab.buf, strtab.len);
 
     /* ---- Write file. ---- */
@@ -1495,12 +1954,11 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         tcc_error_noabort("short write to '%s'", filename);
         goto cleanup;
     }
-    /* Ensure executable bits. */
     fclose(fp); fp = NULL;
     chmod(filename, 0755);
     if (s1->verbose)
-        printf("<- %s (exe %u bytes, entry 0x%x)\n",
-               filename, (unsigned)out.len, entry_addr);
+        printf("<- %s (exe %u bytes, entry 0x%x, %d stubs)\n",
+               filename, (unsigned)out.len, entry_addr, nstubs);
     ret = 0;
 
 cleanup:
@@ -1508,9 +1966,17 @@ cleanup:
     tcc_free(out.buf);
     tcc_free(nlist.buf);
     tcc_free(strtab.buf);
+    tcc_free(indirect.buf);
     tcc_free(text_data);
+    tcc_free(rodata_data);
+    tcc_free(stub_data);
+    tcc_free(nl_ptr_data);
+    tcc_free(stubs);
+    tcc_free(stub_for_elfsym);
+    tcc_free(stub_sym_idx);
     return ret;
 }
+
 
 ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
 {
