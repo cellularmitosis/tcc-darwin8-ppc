@@ -1289,17 +1289,52 @@ ST_FUNC void gfunc_call(int nb_args)
                     } else {
                         hi_reg = -1;  /* shouldn't happen for LL after gv */
                     }
-                    /* Move HIGH into target_hi (mr is `or rD,rS,rS`). */
-                    if (hi_reg >= 0 && hi_reg != target_hi) {
-                        o(0x7c000378 | (hi_reg << 21)
-                                     | (target_hi << 16)
-                                     | (hi_reg << 11));
-                    }
-                    /* Move LOW into target_lo. */
-                    if (lo_reg != target_lo) {
-                        o(0x7c000378 | (lo_reg << 21)
-                                     | (target_lo << 16)
-                                     | (lo_reg << 11));
+                    /* Reorder the two `mr`s so we don't clobber a
+                     * source before reading it. Specifically when
+                     * lo_reg == target_hi or hi_reg == target_lo,
+                     * naive sequencing destroys data. The general
+                     * case (a swap, e.g. lo_reg=r3 hi_reg=r4 with
+                     * target_hi=r3 target_lo=r4) is solved with a
+                     * single r0 spill. r0 is volatile and never used
+                     * by tcc's allocator. */
+                    if (hi_reg >= 0
+                        && lo_reg == target_hi
+                        && hi_reg == target_lo) {
+                        /* Swap r{target_hi}<->r{target_lo} via r0. */
+                        o(0x7c000378 | (hi_reg << 21) | (0 << 16) | (hi_reg << 11));     /* mr r0, hi_reg */
+                        o(0x7c000378 | (lo_reg << 21) | (target_lo << 16) | (lo_reg << 11)); /* mr target_lo, lo_reg */
+                        o(0x7c000378 | (0 << 21) | (target_hi << 16) | (0 << 11));            /* mr target_hi, r0 */
+                    } else {
+                        /* Choose order so the source we still need
+                         * isn't overwritten first. If hi_reg is the
+                         * destination of the LOW move, do HIGH first;
+                         * otherwise do LOW first (so we don't clobber
+                         * lo_reg via target_hi). */
+                        if (hi_reg >= 0 && hi_reg == target_lo) {
+                            /* HIGH first. */
+                            if (hi_reg != target_hi) {
+                                o(0x7c000378 | (hi_reg << 21)
+                                             | (target_hi << 16)
+                                             | (hi_reg << 11));
+                            }
+                            if (lo_reg != target_lo) {
+                                o(0x7c000378 | (lo_reg << 21)
+                                             | (target_lo << 16)
+                                             | (lo_reg << 11));
+                            }
+                        } else {
+                            /* LOW first. */
+                            if (lo_reg != target_lo) {
+                                o(0x7c000378 | (lo_reg << 21)
+                                             | (target_lo << 16)
+                                             | (lo_reg << 11));
+                            }
+                            if (hi_reg >= 0 && hi_reg != target_hi) {
+                                o(0x7c000378 | (hi_reg << 21)
+                                             | (target_hi << 16)
+                                             | (hi_reg << 11));
+                            }
+                        }
                     }
                 } else {
                     gv(RC_R(gslot));
@@ -1329,6 +1364,20 @@ ST_FUNC void gfunc_call(int nb_args)
     tcc_free(gpr_alloc);
     tcc_free(fpr_alloc);
 
+    /* Determine the return type before we lose access to vtop. We need
+     * this so we can swap r3<->r4 after the call if the function
+     * returns a long long (Apple PPC ABI returns r3=HIGH, r4=LOW; tcc's
+     * convention expects r3=LOW, r4=HIGH per PUT_R_RET). */
+    int ret_is_ll = 0;
+    {
+        CType *ft = &vtop->type;
+        if ((ft->t & VT_BTYPE) == VT_FUNC && ft->ref) {
+            CType *rt = &ft->ref->type;
+            if ((rt->t & VT_BTYPE) == VT_LLONG)
+                ret_is_ll = 1;
+        }
+    }
+
     /* Emit the call. */
     if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST && (vtop->r & VT_SYM)) {
         /* Direct symbolic call. greloc records a relocation at `ind`
@@ -1354,6 +1403,20 @@ ST_FUNC void gfunc_call(int nb_args)
         o(0x7c0903a6 | (gpr << 21));
         /* bctrl */
         o(0x4e800421);
+    }
+
+    /* If the callee returned a long long, the Apple PPC ABI placed
+     * HIGH in r3 and LOW in r4 — but PUT_R_RET on the tccgen side will
+     * stamp this SValue as r=REG_IRET=r3 (= LOW per tcc convention),
+     * r2=REG_IRE2=r4 (= HIGH). The two views disagree, so the LOW
+     * half of the LL would silently become whatever HIGH actually is.
+     * Swap r3<->r4 here to match tcc's convention. */
+    if (ret_is_ll) {
+        /* mr r0, r3 ; mr r3, r4 ; mr r4, r0 — three-instruction swap
+         * via r0 (volatile, not used for any return value). */
+        o(0x7c601b78);  /* mr r0, r3 */
+        o(0x7c832378);  /* mr r3, r4 */
+        o(0x7c040378);  /* mr r4, r0 */
     }
 
     vtop--;  /* pop the function value; tccgen.c will push the return. */
@@ -1668,6 +1731,17 @@ ST_FUNC void gfunc_epilog(void)
      * already been patched to land at our current ind. We don't
      * touch rsym here. */
 
+    /* Apple PPC ABI returns 64-bit values in r3=HIGH, r4=LOW. tcc's
+     * internal convention (set by tccgen's gen_return path) leaves
+     * r3=LOW, r4=HIGH. Swap before returning so we present the ABI
+     * view to callers; the corresponding inverse swap in gfunc_call
+     * restores tcc's view on the caller side. */
+    if ((func_vt.t & VT_BTYPE) == VT_LLONG) {
+        o(0x7c601b78);  /* mr r0, r3 */
+        o(0x7c832378);  /* mr r3, r4 */
+        o(0x7c040378);  /* mr r4, r0 */
+    }
+
     /* Epilogue:
      *   lwz  r30, pic_save_off(r1)  ; restore PIC base reg
      *   lwz  r31, fp_save_off(r1)
@@ -1944,11 +2018,16 @@ ST_FUNC void gen_opi(int op)
          * onto the vstack via vpushv, which shares the same register
          * slot as the original entry — so we MUST NOT clobber ra_gpr
          * or rb_gpr. Allocate fresh slots for both halves of the
-         * result. */
-        int lo_slot = get_reg(RC_INT);
-        int lo_gpr = TREG_TO_GPR(lo_slot);
+         * result. Park hi_slot into vtop[-1].r2 between the two
+         * get_reg() calls, otherwise the second call sees no vstack
+         * entry referencing hi_slot and may return the same register
+         * (lo_slot == hi_slot would silently corrupt the result). */
         int hi_slot = get_reg(RC_INT);
         int hi_gpr = TREG_TO_GPR(hi_slot);
+        int lo_slot, lo_gpr;
+        vtop[-1].r2 = hi_slot;
+        lo_slot = get_reg(RC_INT);
+        lo_gpr = TREG_TO_GPR(lo_slot);
         /* mulhwu rD, rA, rB -- opcode 31, ext 11. */
         o(0x7c000016 | (hi_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
         /* mullw rD, rA, rB -- low 32 bits. */

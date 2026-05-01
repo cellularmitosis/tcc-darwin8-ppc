@@ -33,9 +33,10 @@ self-hosts on Tiger.
 | 🟡 | **Bootstrap attempt: every tcc source file compiles to .o with our tcc** ([014](docs/sessions/014-bootstrap-attempt/README.md)) — 2 codegen gaps + 1 macho bug remain before self-host links |
 | 🟡 | **Bootstrap link: 11/11 .o files link to a 463KB tcc-self binary** ([015](docs/sessions/015-bootstrap-gaps/README.md)) — needs PLT stubs to actually run |
 | ✅ | **PPC PIC stubs — tcc-emitted `printf` works** ([016](docs/sessions/016-ppc-plt-stubs/README.md), [demo](demos/s016-hello-printf.sh)) |
-| ⏳ | External-data PIC indirection (final blocker for tcc-self), G3 tarball |
-| ⏳ | Dylib loading (printf et al), executable output |
-| ❌ | Self-host bootstrap on Tiger |
+| ✅ | External-data PIC indirection — `errno` etc. work end-to-end ([017](docs/sessions/017-extern-data-pic/README.md)) |
+| ✅ | **`tcc-self -v` runs** — bootstrap binary executes ([018](docs/sessions/018-tcc-self-sigbus/README.md)) |
+| ✅ | **BE long-long handling fixed — tcc-self compiles real programs** ([019](docs/sessions/019-be-ll-fixes/README.md)) |
+| 🟡 | Self-host bootstrap on Tiger (one register-allocator bug remains, see [019](docs/sessions/019-be-ll-fixes/README.md)) |
 | ❌ | G3 tarball |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)

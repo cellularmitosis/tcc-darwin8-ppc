@@ -1431,6 +1431,19 @@ ST_FUNC void save_reg_upstack(int r, int n)
                 sv.r = VT_LOCAL | VT_LVAL;
                 sv.c.i = l;
 		sv.sym = NULL;
+#ifdef TCC_TARGET_PPC
+                /* Big-endian save: HIGH at offset, LOW at offset+PTR_SIZE.
+                   Without this swap, the spill writes LOW at the lower
+                   address — that confuses the LL load path which (on BE)
+                   reads LOW from offset+4 and HIGH from offset+0. */
+                if (p->r2 < VT_CONST && USING_TWO_WORDS(bt)) {
+                    store(p->r2, &sv);
+                    sv.c.i += PTR_SIZE;
+                    store(p->r & VT_VALMASK, &sv);
+                } else {
+                    store(p->r & VT_VALMASK, &sv);
+                }
+#else
                 store(p->r & VT_VALMASK, &sv);
 #if defined(TCC_TARGET_I386) || defined(TCC_TARGET_X86_64)
                 /* x86 specific: need to pop fp register ST0 if saved */
@@ -1443,6 +1456,7 @@ ST_FUNC void save_reg_upstack(int r, int n)
                     sv.c.i += PTR_SIZE;
                     store(p->r2, &sv);
                 }
+#endif
             }
             /* mark that stack entry as being saved on the stack */
             if (p->r & VT_LVAL) {
@@ -1954,11 +1968,25 @@ ST_FUNC int gv(int rc)
                     save_reg_upstack(vtop->r, 1);
                     /* load from memory */
                     vtop->type.t = load_type;
+#ifdef TCC_TARGET_PPC
+                    /* Big-endian: HIGH at offset+0, LOW at offset+4. tcc
+                       convention is vtop->r = LOW, vtop->r2 = HIGH, so we
+                       load LOW first from offset+4, then move the lvalue
+                       back to offset+0 so the trailing load(r2, vtop)
+                       reads HIGH. (Mirrors the LE sequence below, with
+                       the two offsets exchanged.) */
+                    incr_offset(PTR_SIZE);
+                    load(r, vtop);
+                    vdup();
+                    vtop[-1].r = r;
+                    incr_offset(-PTR_SIZE);
+#else
                     load(r, vtop);
                     vdup();
                     vtop[-1].r = r; /* save register value */
                     /* increment pointer to get second word */
                     incr_offset(PTR_SIZE);
+#endif
                 } else {
                     /* move registers */
                     if (!r_ok)
@@ -2036,7 +2064,15 @@ ST_FUNC void lexpand(void)
         vtop[0].c.i >>= 32;
     } else if (v == (VT_LVAL|VT_CONST) || v == (VT_LVAL|VT_LOCAL)) {
         vdup();
+#ifdef TCC_TARGET_PPC
+        /* Big-endian: HIGH at offset+0, LOW at offset+4. lexpand's
+           convention is vtop[-1] = LOW, vtop[0] = HIGH. Move the LOW
+           half (offset+4) into vtop[-1] so the upper entry remains the
+           HIGH half at offset+0. */
+        vtop[-1].c.i += 4;
+#else
         vtop[0].c.i += 4;
+#endif
     } else {
         gv(RC_INT);
         vdup();
@@ -2102,8 +2138,20 @@ static void gen_opl(int op)
 {
     int t, a, b, op1, c, i;
     int func;
+#ifdef TCC_TARGET_PPC
+    /* libgcc helpers (__udivdi3 et al.) follow Apple PPC ABI: 64-bit
+       result returns r3=HIGH, r4=LOW. tcc convention is r=LOW, r2=HIGH,
+       so swap the slots for the manual SValue setup below. (gfunc_call's
+       post-call swap kicks in only when the function's declared return
+       type is VT_LLONG, but vpush_helper_func uses func_old_type which
+       has VT_INT return — so the helper-call path bypasses that swap
+       and we have to compensate here.) */
+    unsigned short reg_iret = REG_IRE2;
+    unsigned short reg_lret = REG_IRET;
+#else
     unsigned short reg_iret = REG_IRET;
     unsigned short reg_lret = REG_IRE2;
+#endif
     SValue tmp;
 
     switch(op) {
@@ -3398,8 +3446,16 @@ error:
 
         /* processor allows { int a = 0, b = *(char*)&a; }
            That means that if we cast to less width, we can just
-           change the type and read it still later. */
+           change the type and read it still later.
+           NOTE: this is endian-dependent. On big-endian targets the
+           narrower type's bytes live at addr+(srcsize-dstsize), not
+           at addr, so the in-place type change reads the wrong half.
+           Disabled for PPC (the only big-endian target tcc supports). */
+        #ifdef TCC_TARGET_PPC
+        #define ALLOW_SUBTYPE_ACCESS 0
+        #else
         #define ALLOW_SUBTYPE_ACCESS 1
+        #endif
 
         if (ALLOW_SUBTYPE_ACCESS && (vtop->r & VT_LVAL)) {
             /* value still in memory */
@@ -3838,12 +3894,21 @@ ST_FUNC void vstore(void)
             if (USING_TWO_WORDS(dbt)) {
                 int load_type = (dbt == VT_QFLOAT) ? VT_DOUBLE : VT_PTRDIFF_T;
                 vtop[-1].type.t = load_type;
+#ifdef TCC_TARGET_PPC
+                /* Big-endian: HIGH at offset+0, LOW at offset+4. */
+                store(vtop->r2, vtop - 1);
+                vswap();
+                incr_offset(PTR_SIZE);
+                vswap();
+                store(r, vtop - 1);
+#else
                 store(r, vtop - 1);
                 vswap();
                 incr_offset(PTR_SIZE);
                 vswap();
                 /* XXX: it works because r2 is spilled last ! */
                 store(vtop->r2, vtop - 1);
+#endif
             } else {
                 /* single word */
                 store(r, vtop - 1);
