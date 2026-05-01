@@ -429,6 +429,18 @@ ST_FUNC void load(int r, SValue *sv)
             /* lwz rD, d(rA) — opcode 32 = 0x80000000 */
             o(0x80000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
             return;
+        case VT_LLONG: {
+            /* tcc loads the two halves separately via the rc2 path.
+             * For the low half, r is the destination and (offset+4)
+             * is where we wrote it during store; for the high, r is
+             * the destination and (offset) is the high-half slot.
+             * tcc tells us which half by calling gv with the matching
+             * load_type and incrementing offset between calls. So just
+             * do a standard 32-bit lwz at the (already-adjusted)
+             * offset. */
+            o(0x80000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            return;
+        }
         default:
             tcc_error("ppc-gen: load VT_LOCAL of basic type 0x%x not yet supported", bt);
         }
@@ -493,6 +505,20 @@ ST_FUNC void store(int r, SValue *sv)
             /* stw rS, d(rA) — opcode 36 = 0x90000000 */
             o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
             return;
+        case VT_LLONG: {
+            /* tcc convention: r holds the LOW half, sv->r2 holds the
+             * HIGH half. Store with high at lower address (matches
+             * gfunc_prolog spill order, big-endian word order). */
+            int hi_gpr;
+            if (sv->r2 >= VT_CONST)
+                tcc_error("ppc-gen: store VT_LLONG with no r2 set");
+            hi_gpr = TREG_TO_GPR(sv->r2);
+            /* stw r2(=high), offset(r31) */
+            o(0x90000000 | (hi_gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            /* stw r(=low), offset+4(r31) */
+            o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | ((offset + 4) & 0xffff));
+            return;
+        }
         default:
             tcc_error("ppc-gen: store VT_LOCAL of bt 0x%x not yet supported", bt);
         }
@@ -514,31 +540,51 @@ ST_FUNC void store(int r, SValue *sv)
 ST_FUNC void gfunc_call(int nb_args)
 {
     int i;
-
-    if (nb_args > 8)
-        tcc_error("ppc-gen: more than 8 arguments not yet supported");
+    int gpr_used;     /* count of GPR arg slots already consumed by args
+                         processed (we walk in source order to compute) */
+    int *gpr_alloc;   /* per-source-arg starting GPR slot (0..7) */
 
     /* Spill any vstack values living in caller-saved regs that the
      * call would clobber. tcc walks the vstack and uses our
      * reg_classes[] mask to decide what can stay. */
     save_regs(nb_args + 1);
 
-    /* Process args from vtop downward. After the loop vtop is the
-     * function value. Arg index from-the-function is (nb_args - 1 - i)
-     * which goes into r(3 + that) = TREG_R(nb_args - 1 - i). */
+    /* First pass: assign GPR arg slots in source order. Long long
+     * consumes two consecutive GPR slots; everything else consumes
+     * one. Bail if total exceeds 8. */
+    gpr_alloc = nb_args ? tcc_malloc(nb_args * sizeof(int)) : NULL;
+    gpr_used = 0;
     for (i = 0; i < nb_args; i++) {
-        int target_slot = nb_args - 1 - i;
-        if ((vtop->type.t & VT_BTYPE) == VT_FLOAT ||
-            (vtop->type.t & VT_BTYPE) == VT_DOUBLE ||
-            (vtop->type.t & VT_BTYPE) == VT_LDOUBLE)
+        SValue *arg = &vtop[-(nb_args - 1 - i)];
+        int bt = arg->type.t & VT_BTYPE;
+        if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+            tcc_free(gpr_alloc);
             tcc_error("ppc-gen: floating-point arguments not yet supported");
-        if ((vtop->type.t & VT_BTYPE) == VT_STRUCT)
+        }
+        if (bt == VT_STRUCT) {
+            tcc_free(gpr_alloc);
             tcc_error("ppc-gen: struct arguments not yet supported");
-        if ((vtop->type.t & VT_BTYPE) == VT_LLONG)
-            tcc_error("ppc-gen: long long arguments not yet supported");
+        }
+        gpr_alloc[i] = gpr_used;
+        gpr_used += (bt == VT_LLONG) ? 2 : 1;
+    }
+    if (gpr_used > 8) {
+        tcc_free(gpr_alloc);
+        tcc_error("ppc-gen: argument list exceeds 8 GPR slots (got %d)",
+                  gpr_used);
+    }
+
+    /* Second pass: process args from vtop downward, materializing
+     * each into the assigned register slot. For long long, the low
+     * half lands in RC_R(slot) and tcc auto-allocates RC_R(slot+1)
+     * for the high half via the rc2 mechanism in gv(). */
+    for (i = 0; i < nb_args; i++) {
+        int src_index = nb_args - 1 - i;
+        int target_slot = gpr_alloc[src_index];
         gv(RC_R(target_slot));
         vtop--;
     }
+    tcc_free(gpr_alloc);
 
     /* Emit the call. */
     if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST && (vtop->r & VT_SYM)) {
@@ -592,25 +638,39 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
         int size, align;
         int bt = type->t & VT_BTYPE;
         int gpr;
+        int slots = (bt == VT_LLONG) ? 2 : 1;
 
         size = type_size(type, &align);
         size = (size + 3) & ~3;
 
-        if (param_index >= 8)
-            tcc_error("ppc-gen: more than 8 parameters not yet supported");
+        if (param_index + slots > 8)
+            tcc_error("ppc-gen: parameters exceed 8 GPR slots");
         if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE)
             tcc_error("ppc-gen: floating-point parameters not yet supported");
         if (bt == VT_STRUCT)
             tcc_error("ppc-gen: struct parameters not yet supported");
-        if (bt == VT_LLONG)
-            tcc_error("ppc-gen: long long parameters not yet supported");
 
-        loc -= 4;
-        gpr = 3 + param_index;
-        /* stw rS, loc(r31) -- spill incoming arg to local slot. */
-        o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (loc & 0xffff));
-        gfunc_set_param(sym, loc, 0);
-        param_index++;
+        if (bt == VT_LLONG) {
+            /* Long long is in r(3+param_index):r(3+param_index+1).
+             * Allocate 8 bytes; spill high then low so the in-memory
+             * layout is high at lower addr (= big-endian word order
+             * for a 64-bit value addressed via the low slot). */
+            loc -= 8;
+            gpr = 3 + param_index;
+            /* stw r(gpr), loc(r31)     -- high half */
+            o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (loc & 0xffff));
+            /* stw r(gpr+1), loc+4(r31) -- low half */
+            o(0x90000000 | ((gpr + 1) << 21) | (PPC_FP_REG << 16) | ((loc + 4) & 0xffff));
+            gfunc_set_param(sym, loc, 0);
+            param_index += 2;
+        } else {
+            loc -= 4;
+            gpr = 3 + param_index;
+            /* stw rS, loc(r31) -- spill incoming arg to local slot. */
+            o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (loc & 0xffff));
+            gfunc_set_param(sym, loc, 0);
+            param_index++;
+        }
     }
 }
 
@@ -793,9 +853,28 @@ ST_FUNC void gen_opi(int op)
         /* add rD, rA, rB */
         o(0x7c000214 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
         break;
+    case TOK_ADDC1:
+        /* addc rD, rA, rB -- adds and sets XER[CA]. */
+        o(0x7c000014 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
+    case TOK_ADDC2:
+        /* adde rD, rA, rB -- adds rA + rB + XER[CA]. */
+        o(0x7c000114 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        break;
     case '-':
         /* subf rD, rA, rB  computes rD = rB - rA, so swap. */
         o(0x7c000050 | (ra_gpr << 21) | (rb_gpr << 16) | (ra_gpr << 11));
+        break;
+    case TOK_SUBC1:
+        /* subfc rD, rA, rB  computes rD = rB - rA, sets XER[CA].
+         * For "ra - rb" (low half of long long subtract): swap so
+         * rA-field=rb, rB-field=ra, rD=ra. */
+        o(0x7c000010 | (ra_gpr << 21) | (rb_gpr << 16) | (ra_gpr << 11));
+        break;
+    case TOK_SUBC2:
+        /* subfe rD, rA, rB  computes rD = ~rA + rB + CA.
+         * For "ra - rb - borrow" (high half): same encoding shape. */
+        o(0x7c000110 | (ra_gpr << 21) | (rb_gpr << 16) | (ra_gpr << 11));
         break;
     case '*':
         /* mullw rD, rA, rB */
@@ -833,6 +912,25 @@ ST_FUNC void gen_opi(int op)
         /* divwu rD, rA, rB (unsigned) */
         o(0x7c000396 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
         break;
+    case TOK_UMULL: {
+        /* Unsigned 32x32 -> 64 multiply. tcc's gen_opl algorithm for
+         * long long * long long pushes duplicates of the operands
+         * onto the vstack via vpushv, which shares the same register
+         * slot as the original entry — so we MUST NOT clobber ra_gpr
+         * or rb_gpr. Allocate fresh slots for both halves of the
+         * result. */
+        int lo_slot = get_reg(RC_INT);
+        int lo_gpr = TREG_TO_GPR(lo_slot);
+        int hi_slot = get_reg(RC_INT);
+        int hi_gpr = TREG_TO_GPR(hi_slot);
+        /* mulhwu rD, rA, rB -- opcode 31, ext 11. */
+        o(0x7c000016 | (hi_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        /* mullw rD, rA, rB -- low 32 bits. */
+        o(0x7c0001d6 | (lo_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
+        vtop[-1].r = lo_slot;
+        vtop[-1].r2 = hi_slot;
+        break;
+    }
     case '%':
     case TOK_UMOD: {
         /* PPC has no modulo instruction. Compute as a - (a/b)*b
