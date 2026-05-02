@@ -1592,6 +1592,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     obuf out;
     obuf nlist, strtab, indirect;
     Section *text = NULL, *rodata = NULL, *data = NULL, *bss = NULL;
+    Section *init_array = NULL;     /* __attribute__((constructor)) array */
+    Section *fini_array = NULL;     /* __attribute__((destructor)) array */
     int main_off, shim_off, target_off;
     int i, ret = -1;
     FILE *fp = NULL;
@@ -1614,6 +1616,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     int sect_idx_text = -1, sect_idx_rodata = -1, sect_idx_data = -1;
     int sect_idx_stub = -1, sect_idx_nlptr = -1, sect_idx_dyld = -1;
     int sect_idx_bss = -1;
+    int sect_idx_init_array = -1;
+    int sect_idx_fini_array = -1;
+    unsigned char *init_array_data = NULL;
+    unsigned char *fini_array_data = NULL;
     /* External-data __nl_symbol_ptr bookkeeping. The function-stub
      * path uses its own slots in the same __nl_symbol_ptr section;
      * data symbols append after them. */
@@ -1680,6 +1686,12 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         else if (s->sh_type == SHT_NOBITS && s->data_offset > 0
             && !strcmp(s->name, ".bss"))
             bss = s;
+        else if (s->sh_type == SHT_INIT_ARRAY && s->data_offset > 0
+            && !strcmp(s->name, ".init_array"))
+            init_array = s;
+        else if (s->sh_type == SHT_FINI_ARRAY && s->data_offset > 0
+            && !strcmp(s->name, ".fini_array"))
+            fini_array = s;
     }
     if (!text || text->data_offset == 0) {
         tcc_error_noabort("ppc-macho: empty or missing .text section");
@@ -1723,6 +1735,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     n_data_sects = 0;
     if (data)
         n_data_sects++;     /* __data */
+    if (init_array)
+        n_data_sects++;     /* __mod_init_func */
+    if (fini_array)
+        n_data_sects++;     /* __mod_term_func */
     if (nstubs > 0 || n_nlptrs > 0)
         n_data_sects++;     /* __nl_symbol_ptr (function ptrs + data ptrs) */
     if (nstubs > 0 || n_nlptrs > 0)
@@ -1824,6 +1840,36 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             data_cur = (data_cur + 3u) & ~3u;
         }
 
+        if (init_array) {
+            /* __mod_init_func: 4-byte function-pointer slots. dyld
+             * walks this section at startup and calls each pointer.
+             * The data is just a sequence of R_PPC_ADDR32 relocations
+             * against the constructor functions, written as zeros
+             * pre-relocation. */
+            sect_idx_init_array = nsec;
+            sects[nsec].elf = init_array;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = init_array->data_offset;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += init_array->data_offset;
+            data_cur = (data_cur + 3u) & ~3u;
+        }
+
+        if (fini_array) {
+            /* __mod_term_func: dyld walks this at exit (atexit-like). */
+            sect_idx_fini_array = nsec;
+            sects[nsec].elf = fini_array;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = fini_array->data_offset;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += fini_array->data_offset;
+            data_cur = (data_cur + 3u) & ~3u;
+        }
+
         if (nstubs > 0 || n_nlptrs > 0) {
             sect_idx_nlptr = nsec;
             sects[nsec].elf = NULL;
@@ -1907,6 +1953,14 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         data_data = tcc_malloc(data->data_offset);
         memcpy(data_data, data->data, data->data_offset);
     }
+    if (init_array) {
+        init_array_data = tcc_malloc(init_array->data_offset);
+        memcpy(init_array_data, init_array->data, init_array->data_offset);
+    }
+    if (fini_array) {
+        fini_array_data = tcc_malloc(fini_array->data_offset);
+        memcpy(fini_array_data, fini_array->data, fini_array->data_offset);
+    }
 
     /* ---- Resolve relocations in text and rodata. ---- */
     {
@@ -1929,6 +1983,14 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         if (data && exe_resolve_section_relocs(s1, data,
                                                 sects[sect_idx_data].vmaddr,
                                                 data_data, &ctx) < 0)
+            goto cleanup;
+        if (init_array && exe_resolve_section_relocs(s1, init_array,
+                                                sects[sect_idx_init_array].vmaddr,
+                                                init_array_data, &ctx) < 0)
+            goto cleanup;
+        if (fini_array && exe_resolve_section_relocs(s1, fini_array,
+                                                sects[sect_idx_fini_array].vmaddr,
+                                                fini_array_data, &ctx) < 0)
             goto cleanup;
     }
 
@@ -2315,6 +2377,35 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             put32be(&out, 0);
             put32be(&out, 0);
         }
+        /* __mod_init_func: array of constructor function pointers
+         * dyld walks at startup. Section-type 0x9 =
+         * S_MOD_INIT_FUNC_POINTERS tells dyld what to do. */
+        if (init_array) {
+            put_sectname(&out, "__mod_init_func");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_init_array].vmaddr);
+            put32be(&out, sects[sect_idx_init_array].size);
+            put32be(&out, sects[sect_idx_init_array].file_off);
+            put32be(&out, 2);                  /* align 2^2 = 4 */
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, 0x9);                /* S_MOD_INIT_FUNC_POINTERS */
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+        if (fini_array) {
+            put_sectname(&out, "__mod_term_func");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_fini_array].vmaddr);
+            put32be(&out, sects[sect_idx_fini_array].size);
+            put32be(&out, sects[sect_idx_fini_array].file_off);
+            put32be(&out, 2);                  /* align 4 */
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, 0xa);                /* S_MOD_TERM_FUNC_POINTERS */
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
         /* __nl_symbol_ptr */
         if (nstubs > 0 || n_nlptrs > 0) {
             put_sectname(&out, "__nl_symbol_ptr");
@@ -2480,6 +2571,16 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                 put8(&out, 0);
             obuf_put(&out, data_data, sects[sect_idx_data].size);
         }
+        if (init_array) {
+            while (out.len < sects[sect_idx_init_array].file_off)
+                put8(&out, 0);
+            obuf_put(&out, init_array_data, sects[sect_idx_init_array].size);
+        }
+        if (fini_array) {
+            while (out.len < sects[sect_idx_fini_array].file_off)
+                put8(&out, 0);
+            obuf_put(&out, fini_array_data, sects[sect_idx_fini_array].size);
+        }
         if (nstubs > 0 || n_nlptrs > 0) {
             while (out.len < sects[sect_idx_nlptr].file_off)
                 put8(&out, 0);
@@ -2552,6 +2653,8 @@ cleanup:
     tcc_free(text_data);
     tcc_free(rodata_data);
     tcc_free(data_data);
+    tcc_free(init_array_data);
+    tcc_free(fini_array_data);
     tcc_free(stub_data);
     tcc_free(nl_ptr_data);
     tcc_free(stubs);
