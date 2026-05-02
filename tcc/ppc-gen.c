@@ -2833,21 +2833,57 @@ ST_FUNC void ggoto(void)
     vtop--;
 }
 
-/* VLA support — stubs. Tcc compiles fine without VLAs in user code;
- * these only fire if the source uses one. */
+/* VLA support.
+ *
+ * Save/restore SP (r1) to/from a local at FP+addr. Used so that
+ * VLAs declared inside a nested block can be undone when the block
+ * exits.
+ *
+ * gen_vla_alloc: vtop holds the byte size. Compute SP -= aligned_size,
+ * leave the resulting SP on vtop as the pointer to the allocated
+ * space. (Caller will store it into a local.) */
 ST_FUNC void gen_vla_sp_save(int addr)
 {
-    tcc_error("ppc-gen: VLAs not supported");
+    /* stw r1, addr(r31)  OR long-form */
+    if (ppc_off_fits_d(addr)) {
+        o(0x90000000 | (1 << 21) | (PPC_FP_REG << 16) | (addr & 0xffff));
+    } else {
+        ppc_li32_r0(addr);
+        o(0x7c00012e | (1 << 21) | (PPC_FP_REG << 16) | (0 << 11));
+    }
 }
 
 ST_FUNC void gen_vla_sp_restore(int addr)
 {
-    tcc_error("ppc-gen: VLAs not supported");
+    /* lwz r1, addr(r31) */
+    if (ppc_off_fits_d(addr)) {
+        o(0x80000000 | (1 << 21) | (PPC_FP_REG << 16) | (addr & 0xffff));
+    } else {
+        ppc_li32_r0(addr);
+        o(0x7c00002e | (1 << 21) | (PPC_FP_REG << 16) | (0 << 11));
+    }
 }
 
 ST_FUNC void gen_vla_alloc(CType *type, int align)
 {
-    tcc_error("ppc-gen: VLAs not supported");
+    int size_gpr;
+    /* Materialize size into a GPR. */
+    gv(RC_INT);
+    size_gpr = TREG_TO_GPR(vtop->r & VT_VALMASK);
+    /* Round size up to 16-byte boundary so the new SP stays
+     * 16-aligned (Apple PPC ABI).
+     *   addi r12, size, 15
+     *   rlwinm r12, r12, 0, 0, 27   (clear low 4 bits)
+     */
+    o(0x38000000 | (12 << 21) | (size_gpr << 16) | 0x000f);
+    o(0x54000000 | (12 << 21) | (12 << 16) | (0 << 11) | (0 << 6) | (27 << 1));
+    /* Subtract from r1: subf r1, r12, r1 (RT = RB - RA → r1 = r1 - r12). */
+    o(0x7c000050 | (1 << 21) | (12 << 16) | (1 << 11));
+    /* Result address is implicit through SP. tcc's frontend reads
+     * the pointer back via the gen_vla_sp_save / gen_vla_sp_restore
+     * mechanism; we just pop the size off vtop. */
+    vpop();
+    (void)align; (void)type;
 }
 
 #endif /* !TARGET_DEFS_ONLY */
