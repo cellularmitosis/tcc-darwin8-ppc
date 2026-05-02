@@ -126,6 +126,10 @@ endif
 128_run_atexit.test: FLAGS += -dt
 132_bound_test.test: FLAGS += -b
 
+# Tiger's <sys/mman.h> only defines MAP_ANON, not Linux's MAP_ANONYMOUS.
+# 119_random_stuff uses MAP_ANONYMOUS in its mmap test; alias it.
+119_random_stuff.test: FLAGS += -DMAP_ANONYMOUS=MAP_ANON
+
 # Filter source directory in warnings/errors (out-of-tree builds)
 FILTER = 2>&1 | sed -e 's,$(SRC)/,,g'
 
@@ -136,7 +140,14 @@ all test tests2.all: $(filter-out $(SKIP),$(TESTS))
 	@echo Test: $*...
 	@$(call T1,$<) $(T3)
 
-T1 = $(TCC) $(FLAGS) $(T2) $(ARGS)
+# Wrap T1 in a subshell so that $(FILTER) below ('2>&1 | sed > out')
+# captures stderr+stdout of BOTH the compile and the run steps in the
+# NORUN path. Without parens the redirect only binds to the right side
+# of `&&`, so compile-time warnings/errors land only in the terminal,
+# never in $*.output, and tests that expect a warning line silently
+# fail. Affects 33_ternary_op, 102_alignas, 70_floating_point_literals
+# and others on PPC where -run isn't fully wired (so we use NORUN).
+T1 = ( $(TCC) $(FLAGS) $(T2) $(ARGS) )
 T2 = $(if $(NORUN),$1 -o $(basename $@).exe && ./$(basename $@).exe,-run $1)
 T3 = $(FILTER) >$*.output 2>&1 || true \
      && diff -Nbu $(filter %.expect,$^) $*.output \
