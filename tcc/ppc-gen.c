@@ -960,6 +960,40 @@ ST_FUNC void load(int r, SValue *sv)
         }
     }
 
+    /* Load from an absolute address (e.g. `*(int *)0x20000000`):
+     * VT_CONST | VT_LVAL with no VT_SYM. Materialize the address into
+     * a scratch register, then do a normal indirect load. */
+    if (v == VT_CONST && (sv->r & VT_LVAL) && !(sv->r & VT_SYM)) {
+        int bt = sv->type.t & VT_BTYPE;
+        uint32_t addr = (uint32_t)sv->c.i;
+        int hi = ((addr + 0x8000) >> 16) & 0xffff;
+        int lo = addr & 0xffff;
+        gpr = TREG_TO_GPR(r);
+        /* lis r0, ha(addr); load via r0+lo. r0 is scratch. */
+        o(0x3c000000 | (0 << 21) | (hi & 0xffff));
+        switch (bt) {
+        case VT_BOOL:
+        case VT_BYTE:
+            o(0x88000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+            if (bt == VT_BYTE && !(sv->type.t & VT_UNSIGNED))
+                o(0x7c000774 | (gpr << 21) | (gpr << 16));
+            return;
+        case VT_SHORT:
+            if (sv->type.t & VT_UNSIGNED)
+                o(0xa0000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+            else
+                o(0xa8000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+            return;
+        case VT_INT:
+        case VT_PTR:
+        case VT_FUNC:
+            o(0x80000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+            return;
+        default:
+            tcc_error("ppc-gen: load from absolute addr of bt 0x%x", bt);
+        }
+    }
+
     tcc_error("ppc-gen: load stub (r=%d sv->r=0x%x type=0x%x val=0x%llx)",
               r, sv->r, sv->type.t, (long long)sv->c.i);
 }
@@ -1232,6 +1266,32 @@ ST_FUNC void store(int r, SValue *sv)
         greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
         o(store_op | (gpr << 21) | (tmp_gpr << 16));
         return;
+    }
+
+    /* Store to an absolute address: VT_CONST | VT_LVAL with no
+     * VT_SYM. Mirror the load path: lis r0, ha(addr); store via r0+lo. */
+    if (v == VT_CONST && (sv->r & VT_LVAL) && !(sv->r & VT_SYM)) {
+        uint32_t addr = (uint32_t)sv->c.i;
+        int hi = ((addr + 0x8000) >> 16) & 0xffff;
+        int lo = addr & 0xffff;
+        gpr = TREG_TO_GPR(r);
+        o(0x3c000000 | (0 << 21) | (hi & 0xffff));            /* lis r0, ha */
+        switch (bt) {
+        case VT_BOOL:
+        case VT_BYTE:
+            o(0x98000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));  /* stb */
+            return;
+        case VT_SHORT:
+            o(0xb0000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));  /* sth */
+            return;
+        case VT_INT:
+        case VT_PTR:
+        case VT_FUNC:
+            o(0x90000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));  /* stw */
+            return;
+        default:
+            tcc_error("ppc-gen: store to absolute addr of bt 0x%x", bt);
+        }
     }
 
     tcc_error("ppc-gen: store stub (r=%d sv->r=0x%x bt=0x%x)", r, sv->r, bt);
