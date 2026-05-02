@@ -1356,15 +1356,8 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
             int anchor_off;
             uint32_t slot_va, anchor_va, delta;
             int16_t halfword;
-            if (slot_idx < 0) {
-                const char *name = (char *)s1->symtab->link->data
-                  + ((ElfW(Sym) *)s1->symtab->data)[symidx].st_name;
-                tcc_error_noabort("ppc-macho: PIC reloc with no "
-                                  "nlptr slot for sym '%s'",
-                                  name && name[0] ? name : "?");
-                return -1;
-            }
-            slot_va = nlptrs[slot_idx].slot_addr;
+            ElfW(Sym) *sm = &((ElfW(Sym) *)s1->symtab->data)[symidx];
+
             anchor_off = ppc_pic_pairs_lookup((int)reloc_off);
             if (anchor_off < 0) {
                 tcc_error_noabort("ppc-macho: no PIC anchor recorded "
@@ -1372,6 +1365,61 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
                 return -1;
             }
             anchor_va = sect_vmaddr + (uint32_t)anchor_off;
+
+            if (slot_idx < 0) {
+                /* No nl_ptr slot for this symbol — must be one tcc
+                 * thought was extern at codegen time but turned out to
+                 * be locally defined later in the same TU (forward
+                 * reference, or __attribute__((alias)) on a known
+                 * symbol). The .o writer has analogous fallback at
+                 * line ~2820. Resolve directly via SECTDIFF from the
+                 * PIC base; rewrite the LO16 lwz to an addi so the
+                 * second instruction adds the low half rather than
+                 * dereferencing through a non-existent slot. */
+                uint32_t target_va = 0;
+                int j;
+                if (sm->st_shndx == SHN_UNDEF) {
+                    /* Truly undefined — original error. */
+                    const char *name = (char *)s1->symtab->link->data
+                      + sm->st_name;
+                    tcc_error_noabort("ppc-macho: PIC reloc with no "
+                                      "nlptr slot for sym '%s'",
+                                      name && name[0] ? name : "?");
+                    return -1;
+                }
+                /* Locate the target symbol's section in our layout. */
+                for (j = 0; j < nsec; j++) {
+                    if (all_sects[j].elf
+                        && all_sects[j].elf->sh_num == sm->st_shndx) {
+                        target_va = all_sects[j].vmaddr + sm->st_value;
+                        break;
+                    }
+                }
+                if (j == nsec) continue;  /* unmapped section: skip */
+                delta = target_va - anchor_va;
+                inst = ((uint32_t)sect_data[reloc_off] << 24)
+                     | ((uint32_t)sect_data[reloc_off+1] << 16)
+                     | ((uint32_t)sect_data[reloc_off+2] <<  8)
+                     |  (uint32_t)sect_data[reloc_off+3];
+                if (type == R_PPC_HA16_PIC) {
+                    halfword = (int16_t)(((delta + 0x8000) >> 16) & 0xffff);
+                    inst = (inst & ~0xffffu) | (uint16_t)halfword;
+                } else {
+                    /* LO16 path: change the lwz to addi (op 0x38 vs
+                     * 0x80). Both encodings share the RT/RA/SIMM
+                     * layout, so we just flip the top 6 bits of the
+                     * opcode. */
+                    halfword = (int16_t)(delta & 0xffff);
+                    inst = (inst & 0x03ffffffu) | 0x38000000u;  /* op = addi */
+                    inst = (inst & ~0xffffu) | (uint16_t)halfword;
+                }
+                sect_data[reloc_off+0] = (inst >> 24) & 0xff;
+                sect_data[reloc_off+1] = (inst >> 16) & 0xff;
+                sect_data[reloc_off+2] = (inst >>  8) & 0xff;
+                sect_data[reloc_off+3] =  inst        & 0xff;
+                break;
+            }
+            slot_va = nlptrs[slot_idx].slot_addr;
             delta = slot_va - anchor_va;
             inst = ((uint32_t)sect_data[reloc_off] << 24)
                  | ((uint32_t)sect_data[reloc_off+1] << 16)
