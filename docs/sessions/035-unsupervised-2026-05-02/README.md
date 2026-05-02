@@ -9,12 +9,12 @@ everything.
 
 | | start | end |
 |---|---|---|
-| HEAD | `9a5dc3f` (post-v0.2.2) | `ad144c0` (post-v0.2.3) |
+| HEAD | `9a5dc3f` (post-v0.2.2) | `545edc8` (post-v0.2.3, mid-flight to v0.2.4) |
 | Releases on GitHub | 4 | **5** (v0.2.3-g3 cut mid-session) |
-| tests2 baseline | 77 / 122 (63.1%) | **89 / 122 (73.0%)** |
+| tests2 baseline | 77 / 122 (63.1%) | **96 / 122 (78.7%)** |
 | Self-host fixpoint | holds | holds |
 
-Net **+12** tests passing, plus a release published with notes.
+Net **+19** tests passing, plus a release published with notes.
 
 ## What landed
 
@@ -31,12 +31,23 @@ In rough order:
 | `af615c2` | Release script bumped to v0.2.3-g3, notes refreshed | — |
 | `82a583b` | README status to v0.2.3-g3 | — |
 | `ad144c0` | Struct returns (hidden pointer ABI), dynamic param-area sizing, struct load via sym | +2 (130_large_argument, 131_return_struct_in_reg) |
+| `b7382c2` | byte/short param big-endian offset (it was the LL helper swap, not this, that broke fixpoint earlier — see notes) | +2 (23_type_coercion, 129_scopes) |
+| `650a75e` | r3<->r4 swap for FP-to-LL libgcc helpers (token-list approach, conservative scope) | +1 (111_conversion) |
+| `2e51f70` | Tiger realpath workaround (use the pre-allocated buf form) | +1 (18_include) |
+| `0baab59` | Load/store from absolute address (`*(int*)0x20000000` pattern) | (was masked) |
+| `16e9012` | No-op bound-check helper stubs | +2 (121_struct_return, 132_bound_test) |
+| `545edc8` | Single-threaded atomic helper stubs | +1 (136_atomic_gcc_style) |
 
-Net effect: 77 → 89 / 122 (+12).
+Net effect: 77 → 96 / 122 (+19).
 
 ## What I tried but backed out
 
-### char/short parameter byte-position fix
+### char/short parameter byte-position fix — REVISITED, NOW LANDED
+
+(**Update**: it was the LL helper swap below that broke fixpoint,
+not the byte/short fix. Re-applied alone with no fixpoint regression
+in `b7382c2`. Originally written to document a backout that was
+based on a misdiagnosis — left here for the record.)
 
 PPC is big-endian, so a `char` arg passed in r3 (zero/sign-extended
 to 32 bits) ends up at the *end* of the 4-byte slot when the prolog
@@ -44,10 +55,8 @@ spills it: `stw r3, 24(r1)` writes the high bytes of r3 to offsets
 24..26 (= 0 for an extended char) and the actual char to offset 27.
 
 Setting `param_offset = 24 + 3` for VT_BYTE/VT_BOOL params (and `+2`
-for VT_SHORT) fixes 23_type_coercion (which currently outputs
-`char:  ` instead of `char: a`) and probably the visible failure in
-129_scopes line 59 — but it **breaks the bootstrap fixpoint**:
-`tcc-self2` SIGBUSes when invoked.
+for VT_SHORT) fixes 23_type_coercion (which was outputting
+`char:  ` instead of `char: a`) and 129_scopes line 59.
 
 I confirmed by binary-search: reverting only the byte-offset change
 restores fixpoint. The mechanism isn't fully understood — best
@@ -60,7 +69,7 @@ under
 [the 035 progress notes](#235-charshort-param-investigation-detail)
 below.
 
-### LL helper return swap by symbol token
+### LL helper return swap by symbol token — narrowed scope, now landed
 
 `(unsigned long long)d` for double `d` calls `__fixunsdfdi`, which
 returns r3=high, r4=low (Apple ABI). gfunc_call does an r3<->r4
@@ -70,25 +79,22 @@ the swap doesn't fire. The result: 111_conversion outputs
 `5302428712241725440` (= `0x499602D200000000`, the value with the
 two halves transposed) instead of `1234567890`.
 
-Adding a token-list check in gfunc_call (recognize
-`TOK___fixunsdfdi`, `TOK___udivdi3`, etc., and force the swap)
-fixed the standalone test but **broke fixpoint**. Reason: tcc's
-own body code uses these helpers and depends on the existing
+First attempt: token-list with `TOK___fixunsdfdi`, `TOK___udivdi3`,
+`TOK___ashldi3`, etc. **Broke fixpoint** because tcc's own body
+code uses the divide / shift helpers and depends on the existing
 "helpers leave the LL halves transposed in vtop, but we never
-reorder them so it's internally consistent" behavior. Adding the
-swap turns the inconsistency into a correctness bug at the
-internal use sites.
+reorder them so it's internally consistent" behavior.
 
-A correct fix likely needs to either:
-- patch `vpush_helper_func` to use a real LL-returning function
-  type for the LL helpers (so PUT_R_RET/ret_is_ll detects them
-  uniformly), and audit all the helper use sites in tccgen.c, OR
-- handle the convention mismatch at the boundary between helper
-  return and the next gfunc_call that consumes the LL value
-  (i.e., another swap).
+Second attempt (landed in `650a75e`): narrow the token list to
+only the FP-to-LL conversion helpers (`__fixdfdi`, `__fixsfdi`,
+`__fixunsdfdi`, `__fixunssfdi`). Tcc's body code doesn't use FP
+conversion to LL anywhere on the hot path, so no internal use site
+is affected. 111_conversion passes; fixpoint holds.
 
-Neither is a 5-minute change, and getting it wrong breaks
-self-host. Backed out.
+Still TODO: the divide/shift helpers also have the convention
+mismatch. The right fix is to patch `vpush_helper_func` to give
+LL helpers a real LL-returning function type, then audit all
+internal helper use sites. Out of scope for this session.
 
 ## Codegen quirks burned in (current list)
 
@@ -181,29 +187,39 @@ churn.
 
 ## tests2 status snapshot at end of session
 
-89 / 122 pass (73.0%). Breakdown of the 33 remaining fails:
+96 / 122 pass (78.7%). Breakdown of the remaining 26 fails:
 
-- **Bound checking (`-b`) needed (8 tests):** 112_backtrace,
+- **Bound checking actually firing needed (5 tests):** 112_backtrace,
   113_btdll, 114_bound_signal, 115_bound_setjmp, 116_bound_setjmp2,
-  121_struct_return, 122_vla_reuse, 126_bound_global, 132_bound_test
+  126_bound_global. Stubs let them link/run but they expect the
+  checker to detect overflows — needs the real bcheck.c port.
 - **VLAs (4 tests):** 78_vla_label, 79_vla_continue, 122_vla_reuse,
-  123_vla_bug
-- **`-run` / -dt support (4 tests):** 60_errors_and_warnings,
-  96_nodata_wanted, 104_inline, 117_builtins, 128_run_atexit
-- **Atomic helpers (3 tests):** 124_atomic_counter, 125_atomic_misc,
-  136_atomic_gcc_style
+  123_vla_bug. Substantial new feature.
+- **`-run` / -dt support (5 tests):** 60_errors_and_warnings,
+  96_nodata_wanted, 104_inline, 117_builtins, 128_run_atexit. Needs
+  PPC `create_plt_entry` for the JIT path.
+- **True multithreaded atomics (2 tests):** 124_atomic_counter
+  (16-thread race), 125_atomic_misc (also -dt). Need real PPC
+  lwarx/stwcx. atomic helpers.
 - **Constructor / destructor (1 test):** 108_constructor —
-  needs `__mod_init_func` section emission
-- **Endianness-specific .expect (4 tests):** 23_type_coercion (also
-  char-param offset), 90_struct-init, 91_ptr_longlong_arith32,
-  95_bitfields, 95_bitfields_ms
-- **Float-literal parsing precision (1 test):** 70_floating_point_literals
+  needs `__mod_init_func` section emission in `ppc-macho.c`.
+- **Endianness-specific .expect (4 tests):** 90_struct-init,
+  91_ptr_longlong_arith32, 95_bitfields, 95_bitfields_ms.
+  These tests' expected output bakes in little-endian byte order
+  for `int` printed via byte loop. Not really tcc bugs.
+- **Float-literal parsing precision (1 test):** 70_floating_point_literals.
+  Subtle 5-ULP error in float literal parsing for `123.123E12F`-
+  style numbers. Probably an upstream tcc parse_number issue but
+  surfaces only on PPC's IEEE 754 semantics.
 - **HFA-on-PPC (1 test):** 73_arm64 (hits "argument list
-  exceeds 8 FPR slots" with HFA aggregates of doubles)
-- **Other / TBD (5 tests):** 18_include (SIGBUS), 101_cleanup,
-  111_conversion (LL helper return swap), 119_random_stuff
-  (load from absolute address), 129_scopes (likely byte-param
-  offset)
+  exceeds 8 FPR slots" with HFA aggregates of doubles). Test was
+  designed for arm64; PPC ABI doesn't have HFA semantics.
+- **Other (3 tests):** 101_cleanup (`__attribute__((cleanup))`
+  needs codegen support), 119_random_stuff (uses `mmap` to a
+  fixed address then writes — passes the compile/link phases
+  added this session but tst_big still trips on a 256 KB stack
+  struct that needs long-frame prolog), 95_bitfields_ms (BE
+  bitfield issue).
 
 ## Important state for the next session
 
@@ -300,6 +316,14 @@ Next-time investigation:
 ## Commit list (this session)
 
 ```
+545edc8 libtcc1 PPC: atomic helper stubs (single-threaded, observationally
+        equivalent to non-atomic ops)
+16e9012 libtcc1 PPC: no-op bound-check stubs
+0baab59 ppc-gen: load/store from absolute address (VT_CONST | VT_LVAL)
+2e51f70 libtcc.c: Tiger realpath workaround for normalized_PATHCMP
+650a75e ppc-gen: r3<->r4 swap for FP-to-LL libgcc helpers
+b7382c2 ppc-gen: byte/short param big-endian offset
+963aeae docs/sessions/035: end-of-session writeup        (now superseded)
 ad144c0 ppc-gen: struct returns + dynamic param-area + struct load via sym
 82a583b README: status to v0.2.3-g3, add v0.2.2 + v0.2.3 rows
 af615c2 v0.2.3-g3 release: struct-by-value args + EXE PIC fix + small wins
