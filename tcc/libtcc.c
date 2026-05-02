@@ -499,6 +499,23 @@ ST_FUNC int normalized_PATHCMP(const char *f1, const char *f2)
 {
     char *p1, *p2;
     int ret = 1;
+    if (!f1 || !f2)            /* defensive: realpath() crashes on NULL */
+        return ret;
+#if defined(TCC_TARGET_PPC) && defined(__APPLE__)
+    /* Tiger's libSystem realpath(...,NULL) crashes deep in dyld for
+     * certain inputs we haven't pinned down (test 18_include hits it
+     * via `#include "./18_include2.h"` after `#include "18_include2.h"`).
+     * Use a stack buffer + the pre-allocated form, which takes a
+     * different code path inside libc and doesn't crash. */
+    {
+        char b1[1024], b2[1024];
+        p1 = realpath(f1, b1);
+        p2 = realpath(f2, b2);
+        if (p1 && p2)
+            ret = PATHCMP(p1, p2);
+        return ret;
+    }
+#endif
     if (!!(p1 = realpath(f1, NULL))) {
         if (!!(p2 = realpath(f2, NULL))) {
             ret = PATHCMP(p1, p2);
