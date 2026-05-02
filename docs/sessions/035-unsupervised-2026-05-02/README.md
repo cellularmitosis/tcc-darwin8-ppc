@@ -9,12 +9,12 @@ everything.
 
 | | start | end |
 |---|---|---|
-| HEAD | `9a5dc3f` (post-v0.2.2) | `545edc8` (post-v0.2.3, mid-flight to v0.2.4) |
-| Releases on GitHub | 4 | **5** (v0.2.3-g3 cut mid-session) |
+| HEAD | `9a5dc3f` (post-v0.2.2) | `e59112a` (post-v0.2.4) |
+| Releases on GitHub | 4 | **6** (v0.2.3-g3 + v0.2.4-g3 cut this session) |
 | tests2 baseline | 77 / 122 (63.1%) | **96 / 122 (78.7%)** |
 | Self-host fixpoint | holds | holds |
 
-Net **+19** tests passing, plus a release published with notes.
+Net **+19** tests passing, plus two releases published with full notes.
 
 ## What landed
 
@@ -37,6 +37,9 @@ In rough order:
 | `0baab59` | Load/store from absolute address (`*(int*)0x20000000` pattern) | (was masked) |
 | `16e9012` | No-op bound-check helper stubs | +2 (121_struct_return, 132_bound_test) |
 | `545edc8` | Single-threaded atomic helper stubs | +1 (136_atomic_gcc_style) |
+| `06f2361` | ppc-macho: classify .init_array → __mod_init_func (.o-side; exe path TBD) | — |
+| `68f930d` | v0.2.4-g3 release | — |
+| `e59112a` | FP args beyond f8 spill to outgoing param area (no longer a hard error) | — |
 
 Net effect: 77 → 96 / 122 (+19).
 
