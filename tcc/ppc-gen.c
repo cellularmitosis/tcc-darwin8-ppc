@@ -202,10 +202,15 @@ static unsigned long func_sub_sp_offset;
  *   mtlr r0
  *   blr
  */
-/* Prologue size in bytes. 13 fixed instructions (mflr, stw LR, 8 arg
- * spills, stwu, stw r31, addi r31) + 1 instruction to save r30 (the
- * PIC base register) = 14 instructions = 56 bytes. */
-#define PPC_PROLOG_SIZE 56
+/* Prologue size in bytes. Worst case: 14 instructions for the
+ * short-frame path (mflr, stw LR, 8 arg spills, stwu, stw r31,
+ * stw r30, addi r31) PLUS up to 8 extra instructions of nop padding
+ * when we use the long-frame path for any of the four
+ * frame-relative ops (stwu/stw r31/stw r30/addi r31, each blowing
+ * up from 1 to 3 instructions when frame_size or the saved-reg
+ * offsets won't fit in a 16-bit signed immediate). 14 + 8 = 22
+ * instructions = 88 bytes. */
+#define PPC_PROLOG_SIZE 88
 #define PPC_LINKAGE_SIZE 24
 #define PPC_PARAM_AREA_MIN 96   /* default outgoing param area: 24 GPR
                                   slots, big enough for variadic
@@ -254,6 +259,25 @@ static int ppc_frame_size(void)
  * in this file, after the gfunc_prolog/epilog block). */
 static int  ppc_need_pic_for_sym(Sym *sym);
 static void ppc_emit_pic_addr_load(int addr_gpr, Sym *sym);
+
+/* True if `offset` fits in the signed 16-bit immediate of a D-form
+ * load/store. False means we need the lis/ori + X-form indexed
+ * sequence. */
+static inline int ppc_off_fits_d(int offset)
+{
+    return (int16_t)offset == offset;
+}
+
+/* Materialize a 32-bit value into r0 via lis + ori. The pair
+ * faithfully reconstructs the value (ori does not sign-extend), so
+ * no +0x8000 fix-up is needed. */
+static void ppc_li32_r0(int value)
+{
+    int hi = ((unsigned)value >> 16) & 0xffff;
+    int lo = (unsigned)value & 0xffff;
+    o(0x3c000000 | (0 << 21) | hi);              /* lis r0, hi */
+    o(0x60000000 | (0 << 21) | (0 << 16) | lo);  /* ori r0, r0, lo */
+}
 
 /* PPC instructions are big-endian 32-bit words regardless of the host
  * byte order. Write directly without using write32le / write32be —
@@ -570,8 +594,14 @@ ST_FUNC void load(int r, SValue *sv)
         if (IS_FREG(r)) tcc_error("ppc-gen: address-of into FP register?");
         gpr = TREG_TO_GPR(r);
         offset = (int)sv->c.i;
-        /* addi rD, r31, offset */
-        o(0x38000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+        if (ppc_off_fits_d(offset)) {
+            /* addi rD, r31, offset */
+            o(0x38000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+        } else {
+            /* lis r0, hi(offset); ori r0, r0, lo(offset); add rD, r31, r0 */
+            ppc_li32_r0(offset);
+            o(0x7c000214 | (gpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
+        }
         return;
     }
 
@@ -887,107 +917,115 @@ ST_FUNC void load(int r, SValue *sv)
         offset = (int)sv->c.i;
         if (IS_FREG(r)) {
             int fpr = TREG_TO_FPR(r);
+            uint32_t d_op = 0, x_op = 0;
             if (bt == VT_FLOAT) {
-                /* lfs fD, off(r31) */
-                o(0xc0000000 | (fpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-                return;
+                d_op = 0xc0000000;             /* lfs */
+                x_op = 0x7c00042e;             /* lfsx */
             } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-                /* lfd fD, off(r31) */
-                o(0xc8000000 | (fpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-                return;
+                d_op = 0xc8000000;             /* lfd */
+                x_op = 0x7c0004ae;             /* lfdx */
             } else {
                 tcc_error("ppc-gen: FP local load of bt 0x%x", bt);
             }
+            if (ppc_off_fits_d(offset)) {
+                o(d_op | (fpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            } else {
+                ppc_li32_r0(offset);
+                o(x_op | (fpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
+            }
+            return;
         }
         gpr = TREG_TO_GPR(r);
-        switch (bt) {
-        case VT_BOOL:
-            /* _Bool: 1 byte, always 0 or 1, never sign-extend. */
-            o(0x88000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            return;
-        case VT_BYTE:
-            /* lbz rD, d(rA) — opcode 34. Sign-extend with extsb if signed. */
-            o(0x88000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            if (!(sv->type.t & VT_UNSIGNED))
-                o(0x7c000774 | (gpr << 21) | (gpr << 16));  /* extsb rA, rS */
-            return;
-        case VT_SHORT:
-            if (sv->type.t & VT_UNSIGNED) {
-                /* lhz — opcode 40 */
-                o(0xa0000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            } else {
-                /* lha — opcode 42 (sign-extending) */
-                o(0xa8000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+        {
+            uint32_t d_op = 0, x_op = 0;
+            int sign_ext = 0;
+            switch (bt) {
+            case VT_BOOL:
+                d_op = 0x88000000;             /* lbz */
+                x_op = 0x7c0000ae;             /* lbzx */
+                break;
+            case VT_BYTE:
+                d_op = 0x88000000;
+                x_op = 0x7c0000ae;
+                if (!(sv->type.t & VT_UNSIGNED)) sign_ext = 1;
+                break;
+            case VT_SHORT:
+                if (sv->type.t & VT_UNSIGNED) {
+                    d_op = 0xa0000000;         /* lhz */
+                    x_op = 0x7c00022e;         /* lhzx */
+                } else {
+                    d_op = 0xa8000000;         /* lha */
+                    x_op = 0x7c0002ae;         /* lhax */
+                }
+                break;
+            case VT_INT:
+            case VT_PTR:
+            case VT_FUNC:
+            case VT_LLONG:
+                d_op = 0x80000000;             /* lwz */
+                x_op = 0x7c00002e;             /* lwzx */
+                break;
+            case VT_STRUCT:
+                /* "Loading" a struct lvalue means producing its
+                 * address. Struct values flow through tcc as pointers
+                 * — gfunc_call etc. read the bytes from that address.
+                 * addi for short, lis/ori/add for long. */
+                if (ppc_off_fits_d(offset)) {
+                    o(0x38000000 | (gpr << 21) | (PPC_FP_REG << 16)
+                                 | (offset & 0xffff));
+                } else {
+                    ppc_li32_r0(offset);
+                    /* add r, r31, r0 */
+                    o(0x7c000214 | (gpr << 21) | (PPC_FP_REG << 16)
+                                 | (0 << 11));
+                }
+                return;
+            default:
+                tcc_error("ppc-gen: load VT_LOCAL of basic type 0x%x not yet supported", bt);
             }
-            return;
-        case VT_INT:
-        case VT_PTR:
-        case VT_FUNC:
-            /* lwz rD, d(rA) — opcode 32 = 0x80000000 */
-            o(0x80000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            return;
-        case VT_LLONG: {
-            /* tcc loads the two halves separately via the rc2 path.
-             * For the low half, r is the destination and (offset+4)
-             * is where we wrote it during store; for the high, r is
-             * the destination and (offset) is the high-half slot.
-             * tcc tells us which half by calling gv with the matching
-             * load_type and incrementing offset between calls. So just
-             * do a standard 32-bit lwz at the (already-adjusted)
-             * offset. */
-            o(0x80000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            return;
-        }
-        case VT_STRUCT:
-            /* "Loading" a struct lvalue means producing its address.
-             * Struct values flow through tcc as pointers — gfunc_call
-             * etc. read the bytes from that address. addi r, r31, off. */
-            if ((int16_t)offset == offset) {
-                o(0x38000000 | (gpr << 21) | (PPC_FP_REG << 16)
-                             | (offset & 0xffff));
+            if (ppc_off_fits_d(offset)) {
+                o(d_op | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
             } else {
-                /* Out-of-range immediate: lis tmp,ha; addi tmp,tmp,lo;
-                 * add r, r31, tmp. r0 is scratch. */
-                int hi = ((offset + 0x8000) >> 16) & 0xffff;
-                int lo = offset & 0xffff;
-                o(0x3c000000 | (0 << 21) | (hi & 0xffff));        /* lis r0, hi */
-                o(0x60000000 | (0 << 21) | (0 << 16) | (lo & 0xffff)); /* ori r0,r0,lo */
-                o(0x7c000214 | (gpr << 21) | (PPC_FP_REG << 16) | (0 << 11)); /* add r, r31, r0 */
+                ppc_li32_r0(offset);
+                o(x_op | (gpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
             }
+            if (sign_ext)
+                o(0x7c000774 | (gpr << 21) | (gpr << 16));  /* extsb */
             return;
-        default:
-            tcc_error("ppc-gen: load VT_LOCAL of basic type 0x%x not yet supported", bt);
         }
     }
 
     /* Load from an absolute address (e.g. `*(int *)0x20000000`):
-     * VT_CONST | VT_LVAL with no VT_SYM. Materialize the address into
-     * a scratch register, then do a normal indirect load. */
+     * VT_CONST | VT_LVAL with no VT_SYM. Materialize the HA half of
+     * the address into r12 (NOT r0 — D-form load/store treats RA=0
+     * as the literal value 0, not the contents of r0), then do a
+     * D-form load via r12+lo. The +0x8000 trick on `hi` pairs with
+     * addi-style sign-extending `lo` in the load instruction. */
     if (v == VT_CONST && (sv->r & VT_LVAL) && !(sv->r & VT_SYM)) {
         int bt = sv->type.t & VT_BTYPE;
         uint32_t addr = (uint32_t)sv->c.i;
-        int hi = ((addr + 0x8000) >> 16) & 0xffff;
+        int hi = (((int)addr + 0x8000) >> 16) & 0xffff;
         int lo = addr & 0xffff;
         gpr = TREG_TO_GPR(r);
-        /* lis r0, ha(addr); load via r0+lo. r0 is scratch. */
-        o(0x3c000000 | (0 << 21) | (hi & 0xffff));
+        /* lis r12, ha(addr) */
+        o(0x3c000000 | (12 << 21) | hi);
         switch (bt) {
         case VT_BOOL:
         case VT_BYTE:
-            o(0x88000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+            o(0x88000000 | (gpr << 21) | (12 << 16) | (lo & 0xffff));
             if (bt == VT_BYTE && !(sv->type.t & VT_UNSIGNED))
                 o(0x7c000774 | (gpr << 21) | (gpr << 16));
             return;
         case VT_SHORT:
             if (sv->type.t & VT_UNSIGNED)
-                o(0xa0000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+                o(0xa0000000 | (gpr << 21) | (12 << 16) | (lo & 0xffff));
             else
-                o(0xa8000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+                o(0xa8000000 | (gpr << 21) | (12 << 16) | (lo & 0xffff));
             return;
         case VT_INT:
         case VT_PTR:
         case VT_FUNC:
-            o(0x80000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));
+            o(0x80000000 | (gpr << 21) | (12 << 16) | (lo & 0xffff));
             return;
         default:
             tcc_error("ppc-gen: load from absolute addr of bt 0x%x", bt);
@@ -1048,62 +1086,83 @@ ST_FUNC void store(int r, SValue *sv)
         offset = (int)sv->c.i;
         if (IS_FREG(r)) {
             int fpr = TREG_TO_FPR(r);
+            uint32_t d_op = 0, x_op = 0;
             if (bt == VT_FLOAT) {
-                /* stfs fS, off(r31) */
-                o(0xd0000000 | (fpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-                return;
+                d_op = 0xd0000000;             /* stfs */
+                x_op = 0x7c00052e;             /* stfsx */
             } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-                /* stfd fS, off(r31) */
-                o(0xd8000000 | (fpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-                return;
+                d_op = 0xd8000000;             /* stfd */
+                x_op = 0x7c0005ae;             /* stfdx */
             } else {
                 tcc_error("ppc-gen: store FP local of bt 0x%x", bt);
             }
-        }
-        gpr = TREG_TO_GPR(r);
-        switch (bt) {
-        case VT_BOOL:
-            /* _Bool occupies one byte; stb same as VT_BYTE. */
-        case VT_BYTE:
-            /* stb rS, d(rA) — opcode 38 */
-            o(0x98000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            return;
-        case VT_SHORT:
-            /* sth rS, d(rA) — opcode 44 */
-            o(0xb0000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            return;
-        case VT_INT:
-        case VT_PTR:
-        case VT_FUNC:
-            /* stw rS, d(rA) — opcode 36 = 0x90000000 */
-            o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-            return;
-        case VT_LLONG: {
-            /* tcc convention: r holds the LOW half, sv->r2 holds the
-             * HIGH half (when set). Store with high at lower address
-             * (matches gfunc_prolog spill order, big-endian word
-             * order).
-             *
-             * If sv->r2 isn't set we treat the call as a single-half
-             * store and write `r` at the given offset verbatim. This
-             * is the contract that save_reg_upstack uses on PPC: it
-             * calls store() once per half with type=VT_LLONG and
-             * r2=VT_CONST, advancing sv->c.i by PTR_SIZE between
-             * calls. The caller decides which slot is which. */
-            int hi_gpr;
-            if (sv->r2 < VT_CONST) {
-                hi_gpr = TREG_TO_GPR(sv->r2);
-                /* stw r2(=high), offset(r31) */
-                o(0x90000000 | (hi_gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
-                /* stw r(=low), offset+4(r31) */
-                o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | ((offset + 4) & 0xffff));
+            if (ppc_off_fits_d(offset)) {
+                o(d_op | (fpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
             } else {
-                o(0x90000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+                ppc_li32_r0(offset);
+                o(x_op | (fpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
             }
             return;
         }
-        default:
-            tcc_error("ppc-gen: store VT_LOCAL of bt 0x%x not yet supported", bt);
+        gpr = TREG_TO_GPR(r);
+        {
+            uint32_t d_op = 0, x_op = 0;
+            switch (bt) {
+            case VT_BOOL:
+            case VT_BYTE:
+                d_op = 0x98000000;             /* stb */
+                x_op = 0x7c0001ae;             /* stbx */
+                break;
+            case VT_SHORT:
+                d_op = 0xb0000000;             /* sth */
+                x_op = 0x7c00032e;             /* sthx */
+                break;
+            case VT_INT:
+            case VT_PTR:
+            case VT_FUNC:
+                d_op = 0x90000000;             /* stw */
+                x_op = 0x7c00012e;             /* stwx */
+                break;
+            case VT_LLONG: {
+                int hi_gpr;
+                d_op = 0x90000000;
+                x_op = 0x7c00012e;
+                if (sv->r2 < VT_CONST) {
+                    hi_gpr = TREG_TO_GPR(sv->r2);
+                    /* stw high, offset(r31) */
+                    if (ppc_off_fits_d(offset)) {
+                        o(d_op | (hi_gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+                    } else {
+                        ppc_li32_r0(offset);
+                        o(x_op | (hi_gpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
+                    }
+                    /* stw low, offset+4(r31) */
+                    if (ppc_off_fits_d(offset + 4)) {
+                        o(d_op | (gpr << 21) | (PPC_FP_REG << 16) | ((offset + 4) & 0xffff));
+                    } else {
+                        ppc_li32_r0(offset + 4);
+                        o(x_op | (gpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
+                    }
+                } else {
+                    if (ppc_off_fits_d(offset)) {
+                        o(d_op | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+                    } else {
+                        ppc_li32_r0(offset);
+                        o(x_op | (gpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
+                    }
+                }
+                return;
+            }
+            default:
+                tcc_error("ppc-gen: store VT_LOCAL of bt 0x%x not yet supported", bt);
+            }
+            if (ppc_off_fits_d(offset)) {
+                o(d_op | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            } else {
+                ppc_li32_r0(offset);
+                o(x_op | (gpr << 21) | (PPC_FP_REG << 16) | (0 << 11));
+            }
+            return;
         }
     }
 
@@ -1269,25 +1328,27 @@ ST_FUNC void store(int r, SValue *sv)
     }
 
     /* Store to an absolute address: VT_CONST | VT_LVAL with no
-     * VT_SYM. Mirror the load path: lis r0, ha(addr); store via r0+lo. */
+     * VT_SYM. Mirror the load path: materialize the HA half of the
+     * address in r12 (NOT r0 — D-form treats RA=0 as literal 0,
+     * not r0's contents) then store via r12+lo. */
     if (v == VT_CONST && (sv->r & VT_LVAL) && !(sv->r & VT_SYM)) {
         uint32_t addr = (uint32_t)sv->c.i;
-        int hi = ((addr + 0x8000) >> 16) & 0xffff;
+        int hi = (((int)addr + 0x8000) >> 16) & 0xffff;
         int lo = addr & 0xffff;
         gpr = TREG_TO_GPR(r);
-        o(0x3c000000 | (0 << 21) | (hi & 0xffff));            /* lis r0, ha */
+        o(0x3c000000 | (12 << 21) | hi);                       /* lis r12, ha */
         switch (bt) {
         case VT_BOOL:
         case VT_BYTE:
-            o(0x98000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));  /* stb */
+            o(0x98000000 | (gpr << 21) | (12 << 16) | (lo & 0xffff));  /* stb */
             return;
         case VT_SHORT:
-            o(0xb0000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));  /* sth */
+            o(0xb0000000 | (gpr << 21) | (12 << 16) | (lo & 0xffff));  /* sth */
             return;
         case VT_INT:
         case VT_PTR:
         case VT_FUNC:
-            o(0x90000000 | (gpr << 21) | (0 << 16) | (lo & 0xffff));  /* stw */
+            o(0x90000000 | (gpr << 21) | (12 << 16) | (lo & 0xffff));  /* stw */
             return;
         default:
             tcc_error("ppc-gen: store to absolute addr of bt 0x%x", bt);
@@ -1416,16 +1477,39 @@ ST_FUNC void gfunc_call(int nb_args)
                 int word_off = w * 4;
                 if (slot < 8) {
                     int target = slot + 3;     /* r3..r10 */
-                    /* lwz target, word_off(r12) */
+                    /* word_off only exceeds 16-bit if struct itself
+                     * is huge AND we're past 8 GPRs — but slot < 8
+                     * caps us here, so word_off <= 28. Always D-form. */
                     o(0x80000000 | (target << 21) | (12 << 16)
                                  | (word_off & 0xffff));
                 } else {
                     int stack_off = 24 + slot * 4;
-                    /* lwz r0, word_off(r12) ; stw r0, stack_off(r1) */
-                    o(0x80000000 | (0 << 21) | (12 << 16)
-                                 | (word_off & 0xffff));
-                    o(0x90000000 | (0 << 21) | (1 << 16)
-                                 | (stack_off & 0xffff));
+                    /* lwz r0, word_off(r12) — word_off can be huge
+                     * for big structs. Use X-form when needed. */
+                    if (ppc_off_fits_d(word_off)) {
+                        o(0x80000000 | (0 << 21) | (12 << 16)
+                                     | (word_off & 0xffff));
+                    } else {
+                        ppc_li32_r0(word_off);
+                        /* lwzx r0, r12, r0 — but r0 is both src and
+                         * dst, which is fine on PPC (XO form reads
+                         * RB then writes RT). */
+                        o(0x7c00002e | (0 << 21) | (12 << 16) | (0 << 11));
+                    }
+                    /* stw r0, stack_off(r1) — stack_off also can be
+                     * huge. Use a different scratch (r11) for the
+                     * intermediate so r0 still holds the loaded value. */
+                    if (ppc_off_fits_d(stack_off)) {
+                        o(0x90000000 | (0 << 21) | (1 << 16)
+                                     | (stack_off & 0xffff));
+                    } else {
+                        /* lis r11, hi; ori r11, r11, lo; stwx r0, r1, r11 */
+                        int hi = ((unsigned)stack_off >> 16) & 0xffff;
+                        int lo = (unsigned)stack_off & 0xffff;
+                        o(0x3c000000 | (11 << 21) | hi);
+                        o(0x60000000 | (11 << 21) | (11 << 16) | lo);
+                        o(0x7c00012e | (0 << 21) | (1 << 16) | (11 << 11));
+                    }
                 }
             }
         } else if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
@@ -2034,10 +2118,42 @@ ST_FUNC void gfunc_epilog(void)
      *   lwz  r0, 8(r1)
      *   mtlr r0
      *   blr
+     *
+     * Long-frame variants when the displacements / immediates won't
+     * fit in signed 16-bit (frame_size > 32768 or so). Unlike the
+     * prolog, the epilog isn't size-constrained — we just emit
+     * however many instructions are needed.
      */
-    o(0x80000000 | (PPC_PIC_BASE_REG << 21) | (1 << 16) | (pic_save_off & 0xffff));
-    o(0x80000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
-    o(0x38210000 | (frame_size & 0xffff));
+    /* lwz r30, pic_save_off(r1) */
+    if ((int16_t)pic_save_off == pic_save_off) {
+        o(0x80000000 | (PPC_PIC_BASE_REG << 21) | (1 << 16) | (pic_save_off & 0xffff));
+    } else {
+        int hi = ((unsigned)pic_save_off >> 16) & 0xffff;
+        int lo = (unsigned)pic_save_off & 0xffff;
+        o(0x3c000000 | (0 << 21) | hi);
+        o(0x60000000 | (0 << 21) | (0 << 16) | lo);
+        o(0x7c01002e | (PPC_PIC_BASE_REG << 21));      /* lwzx r30, r1, r0 */
+    }
+    /* lwz r31, fp_save_off(r1) */
+    if ((int16_t)fp_save_off == fp_save_off) {
+        o(0x80000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
+    } else {
+        int hi = ((unsigned)fp_save_off >> 16) & 0xffff;
+        int lo = (unsigned)fp_save_off & 0xffff;
+        o(0x3c000000 | (0 << 21) | hi);
+        o(0x60000000 | (0 << 21) | (0 << 16) | lo);
+        o(0x7c01002e | (PPC_FP_REG << 21));            /* lwzx r31, r1, r0 */
+    }
+    /* addi r1, r1, frame_size */
+    if ((int16_t)frame_size == frame_size) {
+        o(0x38210000 | (frame_size & 0xffff));
+    } else {
+        int hi = ((unsigned)frame_size >> 16) & 0xffff;
+        int lo = (unsigned)frame_size & 0xffff;
+        o(0x3c000000 | (0 << 21) | hi);
+        o(0x60000000 | (0 << 21) | (0 << 16) | lo);
+        o(0x7c210214);                                 /* add r1, r1, r0 */
+    }
     o(0x80010008);
     o(0x7c0803a6);
     o(0x4e800020);
@@ -2087,16 +2203,72 @@ ST_FUNC void gfunc_epilog(void)
         for (k = ppc_fp_param_count; k < 8; k++)
             o(0x60000000);  /* nop */
     }
-    /* stwu r1, -frame_size(r1) */
-    o(0x94210000 | ((-frame_size) & 0xffff));
-    /* stw r31, fp_save_off(r1) */
-    o(0x90000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
-    /* stw r30, pic_save_off(r1) -- save PIC base register so we
-     * can clobber it freely in the function body and restore in
-     * the epilogue. */
-    o(0x90000000 | (PPC_PIC_BASE_REG << 21) | (1 << 16) | (pic_save_off & 0xffff));
-    /* addi r31, r1, frame_size */
-    o(0x38000000 | (PPC_FP_REG << 21) | (1 << 16) | (frame_size & 0xffff));
+    /* Frame-allocation, save-area, and FP-pointer-setup instructions.
+     * Each one is either a single-instruction short form or a
+     * 3-instruction long form depending on whether the displacement
+     * fits in a signed 16-bit immediate. We emit the short form
+     * followed by 2 nops when long form isn't needed, so the total
+     * number of instructions written is constant (8 — matching the
+     * extra reservation in PPC_PROLOG_SIZE). */
+    {
+        int neg_fs = -frame_size;
+
+        /* For long forms we materialize a 32-bit value into r0 via
+         *   lis r0, (val >> 16) & 0xffff
+         *   ori r0, r0, val & 0xffff
+         * Note: `ori` does NOT sign-extend its 16-bit immediate; the
+         * pair faithfully reconstructs the full 32-bit value with no
+         * +0x8000 fix-up needed (which is what an `addi`-style pair
+         * would require). */
+
+        /* stwu r1, -frame_size(r1)  OR  long-frame equivalent */
+        if ((int16_t)neg_fs == neg_fs) {
+            o(0x94210000 | (neg_fs & 0xffff));
+            o(0x60000000); o(0x60000000);
+        } else {
+            int hi = ((unsigned)neg_fs >> 16) & 0xffff;
+            int lo = (unsigned)neg_fs & 0xffff;
+            o(0x3c000000 | (0 << 21) | hi);                    /* lis r0, hi */
+            o(0x60000000 | (0 << 21) | (0 << 16) | lo);        /* ori r0, r0, lo */
+            o(0x7c21016e);                                     /* stwux r1, r1, r0 */
+        }
+
+        /* stw r31, fp_save_off(r1)  OR long form via r0 + stwx */
+        if ((int16_t)fp_save_off == fp_save_off) {
+            o(0x90000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
+            o(0x60000000); o(0x60000000);
+        } else {
+            int hi = ((unsigned)fp_save_off >> 16) & 0xffff;
+            int lo = (unsigned)fp_save_off & 0xffff;
+            o(0x3c000000 | (0 << 21) | hi);
+            o(0x60000000 | (0 << 21) | (0 << 16) | lo);
+            o(0x7c01012e | (PPC_FP_REG << 21));                /* stwx r31, r1, r0 */
+        }
+
+        /* stw r30, pic_save_off(r1)  OR long form */
+        if ((int16_t)pic_save_off == pic_save_off) {
+            o(0x90000000 | (PPC_PIC_BASE_REG << 21) | (1 << 16) | (pic_save_off & 0xffff));
+            o(0x60000000); o(0x60000000);
+        } else {
+            int hi = ((unsigned)pic_save_off >> 16) & 0xffff;
+            int lo = (unsigned)pic_save_off & 0xffff;
+            o(0x3c000000 | (0 << 21) | hi);
+            o(0x60000000 | (0 << 21) | (0 << 16) | lo);
+            o(0x7c01012e | (PPC_PIC_BASE_REG << 21));          /* stwx r30, r1, r0 */
+        }
+
+        /* addi r31, r1, frame_size  OR long form via r0 + add */
+        if ((int16_t)frame_size == frame_size) {
+            o(0x38000000 | (PPC_FP_REG << 21) | (1 << 16) | (frame_size & 0xffff));
+            o(0x60000000); o(0x60000000);
+        } else {
+            int hi = ((unsigned)frame_size >> 16) & 0xffff;
+            int lo = (unsigned)frame_size & 0xffff;
+            o(0x3c000000 | (0 << 21) | hi);
+            o(0x60000000 | (0 << 21) | (0 << 16) | lo);
+            o(0x7c010214 | (PPC_FP_REG << 21));                /* add r31, r1, r0 */
+        }
+    }
     ind = saved_ind;
 }
 
