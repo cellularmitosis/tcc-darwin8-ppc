@@ -595,6 +595,15 @@ ST_FUNC void load(int r, SValue *sv)
         }
         gpr = TREG_TO_GPR(r);
         switch (bt) {
+        case VT_VOID:
+            /* `*p` of `void *` is a constraint violation but tcc
+             * accepts it, used like `i ? *p : *p;` for side-effect
+             * sequencing tests (dr106). The value is undefined and
+             * never consumed; emit nothing. */
+            return;
+        case VT_BOOL:
+            o(0x88000000 | (gpr << 21) | (base_gpr << 16));
+            return;
         case VT_BYTE:
             o(0x88000000 | (gpr << 21) | (base_gpr << 16));
             if (!(sv->type.t & VT_UNSIGNED))
@@ -693,6 +702,10 @@ ST_FUNC void load(int r, SValue *sv)
             }
             gpr = TREG_TO_GPR(r);
             switch (bt) {
+            case VT_BOOL:
+                o(0x88000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                return;
             case VT_BYTE:
                 o(0x88000000 | (gpr << 21) | (addr_gpr << 16)
                              | (extra_off & 0xffff));
@@ -823,6 +836,10 @@ ST_FUNC void load(int r, SValue *sv)
         }
         gpr = TREG_TO_GPR(r);
         switch (bt) {
+        case VT_BOOL:
+            greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
+            o(0x88000000 | (gpr << 21) | (addr_gpr << 16));
+            return;
         case VT_BYTE:
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
             o(0x88000000 | (gpr << 21) | (addr_gpr << 16));
@@ -867,6 +884,10 @@ ST_FUNC void load(int r, SValue *sv)
         }
         gpr = TREG_TO_GPR(r);
         switch (bt) {
+        case VT_BOOL:
+            /* _Bool: 1 byte, always 0 or 1, never sign-extend. */
+            o(0x88000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
+            return;
         case VT_BYTE:
             /* lbz rD, d(rA) — opcode 34. Sign-extend with extsb if signed. */
             o(0x88000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
@@ -973,6 +994,8 @@ ST_FUNC void store(int r, SValue *sv)
         }
         gpr = TREG_TO_GPR(r);
         switch (bt) {
+        case VT_BOOL:
+            /* _Bool occupies one byte; stb same as VT_BYTE. */
         case VT_BYTE:
             /* stb rS, d(rA) — opcode 38 */
             o(0x98000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
@@ -1051,6 +1074,7 @@ ST_FUNC void store(int r, SValue *sv)
             }
             gpr = TREG_TO_GPR(r);
             switch (bt) {
+            case VT_BOOL:
             case VT_BYTE:  store_op = 0x98000000; break;
             case VT_SHORT: store_op = 0xb0000000; break;
             case VT_INT:
@@ -1107,6 +1131,7 @@ ST_FUNC void store(int r, SValue *sv)
             }
             gpr = TREG_TO_GPR(r);
             switch (bt) {
+            case VT_BOOL:
             case VT_BYTE:  store_op = 0x98000000; break;
             case VT_SHORT: store_op = 0xb0000000; break;
             case VT_INT:
@@ -1146,6 +1171,7 @@ ST_FUNC void store(int r, SValue *sv)
         }
         gpr = TREG_TO_GPR(r);
         switch (bt) {
+        case VT_BOOL:
         case VT_BYTE:  store_op = 0x98000000; break;  /* stb */
         case VT_SHORT: store_op = 0xb0000000; break;  /* sth */
         case VT_INT:
@@ -2400,7 +2426,18 @@ ST_FUNC void gen_increment_tcov(SValue *sv)
 
 ST_FUNC void ggoto(void)
 {
-    tcc_error("ppc-gen: ggoto stub");
+    /* Computed goto: vtop holds the target address. Materialize it
+     * into a GPR, move to CTR, branch via bctr. Same pattern as the
+     * indirect-call path in gfunc_call() but `bctr` (no LR write)
+     * rather than `bctrl`. */
+    int gpr;
+    gv(RC_INT);
+    gpr = TREG_TO_GPR(vtop->r & VT_VALMASK);
+    /* mtctr rS */
+    o(0x7c0903a6 | (gpr << 21));
+    /* bctr */
+    o(0x4e800420);
+    vtop--;
 }
 
 /* VLA support — stubs. Tcc compiles fine without VLAs in user code;
