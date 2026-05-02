@@ -117,6 +117,19 @@ ST_FUNC void ppc_pic_pairs_reset(void);
 #define INDIRECT_SYMBOL_LOCAL               0x80000000
 #define INDIRECT_SYMBOL_ABS                 0x40000000
 
+/* n_desc attribute bits (above the low 4 reference-flags). */
+#define REFERENCED_DYNAMICALLY              0x0010
+/* Set on defined external symbols that dyld must be able to find by
+ * name at runtime — specifically `_environ`, `_NXArgc`, `_NXArgv`,
+ * `___progname`, and `__mh_execute_header`. libSystem's
+ * `__NSGetEnviron`, `__NSGetArgc`, `__NSGetArgv`, and `__NSGetProgname`
+ * walk dyld's symbol tables looking for symbols with this flag set,
+ * and return the address of the matching one. Without this flag,
+ * `__NSGetEnviron` returns NULL — and `_libc_initializer` (libSystem's
+ * mod_init_func that initialises malloc) immediately dereferences that
+ * NULL, faulting. That's the entire reason a tcc-linked tcc-self
+ * crashes in `_malloc_initialize` before main runs. */
+
 /* nlist n_type values. */
 #define N_STAB                  0xe0  /* mask: any stab */
 #define N_PEXT                  0x10  /* private external */
@@ -1474,16 +1487,32 @@ static void put_sectname(obuf *out, const char *name)
     obuf_put(out, nm, 16);
 }
 
-/* Write a Mach-O nlist entry (12 bytes). */
-static void put_nlist(obuf *nlist, uint32_t strx, uint8_t n_type,
-                      uint8_t n_sect, uint16_t n_desc, uint32_t n_value)
+/* Write a Mach-O nlist entry (12 bytes).
+ *
+ * NOTE: when this used put8() for the four middle bytes, tcc-self's
+ * output had n_type=0/n_sect=0/n_desc=0 for every symbol — a tcc PPC
+ * backend bug around small-arg call sequences (probably interaction
+ * between back-to-back single-byte function calls and our 8-GPR-slot
+ * limit on the surrounding function frame). Bypass it: write the
+ * 12-byte entry as a single buffer extension with explicit byte
+ * stores. No function calls inside the loop. */
+static void put_nlist(obuf *nlist, uint32_t strx, int n_type,
+                      int n_sect, int n_desc, uint32_t n_value)
 {
-    put32be(nlist, strx);
-    put8(nlist, n_type);
-    put8(nlist, n_sect);
-    put8(nlist, (n_desc >> 8) & 0xff);
-    put8(nlist, n_desc & 0xff);
-    put32be(nlist, n_value);
+    unsigned char buf[12];
+    buf[0]  = (unsigned char)((strx    >> 24) & 0xff);
+    buf[1]  = (unsigned char)((strx    >> 16) & 0xff);
+    buf[2]  = (unsigned char)((strx    >>  8) & 0xff);
+    buf[3]  = (unsigned char)( strx           & 0xff);
+    buf[4]  = (unsigned char)( n_type         & 0xff);
+    buf[5]  = (unsigned char)( n_sect         & 0xff);
+    buf[6]  = (unsigned char)((n_desc  >>  8) & 0xff);
+    buf[7]  = (unsigned char)( n_desc         & 0xff);
+    buf[8]  = (unsigned char)((n_value >> 24) & 0xff);
+    buf[9]  = (unsigned char)((n_value >> 16) & 0xff);
+    buf[10] = (unsigned char)((n_value >>  8) & 0xff);
+    buf[11] = (unsigned char)( n_value        & 0xff);
+    obuf_put(nlist, buf, 12);
 }
 
 /* The big one. */
@@ -1893,63 +1922,156 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     /* Externally-defined: enumerate all globally-visible symbols
      * defined in our text/data/rodata sections, so dyld can find
      * them when libSystem looks up _NXArgc / _environ / etc. We
-     * always include synthetic _start (the entry shim) regardless
-     * of whether the user's code defined it. */
+     * always include synthetic _start (the entry shim) and
+     * __mh_execute_header.
+     *
+     * IMPORTANT: dyld uses BINARY SEARCH on the externally-defined
+     * symbol table (sorted alphabetically by name). If the symbols
+     * aren't sorted, dyld's lookup of `_environ` from libSystem's
+     * `_libc_initializer` returns NULL, and the binary faults
+     * dereferencing NULL before main runs. So we collect everything
+     * into an array, sort by name, then emit. */
     {
-        int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
-        int si;
-        for (si = 1; si < nsyms; si++) {
+        /* Use parallel int arrays instead of a struct of mixed-width
+         * fields — tcc's PPC backend has had trouble with byte-sized
+         * struct fields written through pointer-array index in the
+         * past, and we burned hours diagnosing wrong n_type bytes from
+         * exactly that pattern. All fields are int here; we narrow
+         * back to uint8/uint16 only at put_nlist call time. */
+        const char **edn = NULL;     /* names */
+        int *edt = NULL;             /* n_type */
+        int *eds = NULL;             /* n_sect */
+        int *edd = NULL;             /* n_desc */
+        uint32_t *edv = NULL;        /* n_value */
+        int n_ext = 0, cap_ext = 0;
+        int nsyms_e = s1->symtab->data_offset / sizeof(ElfW(Sym));
+        int si, ei, ej;
+
+        for (si = 1; si < nsyms_e; si++) {
             ElfW(Sym) *esym = &((ElfW(Sym) *)s1->symtab->data)[si];
             const char *name = (char *)s1->symtab->link->data + esym->st_name;
             int stype = ELFW(ST_TYPE)(esym->st_info);
             int sbind = ELFW(ST_BIND)(esym->st_info);
             uint32_t n_value = 0;
-            uint8_t n_sect = NO_SECT;
-            uint32_t strx;
+            int n_sect = NO_SECT;
+            int n_desc = 0;
             if (esym->st_shndx == SHN_UNDEF) continue;
             if (esym->st_shndx == SHN_COMMON) continue;
             if (stype == STT_SECTION || stype == STT_FILE) continue;
             if (!name || !name[0]) continue;
             if (sbind != STB_GLOBAL) continue;
-            /* Map ELF section index to our Mach-O section. */
+            /* Skip crt1's private machinery — `__start`, the dyld-helper
+             * trampolines, and our injected keymgr stub should be
+             * local-only. We don't have a local-symbol-path yet, so
+             * just drop them. dyld's binary-search budget is sensitive
+             * to total ext-def count; pollute it and `_environ` lookup
+             * fails (-> __NSGetEnviron returns NULL ->
+             * _libc_initializer faults before main runs). */
+            if (!strcmp(name, "__start")
+             || !strcmp(name, "__dyld_func_lookup")
+             || !strcmp(name, "dyld_stub_binding_helper")
+             || !strcmp(name, "___keymgr_dwarf2_register_sections"))
+                continue;
             if (text && esym->st_shndx == text->sh_num) {
-                n_sect = (uint8_t)(sect_idx_text + 1);
+                n_sect = sect_idx_text + 1;
                 n_value = sects[sect_idx_text].vmaddr + esym->st_value;
             } else if (rodata && esym->st_shndx == rodata->sh_num) {
-                n_sect = (uint8_t)(sect_idx_rodata + 1);
+                n_sect = sect_idx_rodata + 1;
                 n_value = sects[sect_idx_rodata].vmaddr + esym->st_value;
             } else if (data && esym->st_shndx == data->sh_num) {
-                n_sect = (uint8_t)(sect_idx_data + 1);
+                n_sect = sect_idx_data + 1;
                 n_value = sects[sect_idx_data].vmaddr + esym->st_value;
             } else {
-                continue;       /* defined in a section we don't emit */
+                continue;
             }
-            strx = (uint32_t)strtab.len;
-            obuf_put(&strtab, name, strlen(name) + 1);
-            put_nlist(&nlist, strx, N_SECT | N_EXT, n_sect, 0, n_value);
+            if (!strcmp(name, "_environ")
+             || !strcmp(name, "_NXArgc")
+             || !strcmp(name, "_NXArgv")
+             || !strcmp(name, "___progname"))
+                n_desc = REFERENCED_DYNAMICALLY;
+            if (n_ext >= cap_ext) {
+                cap_ext = cap_ext ? cap_ext * 2 : 32;
+                edn = tcc_realloc(edn, cap_ext * sizeof(*edn));
+                edt = tcc_realloc(edt, cap_ext * sizeof(*edt));
+                eds = tcc_realloc(eds, cap_ext * sizeof(*eds));
+                edd = tcc_realloc(edd, cap_ext * sizeof(*edd));
+                edv = tcc_realloc(edv, cap_ext * sizeof(*edv));
+            }
+            edn[n_ext] = name;
+            edt[n_ext] = N_SECT | N_EXT;
+            eds[n_ext] = n_sect;
+            edd[n_ext] = n_desc;
+            edv[n_ext] = n_value;
+            n_ext++;
+        }
+
+        /* Synthetic `_start` (only when crt1 isn't loaded) and
+         * `__mh_execute_header` (always). */
+        if (!find_elf_sym(s1->symtab, "start")) {
+            if (n_ext >= cap_ext) {
+                cap_ext = cap_ext ? cap_ext * 2 : 32;
+                edn = tcc_realloc(edn, cap_ext * sizeof(*edn));
+                edt = tcc_realloc(edt, cap_ext * sizeof(*edt));
+                eds = tcc_realloc(eds, cap_ext * sizeof(*eds));
+                edd = tcc_realloc(edd, cap_ext * sizeof(*edd));
+                edv = tcc_realloc(edv, cap_ext * sizeof(*edv));
+            }
+            edn[n_ext] = "_start";
+            edt[n_ext] = N_SECT | N_EXT;
+            eds[n_ext] = SECT_TEXT;
+            edd[n_ext] = 0;
+            edv[n_ext] = entry_addr;
+            n_ext++;
+        }
+        if (n_ext >= cap_ext) {
+            cap_ext = cap_ext ? cap_ext * 2 : 32;
+            edn = tcc_realloc(edn, cap_ext * sizeof(*edn));
+            edt = tcc_realloc(edt, cap_ext * sizeof(*edt));
+            eds = tcc_realloc(eds, cap_ext * sizeof(*eds));
+            edd = tcc_realloc(edd, cap_ext * sizeof(*edd));
+            edv = tcc_realloc(edv, cap_ext * sizeof(*edv));
+        }
+        edn[n_ext] = "__mh_execute_header";
+        edt[n_ext] = N_EXT | N_ABS;
+        eds[n_ext] = NO_SECT;
+        edd[n_ext] = REFERENCED_DYNAMICALLY;
+        edv[n_ext] = text_seg_vmaddr;
+        n_ext++;
+
+        /* Sort alphabetically by name. dyld uses BINARY SEARCH on the
+         * external defined symbol table; an unsorted table makes
+         * `_environ` lookup return NULL, and `_libc_initializer`
+         * dereferences that NULL → SIGBUS before main. (Verified
+         * empirically by bisecting which symbols, when added past
+         * threshold, broke the lookup, then noticing that gcc-4.0's
+         * ld emits its symtab sorted.) */
+        for (ei = 1; ei < n_ext; ei++) {
+            const char *tn = edn[ei];
+            int tt = edt[ei], ts = eds[ei], td = edd[ei];
+            uint32_t tv = edv[ei];
+            for (ej = ei; ej > 0 && strcmp(edn[ej-1], tn) > 0; ej--) {
+                edn[ej] = edn[ej-1];
+                edt[ej] = edt[ej-1];
+                eds[ej] = eds[ej-1];
+                edd[ej] = edd[ej-1];
+                edv[ej] = edv[ej-1];
+            }
+            edn[ej] = tn;
+            edt[ej] = tt;
+            eds[ej] = ts;
+            edd[ej] = td;
+            edv[ej] = tv;
+        }
+
+        for (ei = 0; ei < n_ext; ei++) {
+            uint32_t strx = (uint32_t)strtab.len;
+            obuf_put(&strtab, edn[ei], strlen(edn[ei]) + 1);
+            put_nlist(&nlist, strx,
+                      edt[ei], eds[ei], edd[ei], edv[ei]);
             n_extdefsym++;
         }
-    }
-    /* Synthetic _start (the entry shim). */
-    {
-        uint32_t start_strx = (uint32_t)strtab.len;
-        obuf_put(&strtab, "_start", 7);
-        put_nlist(&nlist, start_strx, N_SECT | N_EXT, SECT_TEXT, 0,
-                  entry_addr);
-        n_extdefsym++;
-    }
-    /* `__mh_execute_header` is a magic symbol dyld recognizes: it's
-     * the absolute address of the Mach-O header (= base of the __TEXT
-     * segment, since the header sits at the start of the segment).
-     * libSystem's `_NSGetEnviron` and friends use it to identify the
-     * executable image when looking up _environ / _NXArgc / etc. We
-     * emit it as an N_ABS external so dyld picks it up. */
-    {
-        uint32_t mh_strx = (uint32_t)strtab.len;
-        obuf_put(&strtab, "__mh_execute_header", 20);
-        put_nlist(&nlist, mh_strx, N_EXT | N_ABS, NO_SECT, 0,
-                  text_seg_vmaddr);
-        n_extdefsym++;
+        tcc_free(edn); tcc_free(edt); tcc_free(eds);
+        tcc_free(edd); tcc_free(edv);
     }
 
     /* Undef externals: one per stub, then one per data nlptr. n_desc
@@ -2295,7 +2417,24 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         if (sect_idx_dyld >= 0) {
             while (out.len < sects[sect_idx_dyld].file_off)
                 put8(&out, 0);
-            obuf_zero(&out, sects[sect_idx_dyld].size);
+            /* __DATA,__dyld must contain the 8 bytes that crt1.o would
+             * have contributed: pointers to dyld's exported helpers
+             * `__dyld_func_lookup` and `dyld_stub_binding_helper`. On
+             * Tiger PPC dyld is always mapped at 0x8fe00000 (no ASLR);
+             * these two helpers are at fixed offsets. crt1.o's _start
+             * reads these via HA16/LO16 relocs and uses them to resolve
+             * `_dyld_make_delayed_module_initializer_calls`, which runs
+             * libSystem's mod_init_func — without that, malloc never
+             * gets initialized and any allocation faults in
+             * _malloc_initialize. Without these eight bytes the binary
+             * works only when DYLD_PRINT_INITIALIZERS is set (because
+             * dyld then runs initializers eagerly itself).
+             *
+             * We hardcode the two addresses; if Tiger's dyld layout ever
+             * changes we'll have to read them out of crt1.o's own
+             * __DATA,__dyld bytes (they're literally embedded there). */
+            put32be(&out, 0x8fe01000u);  /* __dyld_func_lookup */
+            put32be(&out, 0x8fe01008u);  /* dyld_stub_binding_helper */
         }
     }
 

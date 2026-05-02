@@ -29,11 +29,8 @@ rm -f "$WORK"/tcc.o "$OUT"
 echo "  CC tcc.c (ONE_SOURCE; via $TCC)"
 "$TCC" -c "$SRC" -o "$WORK/tcc.o" -B./tcc -I./tcc
 
-echo "  LINK $OUT"
-LIBGCC=$(ls /Developer/SDKs/MacOSX10.4u.sdk/usr/lib/gcc/powerpc-apple-darwin8/4.0.1/libgcc.a 2>/dev/null || \
-         ls /usr/lib/gcc/powerpc-apple-darwin8/4.0.1/libgcc.a)
-gcc-4.0 -arch ppc "$WORK/tcc.o" "$LIBTCC1" -o "$OUT" \
-    -lm -ldl -lpthread -flat_namespace "$LIBGCC"
+echo "  LINK $OUT (via $TCC, no gcc-4.0)"
+"$TCC" -B./tcc -I./tcc -o "$OUT" "$WORK/tcc.o" "$LIBTCC1"
 
 ls -la "$OUT"
 echo "  done"

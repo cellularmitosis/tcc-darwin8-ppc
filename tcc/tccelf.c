@@ -3192,6 +3192,64 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
             if (tcc_compile_string(s, start_src) != 0)
                 return -1;
         }
+
+        /* Stub `__keymgr_dwarf2_register_sections` — the Tiger
+         * init-order fix.
+         *
+         * crt1.o's `_start` calls __keymgr_dwarf2_register_sections
+         * once during startup (it's a libSystem function intended to
+         * register C++ exception-handler tables / DWARF .eh_frame
+         * ranges). The real implementation does two things:
+         *   1. Calls _dyld_register_func_for_add_image(...) with a
+         *      DWARF-unwind hook callback.
+         *   2. Calls _dyld_register_func_for_remove_image(...) ditto.
+         *
+         * Step 1 is a *load-bearing* side effect: registering an
+         * add-image callback causes dyld to synchronously run the
+         * callback for every already-loaded image, AND triggers dyld's
+         * "ok, init time" pathway that dispatches each loaded image's
+         * mod_init_func. Specifically, libSystem's mod_init_func is
+         * what initialises the malloc subsystem. Without that path
+         * firing, the very first malloc/realloc anywhere in the
+         * program faults inside _malloc_initialize because libSystem's
+         * internal globals are still NULL.
+         *
+         * tcc itself never emits DWARF .eh_frame data, but we still
+         * need the side effect. So our stub registers a do-nothing
+         * callback — that's the minimum to trigger dyld's init dance.
+         *
+         * The `_dyld_register_func_for_add_image` symbol is exported
+         * by libSystem and resolved through our normal stub mechanism.
+         * (Without crt1.o populating __DATA,__dyld, this stub would
+         * itself fail; that's handled in ppc-macho.c.) */
+        if (!find_elf_sym(s->symtab, "__keymgr_dwarf2_register_sections")) {
+            static const char keymgr_stub[] =
+                "extern int _dyld_register_func_for_add_image(\n"
+                "    void (*func)(const void *mh, long vmaddr_slide));\n"
+                "extern int _dyld_register_func_for_remove_image(\n"
+                "    void (*func)(const void *mh, long vmaddr_slide));\n"
+                "extern void _dyld_lookup_and_bind(\n"
+                "    const char *symbol_name, void *address, void *module);\n"
+                "static void __tcc_keymgr_noop(const void *mh, long s){\n"
+                "    (void)mh; (void)s;\n"
+                "}\n"
+                "void __keymgr_dwarf2_register_sections("
+                "void *begin, void *end) {\n"
+                "    void *envp = 0;\n"
+                "    (void)begin; (void)end;\n"
+                "    _dyld_register_func_for_add_image(__tcc_keymgr_noop);\n"
+                "    _dyld_register_func_for_remove_image(__tcc_keymgr_noop);\n"
+                "    /* Force-populate libSystem's internal cache of\n"
+                "     * _environ. Without this, when libc_initializer\n"
+                "     * calls __NSGetEnviron, dyld can't find _environ\n"
+                "     * (some unknown lookup-state issue), returns NULL,\n"
+                "     * and libc_initializer faults dereferencing NULL\n"
+                "     * before main runs. */\n"
+                "    _dyld_lookup_and_bind(\"_environ\", &envp, 0);\n"
+                "}\n";
+            if (tcc_compile_string(s, keymgr_stub) != 0)
+                return -1;
+        }
     }
 #endif
 
