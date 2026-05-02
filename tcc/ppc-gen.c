@@ -921,6 +921,23 @@ ST_FUNC void load(int r, SValue *sv)
             o(0x80000000 | (gpr << 21) | (PPC_FP_REG << 16) | (offset & 0xffff));
             return;
         }
+        case VT_STRUCT:
+            /* "Loading" a struct lvalue means producing its address.
+             * Struct values flow through tcc as pointers — gfunc_call
+             * etc. read the bytes from that address. addi r, r31, off. */
+            if ((int16_t)offset == offset) {
+                o(0x38000000 | (gpr << 21) | (PPC_FP_REG << 16)
+                             | (offset & 0xffff));
+            } else {
+                /* Out-of-range immediate: lis tmp,ha; addi tmp,tmp,lo;
+                 * add r, r31, tmp. r0 is scratch. */
+                int hi = ((offset + 0x8000) >> 16) & 0xffff;
+                int lo = offset & 0xffff;
+                o(0x3c000000 | (0 << 21) | (hi & 0xffff));        /* lis r0, hi */
+                o(0x60000000 | (0 << 21) | (0 << 16) | (lo & 0xffff)); /* ori r0,r0,lo */
+                o(0x7c000214 | (gpr << 21) | (PPC_FP_REG << 16) | (0 << 11)); /* add r, r31, r0 */
+            }
+            return;
         default:
             tcc_error("ppc-gen: load VT_LOCAL of basic type 0x%x not yet supported", bt);
         }
@@ -1240,8 +1257,16 @@ ST_FUNC void gfunc_call(int nb_args)
         gpr_alloc[i] = -1;
         fpr_alloc[i] = -1;
         if (bt == VT_STRUCT) {
-            tcc_free(gpr_alloc); tcc_free(fpr_alloc);
-            tcc_error("ppc-gen: struct arguments not yet supported");
+            /* Apple PPC ABI: struct passed by value occupies as many
+             * 4-byte GPR slots as ceil(size/4). Bytes 0..3 → r3+gslot,
+             * bytes 4..7 → r3+gslot+1, etc. Slots past index 7 spill
+             * to the outgoing parameter area at r1+24+slot*4. */
+            int salign;
+            int ssize = type_size(&arg->type, &salign);
+            int swords = (ssize + 3) / 4;
+            gpr_alloc[i] = gpr_used;
+            gpr_used += swords;
+            continue;
         }
         if (bt == VT_FLOAT) {
             fpr_alloc[i] = fpr_used++;
@@ -1280,7 +1305,53 @@ ST_FUNC void gfunc_call(int nb_args)
     for (i = 0; i < nb_args; i++) {
         int src_index = nb_args - 1 - i;
         int bt = vtop->type.t & VT_BTYPE;
-        if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+        if (bt == VT_STRUCT) {
+            /* Apple PPC ABI struct-by-value (caller side):
+             * - vtop holds the struct's address (an lvalue). gv(RC_INT)
+             *   materializes that address into a GPR.
+             * - For each 4-byte word in the struct:
+             *     slot = gpr_alloc[src_index] + word_idx
+             *     if slot < 8:  load word into r3+slot
+             *     else:         load word into r12 then store to
+             *                   24+slot*4(r1) in our outgoing param area.
+             * - The destination GPRs r3..r10 will be spilled to
+             *   r1+24+slot*4 by the callee's prolog, where the body
+             *   will read each field at its computed offset.
+             *
+             * Because the struct's address itself sits in some GPR that
+             * the allocator chose (likely r3 or another arg slot), we
+             * `mr r12, addr` first so the address is preserved in a
+             * scratch register while we overwrite r3..r10. */
+            int salign;
+            int ssize = type_size(&vtop->type, &salign);
+            int swords = (ssize + 3) / 4;
+            int gslot = gpr_alloc[src_index];
+            int addr_gpr;
+            int w;
+            gv(RC_INT);
+            addr_gpr = TREG_TO_GPR(vtop->r & VT_VALMASK);
+            /* mr r12, addr_gpr  (or rA, rS, rA == ori-form: or rA,rS,rS) */
+            if (addr_gpr != 12) {
+                o(0x7c000378 | (addr_gpr << 21) | (12 << 16) | (addr_gpr << 11));
+            }
+            for (w = 0; w < swords; w++) {
+                int slot = gslot + w;
+                int word_off = w * 4;
+                if (slot < 8) {
+                    int target = slot + 3;     /* r3..r10 */
+                    /* lwz target, word_off(r12) */
+                    o(0x80000000 | (target << 21) | (12 << 16)
+                                 | (word_off & 0xffff));
+                } else {
+                    int stack_off = 24 + slot * 4;
+                    /* lwz r0, word_off(r12) ; stw r0, stack_off(r1) */
+                    o(0x80000000 | (0 << 21) | (12 << 16)
+                                 | (word_off & 0xffff));
+                    o(0x90000000 | (0 << 21) | (1 << 16)
+                                 | (stack_off & 0xffff));
+                }
+            }
+        } else if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
             int fslot = fpr_alloc[src_index];
             int gslot = gpr_alloc[src_index];  /* shadow slot, set in first pass */
             gv(RC_F(fslot));
@@ -1745,8 +1816,21 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
         size = type_size(type, &align);
         size = (size + 3) & ~3;
 
-        if (bt == VT_STRUCT)
-            tcc_error("ppc-gen: struct parameters not yet supported");
+        if (bt == VT_STRUCT) {
+            /* Apple PPC ABI struct-by-value (callee side):
+             * The caller put each 4-byte word of the struct into
+             * r3..r10 (and stack at r1+24+slot*4 for slots >= 8).
+             * Our prolog unconditionally spills r3..r10 to
+             * r1+24..r1+52, which after stwu becomes r31+24..r31+52.
+             * So the struct lives contiguously at r31+24+slot*4 with
+             * no extra prolog work — same formula as for int params,
+             * just consume `(size+3)/4` slots instead of 1. */
+            int swords = (size + 3) / 4;
+            param_offset = 24 + gpr_index * 4;
+            gfunc_set_param(sym, param_offset, 0);
+            gpr_index += swords;
+            continue;
+        }
 
         /* Per Apple PPC ABI: callee's r31 = caller's SP, so the
          * incoming param save area starts at r31+24. Args 1-8 (GPR
