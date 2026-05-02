@@ -3,15 +3,19 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.0-g3 SHIPPED.** TCC has never had a PowerPC backend
+**Status: v0.2.1-g3 SHIPPED.** TCC has never had a PowerPC backend
 in any release. As of session [027](docs/sessions/027-self-link/README.md),
 the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
 links `tcc-self`, which compiles AND links `tcc-self2`, which
 produces a `.o` byte-identical to what `tcc-self3` produces — the
-canonical self-host fixpoint, on a 22-year-old G3 / G4. A 141 KB
-`/opt`-installable tarball is built end-to-end by
-`scripts/build-release-tarball.sh`
-([028](docs/sessions/028-v0.2.0-g3-release/README.md)).
+canonical self-host fixpoint, on a 22-year-old G3 / G4. The
+[v0.2.1-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.1-g3)
+patch release ([032](docs/sessions/032-v0.2.1-release/README.md))
+adds bug fixes for `>8-arg functions`, FP-shadow for variadic
+calls (`printf("%f", x)` now correct), `-lm` linking, and a partial
+fix to a 64-bit constant-folding regression — bumping
+`tests2` baseline to 75 / 122 (61.5%). A ~141 KB `/opt`-installable
+tarball is built end-to-end by `scripts/build-release-tarball.sh`.
 
 ## Status
 
@@ -47,6 +51,9 @@ canonical self-host fixpoint, on a 22-year-old G3 / G4. A 141 KB
 | ✅ | **🎉 FULL SELF-LINK & SELF-HOST FIXPOINT — `gcc-4.0` no longer needed for the bootstrap chain.** `bootstrap-tcc-self.sh` produces a working `tcc-self` linked entirely by `tcc` itself, then verifies tcc-self2 → tcc-self3 byte-identical fixpoint ([027](docs/sessions/027-self-link/README.md)) |
 | ✅ | **`v0.2.0-g3` release tarball — `/opt`-installable, ~141 KB, fully self-hosted, verified on iBook G4** ([028](docs/sessions/028-v0.2.0-g3-release/README.md)) |
 | ✅ | **TCC `tests2/` baseline — 70 / 122 pass (57%)** ([029](docs/sessions/029-tests2-baseline/README.md)); `scripts/run-tests2.sh` for one-command re-runs |
+| 🟡 | **sqlite3 amalgamation smoke** ([030](docs/sessions/030-sqlite-smoke/README.md)) — compiles 53K lines past initial blockers; remaining blocker is struct-by-value parameters |
+| 🟡 | **Fixpoint regression deep-dive** ([031](docs/sessions/031-fixpoint-investigation/README.md)) — root cause documented (64-bit const-fold sign-ext); partial fix landed in same session |
+| ✅ | **`v0.2.1-g3` patch release** ([032](docs/sessions/032-v0.2.1-release/README.md)) — `>8-arg fns`, `TOK_PDIV`, FP shadow for variadic, dylib loading, header guards. tests2 jumps to 75 / 122 (62%) |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
