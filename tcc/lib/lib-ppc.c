@@ -396,3 +396,90 @@ char *__bound_strcat(char *d, const char *s) { return strcat(d,s); }
 char *__bound_strncat(char *d, const char *s, unsigned long n) { return strncat(d,s,n); }
 char *__bound_strchr(const char *s, int c) { return strchr(s,c); }
 char *__bound_strdup(const char *s) { return strdup(s); }
+
+/* ---------------------------------------------------------------------------
+ * Atomic helper stubs (single-threaded — DO NOT use for real
+ * concurrency).
+ *
+ * tcc's atomic codegen calls __atomic_load_N / __atomic_store_N /
+ * __atomic_compare_exchange_N etc. as ordinary functions when the
+ * backend lacks intrinsic codegen for them. The full atomic.S
+ * helpers (lwarx/stwcx. variants) aren't ported to PPC yet; for
+ * single-threaded test programs that just exercise atomic syntax,
+ * a plain non-atomic implementation is observationally correct.
+ *
+ * Multi-threaded tests (124_atomic_counter) will race; that's
+ * documented as a "needs real PPC atomics" gap.
+ * --------------------------------------------------------------------------*/
+
+unsigned char __atomic_load_1(const unsigned char *p, int o) { (void)o; return *p; }
+unsigned short __atomic_load_2(const unsigned short *p, int o) { (void)o; return *p; }
+unsigned int __atomic_load_4(const unsigned int *p, int o) { (void)o; return *p; }
+unsigned long long __atomic_load_8(const unsigned long long *p, int o) { (void)o; return *p; }
+
+void __atomic_store_1(unsigned char *p, unsigned char v, int o) { (void)o; *p = v; }
+void __atomic_store_2(unsigned short *p, unsigned short v, int o) { (void)o; *p = v; }
+void __atomic_store_4(unsigned int *p, unsigned int v, int o) { (void)o; *p = v; }
+void __atomic_store_8(unsigned long long *p, unsigned long long v, int o) { (void)o; *p = v; }
+
+unsigned char __atomic_exchange_1(unsigned char *p, unsigned char v, int o)
+    { unsigned char r = *p; (void)o; *p = v; return r; }
+unsigned short __atomic_exchange_2(unsigned short *p, unsigned short v, int o)
+    { unsigned short r = *p; (void)o; *p = v; return r; }
+unsigned int __atomic_exchange_4(unsigned int *p, unsigned int v, int o)
+    { unsigned int r = *p; (void)o; *p = v; return r; }
+unsigned long long __atomic_exchange_8(unsigned long long *p,
+                                       unsigned long long v, int o)
+    { unsigned long long r = *p; (void)o; *p = v; return r; }
+
+#define ATOMIC_CAS(BITS, TYPE) \
+int __atomic_compare_exchange_##BITS(TYPE *p, TYPE *exp, TYPE des, \
+                                     int weak, int o1, int o2) { \
+    (void)weak; (void)o1; (void)o2; \
+    if (*p == *exp) { *p = des; return 1; } \
+    *exp = *p; return 0; \
+}
+ATOMIC_CAS(1, unsigned char)
+ATOMIC_CAS(2, unsigned short)
+ATOMIC_CAS(4, unsigned int)
+ATOMIC_CAS(8, unsigned long long)
+#undef ATOMIC_CAS
+
+#define ATOMIC_RMW(NAME, BITS, TYPE, OP) \
+TYPE __atomic_fetch_##NAME##_##BITS(TYPE *p, TYPE v, int o) { \
+    TYPE r = *p; (void)o; *p = OP; return r; \
+}
+ATOMIC_RMW(add, 1, unsigned char,      r + v)
+ATOMIC_RMW(add, 2, unsigned short,     r + v)
+ATOMIC_RMW(add, 4, unsigned int,       r + v)
+ATOMIC_RMW(add, 8, unsigned long long, r + v)
+ATOMIC_RMW(sub, 1, unsigned char,      r - v)
+ATOMIC_RMW(sub, 2, unsigned short,     r - v)
+ATOMIC_RMW(sub, 4, unsigned int,       r - v)
+ATOMIC_RMW(sub, 8, unsigned long long, r - v)
+ATOMIC_RMW(and, 1, unsigned char,      r & v)
+ATOMIC_RMW(and, 2, unsigned short,     r & v)
+ATOMIC_RMW(and, 4, unsigned int,       r & v)
+ATOMIC_RMW(and, 8, unsigned long long, r & v)
+ATOMIC_RMW(or,  1, unsigned char,      r | v)
+ATOMIC_RMW(or,  2, unsigned short,     r | v)
+ATOMIC_RMW(or,  4, unsigned int,       r | v)
+ATOMIC_RMW(or,  8, unsigned long long, r | v)
+ATOMIC_RMW(xor, 1, unsigned char,      r ^ v)
+ATOMIC_RMW(xor, 2, unsigned short,     r ^ v)
+ATOMIC_RMW(xor, 4, unsigned int,       r ^ v)
+ATOMIC_RMW(xor, 8, unsigned long long, r ^ v)
+ATOMIC_RMW(nand, 1, unsigned char,     ~(r & v))
+ATOMIC_RMW(nand, 2, unsigned short,    ~(r & v))
+ATOMIC_RMW(nand, 4, unsigned int,      ~(r & v))
+ATOMIC_RMW(nand, 8, unsigned long long,~(r & v))
+#undef ATOMIC_RMW
+
+/* C11 atomic_flag_* — single-threaded stubs. */
+int atomic_flag_test_and_set(volatile unsigned char *p)
+    { unsigned char r = *p; *p = 1; return r != 0; }
+int atomic_flag_test_and_set_explicit(volatile unsigned char *p, int o)
+    { (void)o; return atomic_flag_test_and_set(p); }
+void atomic_flag_clear(volatile unsigned char *p) { *p = 0; }
+void atomic_flag_clear_explicit(volatile unsigned char *p, int o)
+    { (void)o; *p = 0; }
