@@ -19,7 +19,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-VERSION="${VERSION:-v0.2.4-g3}"
+VERSION="${VERSION:-v0.2.5-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -76,7 +76,10 @@ What's new (cumulative since v0.1.0-g3):
     return-swap; absolute-address load/store; computed goto;
     void* deref; VT_BOOL handling.
   * Tiger realpath workaround in normalized_PATHCMP.
-  * tests2 baseline at this release: 96 / 122 (78.7%).
+  * tests2 baseline at this release: 101 / 122 (82.8%).
+  * Long-frame prolog/epilog (>32KB stack frames work).
+  * Long-offset local load/store/address-of.
+  * VLAs (variable-length arrays) supported via gen_vla_alloc.
 
 Install:
   sudo mkdir -p $PREFIX
