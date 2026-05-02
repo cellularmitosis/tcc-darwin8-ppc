@@ -3,12 +3,15 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.1.0-g3 SHIPPED.** TCC has never had a PowerPC backend
-in any release. As of session [020](docs/sessions/020-self-host/README.md),
-tcc-built-by-tcc compiles `tcc.c` into a `.o` byte-identical to
-its own — the canonical self-host fixpoint, on a 22-year-old G3.
-A `/opt`-installable tarball is built end-to-end by
-`scripts/build-release-tarball.sh` ([022](docs/sessions/022-v0.1.0-g3-release/README.md)).
+**Status: v0.2.0-g3 SHIPPED.** TCC has never had a PowerPC backend
+in any release. As of session [027](docs/sessions/027-self-link/README.md),
+the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
+links `tcc-self`, which compiles AND links `tcc-self2`, which
+produces a `.o` byte-identical to what `tcc-self3` produces — the
+canonical self-host fixpoint, on a 22-year-old G3 / G4. A 141 KB
+`/opt`-installable tarball is built end-to-end by
+`scripts/build-release-tarball.sh`
+([028](docs/sessions/028-v0.2.0-g3-release/README.md)).
 
 ## Status
 
@@ -42,6 +45,7 @@ A `/opt`-installable tarball is built end-to-end by
 | ✅ | **Mach-O `.o` reader → full self-link via tcc** — auto-loads `/usr/lib/crt1.o`, `tcc -o exe` produces working printf/malloc binaries with no gcc involvement ([025](docs/sessions/025-macho-o-reader/README.md)) |
 | 🟡 | **libgcc helpers bundled in `libtcc1.a`** — 10 helpers for long-long arithmetic, IEEE 754 conversions ([026](docs/sessions/026-libgcc-helpers/README.md)); blocked from full self-link by a Tiger keymgr/DWARF init-order bug |
 | ✅ | **🎉 FULL SELF-LINK & SELF-HOST FIXPOINT — `gcc-4.0` no longer needed for the bootstrap chain.** `bootstrap-tcc-self.sh` produces a working `tcc-self` linked entirely by `tcc` itself, then verifies tcc-self2 → tcc-self3 byte-identical fixpoint ([027](docs/sessions/027-self-link/README.md)) |
+| ✅ | **`v0.2.0-g3` release tarball — `/opt`-installable, ~141 KB, fully self-hosted, verified on iBook G4** ([028](docs/sessions/028-v0.2.0-g3-release/README.md)) |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
