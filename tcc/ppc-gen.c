@@ -207,10 +207,19 @@ static unsigned long func_sub_sp_offset;
  * PIC base register) = 14 instructions = 56 bytes. */
 #define PPC_PROLOG_SIZE 56
 #define PPC_LINKAGE_SIZE 24
-#define PPC_PARAM_AREA   96   /* 24 GPR slots * 4 bytes, big enough for
-                                  any stdarg-style call we've seen */
+#define PPC_PARAM_AREA_MIN 96   /* default outgoing param area: 24 GPR
+                                  slots, big enough for variadic
+                                  printf and most plain calls */
 #define PPC_STACK_ALIGN 16
 #define PPC_FP_REG 31
+
+/* Per-function high-water mark for the outgoing parameter area.
+ * Reset to PPC_PARAM_AREA_MIN in gfunc_prolog; bumped by gfunc_call
+ * when an arg list (especially one carrying a large struct value)
+ * needs more bytes; consulted by ppc_frame_size() at gfunc_epilog
+ * time. The struct-by-value support (and >8-arg calls in general)
+ * means 96 bytes isn't always enough. */
+static int ppc_param_area;
 
 static int ppc_frame_size(void)
 {
@@ -231,7 +240,7 @@ static int ppc_frame_size(void)
      * Always reserving the parameter area (even for leaf functions)
      * costs 32 bytes per stack frame and avoids needing flow analysis
      * to detect whether a function makes calls. */
-    int n = PPC_LINKAGE_SIZE + PPC_PARAM_AREA + (-loc);
+    int n = PPC_LINKAGE_SIZE + ppc_param_area + (-loc);
     n = (n + PPC_STACK_ALIGN - 1) & -PPC_STACK_ALIGN;
     if (n < 64) n = 64;
     return n;
@@ -859,6 +868,14 @@ ST_FUNC void load(int r, SValue *sv)
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
             o(0x80000000 | (gpr << 21) | (addr_gpr << 16));
             return;
+        case VT_STRUCT:
+            /* "Loading" a struct value via a symbol means computing
+             * its address. addr_gpr already holds the symbol's HA-side
+             * address; just turn `lwz r, lo(sym)(addr_gpr)` into
+             * `addi r, addr_gpr, lo(sym)`. */
+            greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
+            o(0x38000000 | (gpr << 21) | (addr_gpr << 16));
+            return;
         default:
             tcc_error("ppc-gen: load via sym of bt 0x%x not yet supported", bt);
         }
@@ -1286,19 +1303,19 @@ ST_FUNC void gfunc_call(int nb_args)
     }
     /* Args using GPR slots 0..7 go in r3..r10. Args at slot >= 8
      * spill to our outgoing parameter area at r1+24+slot*4. The
-     * outgoing area is sized PPC_PARAM_AREA bytes by gfunc_prolog.
-     * FP args still go in f1..f8 in their FPR slot regardless of
-     * GPR shadow position. */
+     * outgoing area is sized to ppc_param_area bytes (per-function
+     * high-water mark, set in gfunc_prolog). FP args still go in
+     * f1..f8 in their FPR slot regardless of GPR shadow position. */
     if (fpr_used > 8) {
         tcc_free(gpr_alloc); tcc_free(fpr_alloc);
         tcc_error("ppc-gen: argument list exceeds 8 FPR slots (got %d)",
                   fpr_used);
     }
-    if (gpr_used * 4 > PPC_PARAM_AREA) {
-        tcc_free(gpr_alloc); tcc_free(fpr_alloc);
-        tcc_error("ppc-gen: argument list too large (gpr_used=%d, "
-                  "outgoing area=%d bytes)", gpr_used, PPC_PARAM_AREA);
-    }
+    /* Bump the per-function param-area high-water mark. The frame
+     * gets sized at gfunc_epilog time; we just record the largest
+     * outgoing area we've seen during the function body. */
+    if (gpr_used * 4 > ppc_param_area)
+        ppc_param_area = gpr_used * 4;
 
     /* Second pass: process args from vtop downward, materializing
      * each into the assigned register slot or spilling to stack. */
@@ -1772,6 +1789,19 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     loc = -8;
     func_vc = 0;
     ppc_fp_param_count = 0;
+    ppc_param_area = PPC_PARAM_AREA_MIN;
+
+    /* Apple PPC ABI: structs are returned via a hidden first pointer
+     * arg in r3. Reserve r3 for that pointer and tell tccgen.c via
+     * func_vc where to find it: the prolog spills r3..r10 to
+     * r31+24..r31+52, so the hidden ptr lives at r31+24.
+     * gfunc_return uses func_vc to copy the struct value through the
+     * pointer; gfunc_epilog reloads r3 from func_vc before blr so
+     * the caller gets the original pointer back per ABI. */
+    if ((func_type->ref->type.t & VT_BTYPE) == VT_STRUCT) {
+        func_vc = 24;
+        gpr_index = 1;   /* r3 consumed by hidden pointer */
+    }
 
     /* PIC base setup. Reset per-function state, then emit the
      * mflr/bcl/mflr/mtlr sequence UNCONDITIONALLY at the start of
@@ -1890,6 +1920,17 @@ ST_FUNC void gfunc_epilog(void)
         o(0x7c601b78);  /* mr r0, r3 */
         o(0x7c832378);  /* mr r3, r4 */
         o(0x7c040378);  /* mr r4, r0 */
+    }
+
+    /* Apple PPC ABI: structures are returned via a hidden first
+     * pointer argument. The caller allocates space and passes its
+     * address in r3 (which the prolog spills to r31+24 = func_vc).
+     * The callee must return that pointer in r3 too. tccgen.c's
+     * gfunc_return already copies the struct value to *func_vc; we
+     * just have to reload r3 from the saved slot before blr. */
+    if ((func_vt.t & VT_BTYPE) == VT_STRUCT && func_vc) {
+        /* lwz r3, func_vc(r31) */
+        o(0x80000000 | (3 << 21) | (PPC_FP_REG << 16) | (func_vc & 0xffff));
     }
 
     /* Epilogue:
@@ -2424,7 +2465,9 @@ ST_FUNC void gen_cvt_ftoi(int t)
     if (dst_bt == VT_LLONG) {
         /* PPC32 has no hardware FP -> 64-bit-int instruction; use a
          * libgcc helper. The signed-LL case lands here; the unsigned
-         * case is dispatched in tccgen.c gen_cvt_ftoi1. */
+         * case is dispatched in tccgen.c gen_cvt_ftoi1. gfunc_call
+         * recognizes the libgcc helper by token and does the
+         * Apple-ABI r3<->r4 swap on its way out. */
         int src_bt = vtop->type.t & VT_BTYPE;
         int func;
         if (src_bt == VT_FLOAT)
