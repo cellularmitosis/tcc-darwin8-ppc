@@ -1965,7 +1965,17 @@ ST_FUNC int gv(int rc)
                     vtop->c.i = ll; /* first word */
                     load(r, vtop);
                     vtop->r = r; /* save register value */
-                    vpushi(ll >> 32); /* second word */
+                    /* Push the high 32 bits as VT_INT|VT_UNSIGNED so
+                     * downstream paths (load, store, value64) treat
+                     * it as zero-extended, not sign-extended. The
+                     * old `vpushi(ll >> 32)` cast through `int`,
+                     * which on a tcc-self-built tcc turned high
+                     * halves with bit 31 set into 0xFFFFFFFF (the
+                     * sign-extension of -1) — surfacing as wrong
+                     * .data bytes for any 64-bit constant whose
+                     * low half had bit 31 set. See
+                     * docs/sessions/031-fixpoint-investigation/README.md */
+                    vpush64(VT_INT | VT_UNSIGNED, (ll >> 32) & 0xFFFFFFFFu);
                 } else if (vtop->r & VT_LVAL) {
                     /* We do not want to modifier the long long pointer here.
                        So we save any other instances down the stack */
