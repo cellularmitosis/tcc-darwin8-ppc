@@ -21,5 +21,8 @@ tcc/lib/**/*.o
 # session-local scratch
 docs/sessions/**/scratch/
 
+# release tarballs (published as GitHub release assets, not in git)
+tcc-darwin8-ppc-*.tar.gz
+
 # OS noise
 .DS_Store
