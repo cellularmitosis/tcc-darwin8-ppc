@@ -19,7 +19,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-VERSION="${VERSION:-v0.2.3-g3}"
+VERSION="${VERSION:-v0.2.4-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -64,16 +64,19 @@ What's new (cumulative since v0.1.0-g3):
   * Self-link: bootstrap-tcc-self.sh no longer needs gcc-4.0; tcc
     links its own tcc-self via auto-loaded /usr/lib/crt1.o.
   * Bundled libgcc helpers in libtcc1.a (long-long arithmetic,
-    IEEE 754 conversions, __eprintf for assert).
+    IEEE 754 conversions, __eprintf for assert, no-op bound-check
+    stubs, single-threaded atomic stubs).
   * Self-host fixpoint: tcc -> tcc-self -> tcc-self2 -> tcc-self3,
     with tcc-self2.o == tcc-self3.o byte-identical.
-  * Struct-by-value parameters (≤ 32 bytes): the highest-impact
-    remaining ABI gap is closed. Function args of struct type now
-    pass via r3..r10 per the Apple PPC ABI.
+  * Struct-by-value parameters (≤ 32 bytes) AND struct returns via
+    hidden pointer per the Apple PPC ABI.
   * EXE PIC reloc fallback handles forward-defined and aliased
     symbols (a regression's break-out-of-loop bug is also fixed).
-  * VT_BOOL load/store, computed goto (\`goto *p\`), void* deref.
-  * tests2 baseline at this release: 87 / 122 (71%).
+  * Big-endian sub-word param offset; FP-to-LL libgcc helper
+    return-swap; absolute-address load/store; computed goto;
+    void* deref; VT_BOOL handling.
+  * Tiger realpath workaround in normalized_PATHCMP.
+  * tests2 baseline at this release: 96 / 122 (78.7%).
 
 Install:
   sudo mkdir -p $PREFIX

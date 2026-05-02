@@ -3,19 +3,21 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.3-g3 SHIPPED.** TCC has never had a PowerPC backend
+**Status: v0.2.4-g3 SHIPPED.** TCC has never had a PowerPC backend
 in any release. As of session [027](docs/sessions/027-self-link/README.md),
 the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
 links `tcc-self`, which compiles AND links `tcc-self2`, which
 produces a `.o` byte-identical to what `tcc-self3` produces — the
 canonical self-host fixpoint, on a 22-year-old G3 / G4. The
-[v0.2.3-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.3-g3)
+[v0.2.4-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.4-g3)
 patch release ([035](docs/sessions/035-unsupervised-2026-05-02/README.md))
-adds **struct-by-value parameters** (the largest remaining ABI gap),
-fixes a broken-loop regression in EXE PIC relocs from v0.2.2, adds
-`VT_BOOL` load/store, computed-goto (`goto *p`), and bundles
-`__eprintf` so `assert()` programs run — bumping `tests2` baseline
-to **87 / 122 (71.3%)**. A ~143 KB `/opt`-installable tarball is
+adds **struct-by-value parameters AND struct returns** (the
+largest remaining ABI gap), big-endian sub-word param offset,
+absolute-address load/store, FP-to-LL libgcc helper return swap,
+no-op bound-check stubs, single-threaded atomic stubs, plus
+fixes for a broken-loop regression in EXE PIC relocs and a
+Tiger `realpath()` crash — bumping `tests2` baseline to
+**96 / 122 (78.7%)**. A ~147 KB `/opt`-installable tarball is
 built end-to-end by `scripts/build-release-tarball.sh`.
 
 ## Status
@@ -57,6 +59,7 @@ built end-to-end by `scripts/build-release-tarball.sh`.
 | ✅ | **`v0.2.1-g3` patch release** ([032](docs/sessions/032-v0.2.1-release/README.md)) — `>8-arg fns`, `TOK_PDIV`, FP shadow for variadic, dylib loading, header guards. tests2 jumps to 75 / 122 (62%) |
 | ✅ | **`v0.2.2-g3` patch release** ([033](docs/sessions/033-v0.2.2-release/README.md)) — 3 more libgcc helpers (`__floatdidf`, `__fixdfdi`, `__ashldi3`), auto-link libtcc1.a for PPC EXE. tests2: 77 / 122 (63%) |
 | ✅ | **`v0.2.3-g3` patch release** ([035](docs/sessions/035-unsupervised-2026-05-02/README.md)) — **struct-by-value parameters** (Apple PPC ABI), EXE PIC reloc loop fix, VT_BOOL/ggoto/void-deref, `__eprintf`, tests2 capture-fix. tests2 jumps to 87 / 122 (71%) |
+| ✅ | **`v0.2.4-g3` patch release** ([035](docs/sessions/035-unsupervised-2026-05-02/README.md)) — **struct returns** (hidden pointer), dynamic param-area sizing, big-endian sub-word param offset, FP-to-LL helper return swap, absolute-address load/store, no-op bound-check + atomic stubs, Tiger realpath workaround. tests2 jumps to **96 / 122 (79%)** |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
