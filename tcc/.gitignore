@@ -26,6 +26,9 @@ config*.h
 config*.mak
 config.texi
 conftest*
+# But conftest.c IS source — it's the c2str helper that turns
+# tccdefs.h into a C string at build time. Override the wildcard.
+!conftest.c
 c2str
 tags
 TAGS
