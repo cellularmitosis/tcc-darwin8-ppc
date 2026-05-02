@@ -2,15 +2,24 @@
  *  TCC runtime library for 32-bit PowerPC (Apple Mach-O).
  *
  *  Provides the libgcc helpers that the PPC backend emits calls to
- *  but that aren't supplied by the system. Currently just one:
- *  __floatundidf (unsigned long long -> double) which gen_cvt_itof1
- *  in tccgen.c reaches for, but Apple's libSystem doesn't export.
+ *  but that aren't supplied by the system.
+ *
+ *  All helpers use explicit 32-bit arithmetic rather than the DWunion
+ *  struct trick from libtcc1.c, because PPC is big-endian: a
+ *  "struct { int low, high; }" has `low` at the lower address, which
+ *  is the HIGH word of a big-endian long long — the naming in libtcc1.c
+ *  is backwards for PPC. Simpler to just use (x >> 32) / (unsigned int)x
+ *  throughout.
  *
  *  Copying and distribution of this file, with or without modification,
  *  are permitted in any medium without royalty provided the copyright
  *  notice and this notice are preserved. This file is offered as-is,
  *  without any warranty.
  */
+
+/* ---------------------------------------------------------------------------
+ * float helpers
+ * ---------------------------------------------------------------------------*/
 
 /* Convert by splitting into two 32-bit unsigned halves so we don't
  * recursively reach for __floatundidf. (uint32 -> double goes through
@@ -20,6 +29,246 @@ double __floatundidf(unsigned long long x)
     double hi = (double)(unsigned int)(x >> 32);
     double lo = (double)(unsigned int)x;
     return hi * 4294967296.0 + lo;
+}
+
+/* double -> unsigned long long.
+ *
+ * IEEE 754 double layout (big-endian PPC, 8 bytes):
+ *   bit 63      : sign
+ *   bits 62-52  : biased exponent (bias = 1023)
+ *   bits 51-0   : fraction (implicit leading 1)
+ *
+ * We access the bits via a union of two unsigned ints. PPC is big-endian,
+ * so w[0] holds the high 32 bits (sign + exponent + top 20 fraction bits)
+ * and w[1] holds the low 32 bits (bottom 32 fraction bits).
+ *
+ * All bit-assembly is done with 32-bit values to avoid calling __ashldi3 /
+ * __lshrdi3 recursively. */
+unsigned long long __fixunsdfdi(double a)
+{
+    union { double d; unsigned int w[2]; } u;
+    unsigned int hi, lo, sig_hi, sig_lo;
+    unsigned int res_hi, res_lo;
+    int exp, sh;
+
+    u.d = a;
+    /* PPC big-endian: w[0] = high 32 bits, w[1] = low 32 bits */
+    hi = u.w[0];
+    lo = u.w[1];
+
+    if (hi & 0x80000000u)   /* negative -> 0 */
+        return 0;
+
+    exp = (int)((hi >> 20) & 0x7FF) - 1023;
+    if (exp < 0)
+        return 0;
+    if (exp >= 64)          /* overflow: saturate to ULLONG_MAX */
+        return ~(unsigned long long)0;
+
+    /* The 53-bit significand Q = (1 << 52) | fraction.
+     * Represent it as two halves:
+     *   sig_hi = bits [52..32] = 21 bits (bit 20 is the implicit 1)
+     *   sig_lo = bits [31..0]  = 32 bits
+     * so Q = (sig_hi << 32) | sig_lo (conceptually a 64-bit value). */
+    sig_hi = (hi & 0x000FFFFFu) | 0x00100000u;
+    sig_lo = lo;
+
+    /* result = Q * 2^(exp - 52)
+     * = Q >> (52 - exp)  if exp <= 52
+     * = Q << (exp - 52)  if exp >  52 */
+
+    if (exp <= 52) {
+        sh = 52 - exp;
+        /* right-shift Q (53-bit) by sh in [0..52] */
+        if (sh == 0) {
+            /* Q fits exactly: sig_hi is 21 bits (bits 52..32), sig_lo is 31..0 */
+            res_hi = sig_hi;
+            res_lo = sig_lo;
+        } else if (sh >= 32) {
+            /* sh in [32..52]: sig_lo is completely shifted out */
+            res_hi = 0;
+            res_lo = sig_hi >> (sh - 32);
+        } else {
+            /* sh in [1..31] */
+            res_hi = sig_hi >> sh;
+            res_lo = (sig_lo >> sh) | (sig_hi << (32 - sh));
+        }
+    } else {
+        sh = exp - 52;
+        /* left-shift Q (53-bit) by sh in [1..11] (exp <= 63, so sh <= 11) */
+        /* sh < 32 always holds here */
+        res_hi = (sig_hi << sh) | (sig_lo >> (32 - sh));
+        res_lo = sig_lo << sh;
+    }
+    return ((unsigned long long)res_hi << 32) | (unsigned long long)res_lo;
+}
+
+/* double -> signed long long.
+ *
+ * We deliberately avoid unary negation of the double argument because
+ * tcc-on-PPC has a codegen bug where `fneg` on a parameter double can
+ * corrupt the low bits (the sign bit is not always correctly flipped).
+ * Instead, we flip the sign bit manually in the raw bit representation. */
+long long __fixdfdi(double a)
+{
+    union { double d; unsigned int w[2]; } u;
+    unsigned int hi;
+    int negative;
+
+    u.d = a;
+    hi = u.w[0];                        /* PPC big-endian: w[0] = high 32 bits */
+    negative = (hi & 0x80000000u) != 0;
+
+    if (negative) {
+        /* Clear sign bit to get |a|, then convert unsigned, then negate. */
+        u.w[0] = hi & ~0x80000000u;
+        return -(long long)__fixunsdfdi(u.d);
+    }
+    return (long long)__fixunsdfdi(a);
+}
+
+/* ---------------------------------------------------------------------------
+ * 64-bit shift helpers
+ *
+ * All use explicit high/low splitting to avoid the DWunion endianness trap.
+ * "high" means the most-significant 32 bits (bits 63-32).
+ * "low"  means the least-significant 32 bits (bits 31-0).
+ * ---------------------------------------------------------------------------*/
+
+long long __ashldi3(long long a, int b)
+{
+    unsigned int hi = (unsigned int)((unsigned long long)a >> 32);
+    unsigned int lo = (unsigned int)a;
+    unsigned int rhi, rlo;
+
+    if (b == 0) {
+        rhi = hi; rlo = lo;
+    } else if (b < 32) {
+        rhi = (hi << b) | (lo >> (32 - b));
+        rlo = lo << b;
+    } else {
+        rhi = lo << (b - 32);
+        rlo = 0;
+    }
+    return ((unsigned long long)rhi << 32) | (unsigned long long)rlo;
+}
+
+unsigned long long __lshrdi3(unsigned long long a, int b)
+{
+    unsigned int hi = (unsigned int)(a >> 32);
+    unsigned int lo = (unsigned int)a;
+    unsigned int rhi, rlo;
+
+    if (b == 0) {
+        rhi = hi; rlo = lo;
+    } else if (b < 32) {
+        rlo = (lo >> b) | (hi << (32 - b));
+        rhi = hi >> b;
+    } else {
+        rlo = hi >> (b - 32);
+        rhi = 0;
+    }
+    return ((unsigned long long)rhi << 32) | (unsigned long long)rlo;
+}
+
+/* ---------------------------------------------------------------------------
+ * 64-bit unsigned divide/modulo
+ *
+ * Simple 64-step shift-and-subtract long division.  Not fast, but
+ * correct and dependency-free (no 64-bit multiply needed).
+ * ---------------------------------------------------------------------------*/
+
+static unsigned long long __udivmoddi4_ppc(unsigned long long n,
+                                            unsigned long long d,
+                                            unsigned long long *rem)
+{
+    unsigned long long q = 0;
+    unsigned long long r = 0;
+    int i;
+
+    if (d == 0) {
+        /* Division by zero: match libgcc behaviour (return 0 / set rem=n). */
+        if (rem) *rem = n;
+        return 0;
+    }
+
+    for (i = 63; i >= 0; i--) {
+        r = (r << 1) | ((n >> i) & 1);
+        if (r >= d) {
+            r -= d;
+            q |= (unsigned long long)1 << i;
+        }
+    }
+    if (rem) *rem = r;
+    return q;
+}
+
+unsigned long long __udivdi3(unsigned long long u, unsigned long long v)
+{
+    return __udivmoddi4_ppc(u, v, (unsigned long long *)0);
+}
+
+unsigned long long __umoddi3(unsigned long long u, unsigned long long v)
+{
+    unsigned long long r;
+    __udivmoddi4_ppc(u, v, &r);
+    return r;
+}
+
+/* ---------------------------------------------------------------------------
+ * 64-bit signed divide/modulo
+ *
+ * Reduce to the unsigned helpers by splitting off the sign. The C99 rule
+ * for signed integer division is "truncation toward zero", which means:
+ *   sign(quot) = sign(num) ^ sign(den)
+ *   sign(rem)  = sign(num)
+ * (i.e., the remainder takes the sign of the dividend).
+ * ---------------------------------------------------------------------------*/
+
+long long __divdi3(long long u, long long v)
+{
+    int neg = 0;
+    unsigned long long uu, vv, q;
+    if (u < 0) { uu = (unsigned long long)-u; neg ^= 1; } else { uu = (unsigned long long)u; }
+    if (v < 0) { vv = (unsigned long long)-v; neg ^= 1; } else { vv = (unsigned long long)v; }
+    q = __udivmoddi4_ppc(uu, vv, (unsigned long long *)0);
+    return neg ? -(long long)q : (long long)q;
+}
+
+long long __moddi3(long long u, long long v)
+{
+    int neg = 0;
+    unsigned long long uu, vv, r;
+    if (u < 0) { uu = (unsigned long long)-u; neg = 1; } else { uu = (unsigned long long)u; }
+    if (v < 0) { vv = (unsigned long long)-v; }            else { vv = (unsigned long long)v; }
+    __udivmoddi4_ppc(uu, vv, &r);
+    return neg ? -(long long)r : (long long)r;
+}
+
+/* ---------------------------------------------------------------------------
+ * 64-bit arithmetic right shift
+ *
+ * tcc's PPC backend can emit __ashrdi3 calls for `(signed long long) >> n`.
+ * Sign-extend through the high word.
+ * ---------------------------------------------------------------------------*/
+
+long long __ashrdi3(long long a, int b)
+{
+    int hi = (int)((unsigned long long)a >> 32);    /* signed high word */
+    unsigned int lo = (unsigned int)a;
+    int rhi;
+    unsigned int rlo;
+
+    if (b == 0) {
+        rhi = hi; rlo = lo;
+    } else if (b < 32) {
+        rlo = (lo >> b) | ((unsigned int)hi << (32 - b));
+        rhi = hi >> b;          /* arithmetic shift on signed int */
+    } else {
+        rlo = (unsigned int)(hi >> (b - 32));
+        rhi = hi >> 31;         /* sign-extend */
+    }
+    return ((unsigned long long)(unsigned int)rhi << 32) | (unsigned long long)rlo;
 }
 
 /* (Earlier sessions defined a __tcc_start_main shim here. It's now
