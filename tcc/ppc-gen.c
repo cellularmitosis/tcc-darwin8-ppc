@@ -1366,11 +1366,11 @@ ST_FUNC void gfunc_call(int nb_args)
      * outgoing area is sized to ppc_param_area bytes (per-function
      * high-water mark, set in gfunc_prolog). FP args still go in
      * f1..f8 in their FPR slot regardless of GPR shadow position. */
-    if (fpr_used > 8) {
-        tcc_free(gpr_alloc); tcc_free(fpr_alloc);
-        tcc_error("ppc-gen: argument list exceeds 8 FPR slots (got %d)",
-                  fpr_used);
-    }
+    /* Apple PPC ABI: FP args beyond f8 are passed only via the GPR
+     * shadow slot (i.e. the stack at r1+24+gslot*4). The pass-2 code
+     * checks `fslot < 8` before emitting the FP register move, so
+     * args with fslot >= 8 fall through to the stack-spill path. No
+     * hard cap needed — just don't bail. */
     /* Bump the per-function param-area high-water mark. The frame
      * gets sized at gfunc_epilog time; we just record the largest
      * outgoing area we've seen during the function body. */
@@ -1431,6 +1431,21 @@ ST_FUNC void gfunc_call(int nb_args)
         } else if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
             int fslot = fpr_alloc[src_index];
             int gslot = gpr_alloc[src_index];  /* shadow slot, set in first pass */
+            if (fslot >= 8) {
+                /* Out of FPRs: pass via the GPR shadow slot only,
+                 * which lives on our outgoing parameter area. Force
+                 * the value into ANY FPR (gv(RC_FLOAT)), then store
+                 * it into 24+gslot*4(r1). */
+                int fpr;
+                gv(RC_FLOAT);
+                fpr = TREG_TO_FPR(vtop->r) + 1;   /* PPC f1..f13 */
+                if (bt == VT_FLOAT)
+                    o(0xd0010000 | (fpr << 21) | ((24 + gslot * 4) & 0xffff));
+                else
+                    o(0xd8010000 | (fpr << 21) | ((24 + gslot * 4) & 0xffff));
+                vtop--;
+                continue;
+            }
             gv(RC_F(fslot));
             /* Apple PPC ABI: for variadic callees, FP args must ALSO
              * live in the GPR shadow slots. We don't know if the
