@@ -19,7 +19,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-VERSION="${VERSION:-v0.2.1-g3}"
+VERSION="${VERSION:-v0.2.2-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
