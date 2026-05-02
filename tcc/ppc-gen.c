@@ -1694,9 +1694,16 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
         if (bt == VT_STRUCT)
             tcc_error("ppc-gen: struct parameters not yet supported");
 
+        /* Per Apple PPC ABI: callee's r31 = caller's SP, so the
+         * incoming param save area starts at r31+24. Args 1-8 (GPR
+         * slots 0..7) live where the prolog spilled r3..r10. Args
+         * 9+ live where the caller pushed them — naturally at
+         * r31+56 onwards. The offset formula `24 + gpr_index * 4`
+         * is correct for both ranges; we just have to NOT
+         * artificially cap at 8. */
         if (bt == VT_FLOAT) {
-            if (gpr_index + 1 > 8 || fpr_index >= 8)
-                tcc_error("ppc-gen: parameters exceed reg slots");
+            if (fpr_index >= 8)
+                tcc_error("ppc-gen: parameters exceed 8 FPR slots");
             param_offset = 24 + gpr_index * 4;
             ppc_fp_param_off[ppc_fp_param_count] = param_offset;
             ppc_fp_param_is_double[ppc_fp_param_count] = 0;
@@ -1705,8 +1712,8 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             gpr_index += 1;
             fpr_index += 1;
         } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-            if (gpr_index + 2 > 8 || fpr_index >= 8)
-                tcc_error("ppc-gen: parameters exceed reg slots");
+            if (fpr_index >= 8)
+                tcc_error("ppc-gen: parameters exceed 8 FPR slots");
             param_offset = 24 + gpr_index * 4;
             ppc_fp_param_off[ppc_fp_param_count] = param_offset;
             ppc_fp_param_is_double[ppc_fp_param_count] = 1;
@@ -1716,8 +1723,6 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             fpr_index += 1;
         } else {
             int slots = (bt == VT_LLONG) ? 2 : 1;
-            if (gpr_index + slots > 8)
-                tcc_error("ppc-gen: parameters exceed 8 GPR slots");
             param_offset = 24 + gpr_index * 4;
             gfunc_set_param(sym, param_offset, 0);
             gpr_index += slots;
@@ -2012,6 +2017,12 @@ ST_FUNC void gen_opi(int op)
         o(0x7c000630 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
         break;
     case '/':
+    case TOK_PDIV:
+        /* TOK_PDIV is "fast division with undefined rounding for
+         * pointer arithmetic" — tcc emits it for `(p - q) /
+         * sizeof(*p)` style expressions where the result is
+         * guaranteed to be exact (no remainder). On PPC there's no
+         * separate fast-divide instruction, so just emit divw. */
         /* divw rD, rA, rB (signed) */
         o(0x7c0003d6 | (ra_gpr << 21) | (ra_gpr << 16) | (rb_gpr << 11));
         break;

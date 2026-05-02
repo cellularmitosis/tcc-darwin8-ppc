@@ -3,20 +3,20 @@
 ## Result
 
 🟡 **Sqlite3 amalgamation (3.46.0, 257K lines) does not yet
-compile** with our PPC tcc. Fails on first encounter of a function
-declaring more than 8 register-passed params:
+compile** with our PPC tcc — but two of the blockers got fixed in
+this session before we hit the third (struct-by-value):
 
-```
-$ tcc -B./tcc -I./tcc -I/tmp -DSQLITE_OMIT_LOAD_EXTENSION=1 \
-      -DSQLITE_THREADSAFE=0 -c /tmp/sqlite3.c -o /tmp/sqlite3.o
-/tmp/sqlite3.c:69176: error: ppc-gen: parameters exceed 8 GPR slots
-```
+| Blocker | Status |
+|---|---|
+| Header conflict on `ssize_t`/`intptr_t` in `<stddef.h>` | ✅ fixed (guarded with `#ifndef _SSIZE_T` etc.) |
+| `ppc-gen: parameters exceed 8 GPR slots` (sqlite3WalCheckpoint, 13 args) | ✅ fixed (just remove the artificial cap; offset math already handles it) |
+| `ppc-gen: gen_opi op 0x85 not yet supported` (TOK_PDIV) | ✅ fixed (alias to `divw` instruction) |
+| `ppc-gen: struct parameters not yet supported` (line 122853) | ❌ blocking |
 
-The function is `sqlite3WalCheckpoint(...)` with 13 params. PPC
-ABI passes args 1-8 in r3-r10 and 9+ on the caller's stack frame
-at fixed offsets (24+8*4=56 onwards from caller SP). Our backend
-currently asserts on params past 8 in `gfunc_prolog`
-(`tcc/ppc-gen.c:1720`).
+Exit state: sqlite3.c now reaches line ~122853 (deep in the SQL
+engine) before stopping on the struct-by-value gap. That gap is
+~200-500 lines of work in `ppc-gen.c::gfunc_call` and
+`gfunc_prolog`; deferred to a future session.
 
 ## What was fixed along the way
 
@@ -38,26 +38,28 @@ header-conflict bug:
 This was a small win — should bump a handful of tests2 cases
 into the pass column on the next baseline run.
 
-## What's blocking sqlite
+## What was actually wrong with `gfunc_prolog`
 
-**`gfunc_prolog` doesn't handle parameters that spill to the
-caller's stack frame.** Required ABI-side work:
+Embarrassingly little! Looking at the existing code:
 
-1. For incoming params that don't fit in r3-r10, set their offset
-   to `frame_size + 24 + (param_index * 4)` (relative to the
-   callee's SP after `stwu`). This requires us to know
-   `frame_size` at prolog time, which we currently compute later.
-2. For VT_LLONG params that straddle the r10/stack boundary
-   (param 8 is a long long with low half in r10 and high half on
-   stack), we'd need a small spill/copy sequence in the prolog.
-3. The corresponding **caller side** in `gfunc_call` already
-   handles >8 args (it pushes overflow args onto the new frame
-   before the call) — but worth re-verifying it matches what
-   gfunc_prolog expects.
+```c
+param_offset = 24 + gpr_index * 4;
+gfunc_set_param(sym, param_offset, 0);
+```
 
-Estimated 50-100 lines in `ppc-gen.c`. Not done in 030 because
-v0.2.0 already shipped and this is post-release scope; would land
-in a v0.2.1 or v0.3.0.
+The offset formula was already correct for both arg ranges:
+- Args 1-8 (gpr_index 0..7): live at r31+24..52 where the prolog
+  spilled r3-r10 to caller's param save area.
+- Args 9+ (gpr_index 8+): live at r31+56+ where the caller pushed
+  them in `gfunc_call`'s overflow path (already implemented).
+
+The only thing stopping us was an artificial `if (gpr_index +
+slots > 8) tcc_error(...)` check. Removing it (and tightening
+the FPR check, which is still real — only 8 FPRs available)
+made >8-arg functions Just Work.
+
+Verified: `int sum10(int,int,int,int,int,int,int,int,int,int)`
+compiles, links, runs, returns the correct sum.
 
 ## Other things sqlite would likely hit after >8-arg functions
 
@@ -94,4 +96,5 @@ After all that, retry `tcc -c sqlite3.c`.
 | | |
 |---|---|
 | `tcc/include/stddef.h` | guard typedefs with conventional `_X_T` macros so they don't conflict with system headers |
+| `tcc/ppc-gen.c` | drop the `> 8 GPR slots` cap in gfunc_prolog (the underlying offset math was already right); add TOK_PDIV (alias to signed `divw`) |
 | `docs/sessions/030-sqlite-smoke/README.md` | this file |
