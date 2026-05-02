@@ -1219,9 +1219,11 @@ ST_FUNC void gfunc_call(int nb_args)
         }
         if (bt == VT_FLOAT) {
             fpr_alloc[i] = fpr_used++;
+            gpr_alloc[i] = gpr_used;  /* shadow slot start (for variadic) */
             gpr_used += 1;  /* float shadows 1 GPR slot */
         } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
             fpr_alloc[i] = fpr_used++;
+            gpr_alloc[i] = gpr_used;  /* shadow slot start (for variadic) */
             gpr_used += 2;  /* double shadows 2 GPR slots */
         } else if (bt == VT_LLONG) {
             gpr_alloc[i] = gpr_used;
@@ -1254,11 +1256,37 @@ ST_FUNC void gfunc_call(int nb_args)
         int bt = vtop->type.t & VT_BTYPE;
         if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
             int fslot = fpr_alloc[src_index];
+            int gslot = gpr_alloc[src_index];  /* shadow slot, set in first pass */
             gv(RC_F(fslot));
-            /* Apple ABI: for variadic functions FP args ALSO live in
-             * the GPR shadow. We don't yet know if the callee is
-             * variadic, so for safety we don't replicate to GPR
-             * here -- TODO if printf with FP args misbehaves. */
+            /* Apple PPC ABI: for variadic callees, FP args must ALSO
+             * live in the GPR shadow slots. We don't know if the
+             * callee is variadic at this point, so always populate
+             * the shadow. Non-variadic callees just ignore the GPR
+             * contents — small wasted work, never wrong.
+             *
+             * Mechanism: spill FP register to a scratch slot at
+             * 16(r1) (linkage area's saved-CR word, unused during a
+             * call), reload as int register(s) into the shadow GPRs. */
+            if (gslot >= 0 && gslot < 8) {
+                int fpr = fslot + 1;           /* PPC reg number f1..f8 */
+                int target_lo = gslot + 3;     /* r3..r10 */
+                if (bt == VT_FLOAT) {
+                    /* stfs fS, 16(r1) ; lwz rT, 16(r1) */
+                    o(0xd0010010 | (fpr << 21));
+                    o(0x80010010 | (target_lo << 21));
+                } else if (gslot + 1 < 8) {
+                    /* stfd fS,16(r1) ; lwz rT,16(r1) ; lwz rT+1,20(r1) */
+                    o(0xd8010010 | (fpr << 21));
+                    o(0x80010010 | (target_lo << 21));
+                    o(0x80010014 | ((target_lo+1) << 21));
+                } else {
+                    /* double straddling r10/stack: put high half in r10,
+                     * low half is already on the outgoing stack via the
+                     * standard spill path. */
+                    o(0xd8010010 | (fpr << 21));
+                    o(0x80010010 | (target_lo << 21));
+                }
+            }
         } else {
             int gslot = gpr_alloc[src_index];
             if (gslot < 8) {
