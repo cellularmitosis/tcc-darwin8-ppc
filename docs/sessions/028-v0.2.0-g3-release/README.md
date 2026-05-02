@@ -91,25 +91,28 @@ hello from v0.2.0!
 
 These don't block the release but are documented for users:
 
-* The `-w` (suppress warnings) flag is currently required when
-  `tcc-self` recompiles `tcc.c` — there's a tcc PPC backend bug in
-  the warning-print path (`fflush(stdout)` inside `_tcc_warning`
-  that crashes when called during a parse-error/warning scenario
-  in tcc-self-built code). Out of scope for v0.2.0; tracked.
 * Long-long shift codegen has a residual bug for some inputs in
   tcc-self-built output (`0x100000000LL << 4` returns 0 instead
   of `0x1000000000`). Same source compiled by gcc-built tcc gives
   the right answer.
 * Common symbols from crt1.o end up with the wrong nlist type
   (lowercase `c` instead of `C`) — same general class of tcc PPC
-  backend codegen issue as the two above. Doesn't affect runtime
-  for any program we've tested, but worth fixing.
+  backend codegen issue as the long-long shift one. Doesn't affect
+  runtime for any program we've tested, but worth fixing.
 * `tcc-self.o` is 32 bytes shorter than the gcc-built tcc's
   `tcc.o` for the same input — a regression introduced somewhere
   in 023-025 (pre-existing per
   [026/findings.md](../026-libgcc-helpers/findings.md)). The
   tcc-self → tcc-self2 → tcc-self3 fixpoint still holds; this only
   breaks parity with gcc-built tcc's output.
+* The error/warning emission path in `libtcc.c` was originally
+  using `fprintf+fflush(stderr)`, which crashed in tcc-self-built
+  code due to a tcc PPC backend bug. Workaround landed in 027
+  (commit `f3e58c8`): use `write(2)` directly instead. This was
+  necessary to make the bootstrap chain succeed without `-w`. The
+  underlying backend bug is unfixed — any other `fflush(stderr)`
+  call site in tcc.c could trip the same wire — but this was the
+  only one in the hot path.
 
 ## Files touched
 
