@@ -322,3 +322,77 @@ void __eprintf(const char *fmt, const char *file, unsigned line,
     fflush(__stderrp);
     abort();
 }
+
+/* ---------------------------------------------------------------------------
+ * Bound-check helpers — no-op stubs.
+ *
+ * tcc's codegen with `-b` inserts calls to these on every pointer
+ * arithmetic, function entry/exit, etc. The full bcheck.c
+ * implementation in libtcc1 isn't ported to PPC yet (would need
+ * hash tables, region tracking, signal hooks). For programs that
+ * don't actually want runtime bounds checking but were built with
+ * `-b` because the test harness sets it: provide no-op stubs so
+ * the binary at least links and runs.
+ *
+ * Callers that EXPECT bounds checking (tests 112_backtrace,
+ * 114_bound_signal, 126_bound_global, 132_bound_test) still won't
+ * pass — the stubs intentionally do nothing.
+ * --------------------------------------------------------------------------*/
+
+void *__bound_ptr_add(void *p, unsigned long offset)
+{
+    return (char *)p + offset;
+}
+
+void *__bound_ptr_indir1(void *p, unsigned long offset)  { return (char *)p + offset; }
+void *__bound_ptr_indir2(void *p, unsigned long offset)  { return (char *)p + offset; }
+void *__bound_ptr_indir4(void *p, unsigned long offset)  { return (char *)p + offset; }
+void *__bound_ptr_indir8(void *p, unsigned long offset)  { return (char *)p + offset; }
+void *__bound_ptr_indir12(void *p, unsigned long offset) { return (char *)p + offset; }
+void *__bound_ptr_indir16(void *p, unsigned long offset) { return (char *)p + offset; }
+
+void __bound_local_new(void *p) { (void)p; }
+void __bound_local_delete(void *p) { (void)p; }
+void __bound_new_region(void *p, unsigned long size) { (void)p; (void)size; }
+int  __bound_delete_region(void *p) { (void)p; return 0; }
+
+void __bounds_checking(int no_check) { (void)no_check; }
+void __bound_never_fatal(int n) { (void)n; }
+void __bound_main_arg(int argc, char **argv, char **envp)
+    { (void)argc; (void)argv; (void)envp; }
+void __bound_exit(void) {}
+void __bound_init(unsigned long *p, int mode) { (void)p; (void)mode; }
+void __bound_setjmp(void *env) { (void)env; }
+void __bound_longjmp(void *env, int val) { (void)env; (void)val; }
+void __bound_siglongjmp(void *env, int val) { (void)env; (void)val; }
+
+/* Bound-check string/mem helper stubs — forward to libc with no
+ * actual checking. Same rationale: link-and-run rather than
+ * actually validate. */
+extern void *memcpy(void *, const void *, unsigned long);
+extern int   memcmp(const void *, const void *, unsigned long);
+extern void *memmove(void *, const void *, unsigned long);
+extern void *memset(void *, int, unsigned long);
+extern unsigned long strlen(const char *);
+extern char *strcpy(char *, const char *);
+extern char *strncpy(char *, const char *, unsigned long);
+extern int   strcmp(const char *, const char *);
+extern int   strncmp(const char *, const char *, unsigned long);
+extern char *strcat(char *, const char *);
+extern char *strncat(char *, const char *, unsigned long);
+extern char *strchr(const char *, int);
+extern char *strdup(const char *);
+
+void *__bound_memcpy(void *d, const void *s, unsigned long n) { return memcpy(d,s,n); }
+int   __bound_memcmp(const void *a, const void *b, unsigned long n) { return memcmp(a,b,n); }
+void *__bound_memmove(void *d, const void *s, unsigned long n) { return memmove(d,s,n); }
+void *__bound_memset(void *d, int c, unsigned long n) { return memset(d,c,n); }
+int   __bound_strlen(const char *s) { return (int)strlen(s); }
+char *__bound_strcpy(char *d, const char *s) { return strcpy(d,s); }
+char *__bound_strncpy(char *d, const char *s, unsigned long n) { return strncpy(d,s,n); }
+int   __bound_strcmp(const char *a, const char *b) { return strcmp(a,b); }
+int   __bound_strncmp(const char *a, const char *b, unsigned long n) { return strncmp(a,b,n); }
+char *__bound_strcat(char *d, const char *s) { return strcat(d,s); }
+char *__bound_strncat(char *d, const char *s, unsigned long n) { return strncat(d,s,n); }
+char *__bound_strchr(const char *s, int c) { return strchr(s,c); }
+char *__bound_strdup(const char *s) { return strdup(s); }
