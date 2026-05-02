@@ -1417,7 +1417,10 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
                 sect_data[reloc_off+1] = (inst >> 16) & 0xff;
                 sect_data[reloc_off+2] = (inst >>  8) & 0xff;
                 sect_data[reloc_off+3] =  inst        & 0xff;
-                break;
+                continue;  /* next reloc — NOT `break`, which would
+                            * exit the for loop and silently drop
+                            * every subsequent reloc in this section
+                            * (printf/extern call sites included). */
             }
             slot_va = nlptrs[slot_idx].slot_addr;
             delta = slot_va - anchor_va;
