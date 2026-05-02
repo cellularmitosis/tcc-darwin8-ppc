@@ -371,7 +371,8 @@ static int classify_section(Section *s, const char **segname,
     /* Skip non-allocated and bookkeeping sections. */
     if (!(s->sh_flags & SHF_ALLOC))
         return 0;
-    if (s->sh_type != SHT_PROGBITS && s->sh_type != SHT_NOBITS)
+    if (s->sh_type != SHT_PROGBITS && s->sh_type != SHT_NOBITS
+        && s->sh_type != SHT_INIT_ARRAY && s->sh_type != SHT_FINI_ARRAY)
         return 0;
     /* Skip tcc's .common section (handled by resolve_common_syms). */
     if (s->sh_num == SHN_COMMON)
@@ -399,6 +400,25 @@ static int classify_section(Section *s, const char **segname,
         *segname = "__TEXT";
         *sectname = "__const";
         *flags = S_REGULAR;
+        return 1;
+    }
+    /* Constructor / destructor function pointer arrays. tcc's frontend
+     * collects these into .init_array / .fini_array via add_array().
+     * Mac OS X dyld walks __DATA,__mod_init_func / __mod_term_func at
+     * startup / exit; the section type tells dyld what to do.
+     *   S_MOD_INIT_FUNC_POINTERS  = 0x9
+     *   S_MOD_TERM_FUNC_POINTERS  = 0xa
+     */
+    if (!strcmp(n, ".init_array")) {
+        *segname = "__DATA";
+        *sectname = "__mod_init_func";
+        *flags = 0x9;       /* S_MOD_INIT_FUNC_POINTERS */
+        return 1;
+    }
+    if (!strcmp(n, ".fini_array")) {
+        *segname = "__DATA";
+        *sectname = "__mod_term_func";
+        *flags = 0xa;       /* S_MOD_TERM_FUNC_POINTERS */
         return 1;
     }
     /* Sections that look like .data.foo / .text.foo / .rodata.foo:
