@@ -41,6 +41,7 @@ A `/opt`-installable tarball is built end-to-end by
 | 🟡 | EXE writer extended: extern-data PIC, `__data` section, auto-injected `__tcc_start_main`, `__mh_execute_header`, `LC_TWOLEVEL_HINTS` ([024](docs/sessions/024-libsystem-init/README.md)) — libSystem init still elusive |
 | ✅ | **Mach-O `.o` reader → full self-link via tcc** — auto-loads `/usr/lib/crt1.o`, `tcc -o exe` produces working printf/malloc binaries with no gcc involvement ([025](docs/sessions/025-macho-o-reader/README.md)) |
 | 🟡 | **libgcc helpers bundled in `libtcc1.a`** — 10 helpers for long-long arithmetic, IEEE 754 conversions ([026](docs/sessions/026-libgcc-helpers/README.md)); blocked from full self-link by a Tiger keymgr/DWARF init-order bug |
+| ✅ | **🎉 FULL SELF-LINK & SELF-HOST FIXPOINT — `gcc-4.0` no longer needed for the bootstrap chain.** `bootstrap-tcc-self.sh` produces a working `tcc-self` linked entirely by `tcc` itself, then verifies tcc-self2 → tcc-self3 byte-identical fixpoint ([027](docs/sessions/027-self-link/README.md)) |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 

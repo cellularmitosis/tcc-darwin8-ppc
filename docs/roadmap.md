@@ -48,37 +48,41 @@ A `/opt`-installable tarball that:
    `__udivdi3`, `__umoddi3`, `__divdi3`, `__moddi3`). Verified
    end-to-end by tcc-linking a long-long signed-divide program.
 
-2. **Resolve the keymgr / DWARF init-order bug** that blocks
-   `tcc-self` from being self-linked. Crt1.o's `_start` calls
-   `__keymgr_dwarf2_register_sections` before any `mod_init_func`
-   runs, which dies in `_malloc_initialize`. Smallest viable fix is
-   to stub the symbol in our crt1.o reader (we don't use C++
-   exceptions). See
-   [026/findings.md](sessions/026-libgcc-helpers/findings.md) for
-   the full diagnosis. (Session 027.)
+2. ✅ **Resolve the keymgr / DWARF init-order bug + four other
+   independent bugs converging on the same SIGBUS-on-launch
+   symptom.** Done in
+   [027](sessions/027-self-link/README.md) — auto-injected keymgr
+   stub that calls `_dyld_register_func_for_{add,remove}_image` (a
+   load-bearing side effect that kicks libSystem's init);
+   populated `__DATA,__dyld` with the dyld helper pointers; set
+   `REFERENCED_DYNAMICALLY` on `_environ`/`_NXArgc`/`_NXArgv`/
+   `__mh_execute_header`; **sorted external defined symbols
+   alphabetically** (dyld uses binary search!); skipped crt1's
+   private machinery from the external symbol table; bypassed a
+   tcc PPC backend bug in `put_nlist`'s narrow-arg call sequence.
 
-3. **Restore the self-host fixpoint.** A regression introduced
-   somewhere in 023-025 makes tcc-self compiling tcc.c produce a
-   `.o` 32 bytes shorter than the gcc-built tcc does (44 bytes /
-   11 instructions less code). Both files have identical headers;
-   only `__text` differs. Confirmed pre-existing (not 026's fault).
-   `git bisect` from `7e2a4ae` to `eeb914f` plus disassembly of the
-   missing 11 instructions should localize it quickly. (Session 028.)
+3. ✅ **Self-host fixpoint reached.** `bootstrap-tcc-self.sh
+   FIXPOINT=1` runs the canonical chain: tcc → tcc-self.o →
+   tcc-self → tcc-self2.o → tcc-self2 → tcc-self3.o, then
+   verifies `tcc-self2.o == tcc-self3.o` byte-identical
+   ([027](sessions/027-self-link/README.md)). The pre-existing
+   23-25 era 32-byte regression vs gcc-built tcc's output remains
+   (so tcc.o ≠ tcc-self.o), but tcc-self → tcc-self2 → tcc-self3
+   is a stable fixpoint, which is what self-host actually means.
 
 4. **Wire up TCC's own testsuites.** `tcc/tests/` and `tcc/tests2/`
    together hold ~330 small C programs covering language and
    codegen edge cases. Get the Make targets running on PPC, capture
    a baseline pass/fail count, fix the obvious wins, document the
-   rest. (Session 029.)
+   rest. (Session 028.)
 
 5. **Real-world program smoke tests.** Build sqlite3 amalgamation
    with `tcc -o`, then lua. Document what breaks, fix what's quick,
-   capture the rest as follow-ups. (Session 030.)
+   capture the rest as follow-ups. (Session 029.)
 
-6. **Cut v0.2.0.** Update `scripts/build-release-tarball.sh` to use
-   the new self-link path (presupposes 027 + 028 land). Regenerate
-   demos. Update the README status table. Tag, release notes,
-   GitHub upload. (Session 031.)
+6. **Cut v0.2.0.** Update `scripts/build-release-tarball.sh` to
+   bundle the self-link path. Regenerate demos. Update the README
+   status table. Tag, release notes, GitHub upload. (Session 030.)
 
 ### After v0.2.0
 
