@@ -1892,6 +1892,14 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
         } else {
             int slots = (bt == VT_LLONG) ? 2 : 1;
             param_offset = 24 + gpr_index * 4;
+            /* PPC big-endian: a sub-word arg in r3 (zero/sign-extended
+             * to 32 bits) lives in the LOW byte/halfword of the 32-bit
+             * register. After `stw r3, 24(r1)` the actual value is at
+             * the END of the 4-byte slot, not the start. Adjust the
+             * param's stack offset so subsequent lbz/lhz reads from
+             * r31+param_offset get the right byte. */
+            if (bt == VT_BYTE || bt == VT_BOOL) param_offset += 3;
+            else if (bt == VT_SHORT) param_offset += 2;
             gfunc_set_param(sym, param_offset, 0);
             gpr_index += slots;
         }
