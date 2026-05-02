@@ -301,3 +301,24 @@ long long __ashrdi3(long long a, int b)
  * tccelf.c::tcc_output_file when crt1.o isn't available, and the
  * gcc-link bootstrap path pulls in the real /usr/lib/crt1.o which
  * does the job properly.) */
+
+/* ---------------------------------------------------------------------------
+ * libgcc/libsystem-ish helpers expected by Tiger headers
+ * ---------------------------------------------------------------------------*/
+
+/* Tiger's <assert.h> expands assert(e) to call __eprintf when the
+ * expression is false. gcc's libgcc provides this; libSystem on Tiger
+ * does not. Provide a minimal implementation that matches the libgcc
+ * behavior (print to stderr, then abort). */
+extern int fprintf(void *stream, const char *fmt, ...);
+extern void *__stderrp;     /* libSystem's stderr backing FILE * */
+extern int fflush(void *);
+extern void abort(void);
+
+void __eprintf(const char *fmt, const char *file, unsigned line,
+               const char *expr)
+{
+    fprintf(__stderrp, fmt, file, line, expr);
+    fflush(__stderrp);
+    abort();
+}
