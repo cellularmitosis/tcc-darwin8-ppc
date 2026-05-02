@@ -678,12 +678,26 @@ static void error1(int mode, const char *fmt, va_list ap)
     else
         cstr_vprintf(&cs, fmt, ap);
     if (!s1->error_func) {
-        /* default case: stderr */
+        /* default case: stderr.
+         *
+         * On PPC, use write(2) directly instead of fprintf+fflush.
+         * tcc's own PPC backend has a residual codegen bug where
+         * fflush(stdout)/fflush(stderr) faults with a NULL or
+         * garbage FILE* arg when called from the warning emission
+         * path here (specifically when the surrounding function has
+         * many va_arg manipulations + cstring printing). Using
+         * write() bypasses libc stdio entirely and sidesteps the
+         * bug. Also has the nice property that warnings/errors are
+         * never lost to buffering. */
         if (s1 && s1->output_type == TCC_OUTPUT_PREPROCESS && s1->ppfp == stdout)
-            printf("\n"); /* print a newline during tcc -E */
-        fflush(stdout); /* flush -v output */
-        fprintf(stderr, "%s\n", (char*)cs.data);
-        fflush(stderr); /* print error/warning now (win32) */
+            write(1, "\n", 1); /* newline to stdout during tcc -E */
+        {
+            const char *msg = (char*)cs.data;
+            size_t mlen = msg ? strlen(msg) : 0;
+            if (mlen > 0)
+                write(2, msg, mlen);
+            write(2, "\n", 1);
+        }
     } else {
         s1->error_func(s1->error_opaque, (char*)cs.data);
     }

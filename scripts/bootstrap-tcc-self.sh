@@ -30,13 +30,8 @@ WORK=${WORK:-/tmp/tcc-self-build}
 mkdir -p "$WORK"
 rm -f "$WORK"/tcc.o "$OUT"
 
-# `-w`: tcc currently has a codegen issue where the warning-print
-# path crashes inside fflush(stdout) when tcc-self compiles tcc.c.
-# Suppressing warnings sidesteps it. Tracked separately; the one
-# warning we'd otherwise hit is `#warning add arch specific
-# rt_get_caller_pc()` in tccrun.c, harmless.
 echo "  CC tcc.c (ONE_SOURCE; via $TCC)"
-"$TCC" -c -w "$SRC" -o "$WORK/tcc.o" -B./tcc -I./tcc
+"$TCC" -c "$SRC" -o "$WORK/tcc.o" -B./tcc -I./tcc
 
 echo "  LINK $OUT (via $TCC, no gcc-4.0)"
 "$TCC" -B./tcc -I./tcc -o "$OUT" "$WORK/tcc.o" "$LIBTCC1"
@@ -58,12 +53,12 @@ if [ "${FIXPOINT:-0}" = "1" ]; then
     rm -f "$OUT2" "$OUT3" "$OBJ2" "$OBJ3"
 
     echo "  CC tcc.c (via $OUT) -> $OBJ2"
-    "$OUT" -c -w "$SRC" -o "$OBJ2" -B./tcc -I./tcc
+    "$OUT" -c "$SRC" -o "$OBJ2" -B./tcc -I./tcc
     echo "  LINK $OUT2 (via $OUT)"
     "$OUT" -B./tcc -I./tcc -o "$OUT2" "$OBJ2" "$LIBTCC1"
 
     echo "  CC tcc.c (via $OUT2) -> $OBJ3"
-    "$OUT2" -c -w "$SRC" -o "$OBJ3" -B./tcc -I./tcc
+    "$OUT2" -c "$SRC" -o "$OBJ3" -B./tcc -I./tcc
     echo "  LINK $OUT3 (via $OUT2)"
     "$OUT2" -B./tcc -I./tcc -o "$OUT3" "$OBJ3" "$LIBTCC1"
 
