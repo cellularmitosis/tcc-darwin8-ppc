@@ -1509,7 +1509,11 @@ ST_FUNC void gfunc_call(int nb_args)
     /* Determine the return type before we lose access to vtop. We need
      * this so we can swap r3<->r4 after the call if the function
      * returns a long long (Apple PPC ABI returns r3=HIGH, r4=LOW; tcc's
-     * convention expects r3=LOW, r4=HIGH per PUT_R_RET). */
+     * convention expects r3=LOW, r4=HIGH per PUT_R_RET).
+     *
+     * Helper-function calls (vpush_helper_func) push with `func_old_type`
+     * (returns int) so the type-driven check misses LL-returning libgcc
+     * helpers like __fixunsdfdi. Match those by sym token too. */
     int ret_is_ll = 0;
     {
         CType *ft = &vtop->type;
@@ -1517,6 +1521,13 @@ ST_FUNC void gfunc_call(int nb_args)
             CType *rt = &ft->ref->type;
             if ((rt->t & VT_BTYPE) == VT_LLONG)
                 ret_is_ll = 1;
+        }
+        if (!ret_is_ll && (vtop->r & VT_SYM) && vtop->sym) {
+            int v = vtop->sym->v;
+            if (v == TOK___fixdfdi    || v == TOK___fixsfdi   ||
+                v == TOK___fixunsdfdi || v == TOK___fixunssfdi) {
+                ret_is_ll = 1;
+            }
         }
     }
 
