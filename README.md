@@ -46,6 +46,7 @@ canonical self-host fixpoint, on a 22-year-old G3 / G4. A 141 KB
 | 🟡 | **libgcc helpers bundled in `libtcc1.a`** — 10 helpers for long-long arithmetic, IEEE 754 conversions ([026](docs/sessions/026-libgcc-helpers/README.md)); blocked from full self-link by a Tiger keymgr/DWARF init-order bug |
 | ✅ | **🎉 FULL SELF-LINK & SELF-HOST FIXPOINT — `gcc-4.0` no longer needed for the bootstrap chain.** `bootstrap-tcc-self.sh` produces a working `tcc-self` linked entirely by `tcc` itself, then verifies tcc-self2 → tcc-self3 byte-identical fixpoint ([027](docs/sessions/027-self-link/README.md)) |
 | ✅ | **`v0.2.0-g3` release tarball — `/opt`-installable, ~141 KB, fully self-hosted, verified on iBook G4** ([028](docs/sessions/028-v0.2.0-g3-release/README.md)) |
+| ✅ | **TCC `tests2/` baseline — 70 / 122 pass (57%)** ([029](docs/sessions/029-tests2-baseline/README.md)); `scripts/run-tests2.sh` for one-command re-runs |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 

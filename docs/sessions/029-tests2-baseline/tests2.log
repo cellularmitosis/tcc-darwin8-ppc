@@ -1,0 +1,2050 @@
+make: Entering directory '/Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2'
+Test: 00_assignment...
+Test: 01_comment...
+Test: 02_printf...
+Test: 03_struct...
+--- 03_struct.expect	2026-04-30 08:32:42.000000000 -0500
++++ 03_struct.output	2026-05-02 03:19:19.000000000 -0500
+@@ -1,4 +1,3 @@
+-03_struct.c:14: warning: attribute '__cleanup__' ignored on type
+ 12
+ 34
+ 12
+Test: 04_for...
+Test: 05_array...
+Test: 06_case...
+Test: 07_function...
+Test: 08_while...
+Test: 09_do_while...
+Test: 10_pointer...
+Test: 11_precedence...
+Test: 12_hashdefine...
+Test: 13_integer_literals...
+Test: 14_if...
+Test: 15_recursion...
+Test: 16_nesting...
+Test: 17_enum...
+--- 17_enum.expect	2026-04-30 08:32:42.000000000 -0500
++++ 17_enum.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,4 +0,0 @@
+-0 1 2 3 54 73 74 75
+-12
+-54
+-enum to int: 1
+Test: 18_include...
+--- 18_include.expect	2026-04-30 08:32:42.000000000 -0500
++++ 18_include.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,8 +0,0 @@
+-including
+-included
+-done
+-has_include
+-has_include
+-has_include_next
+-has_include_next
+-counter 0
+Test: 19_pointer_arithmetic...
+Test: 20_pointer_comparison...
+Test: 21_char_array...
+Test: 22_floating_point...
+--- 22_floating_point.expect	2026-04-30 08:32:42.000000000 -0500
++++ 22_floating_point.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,40 +0,0 @@
+-69.119995 -631.327881 
+-69.12 -631.328
+-69.120000 -631.327870
+-69.119995 -44.439999 700.665222 0.217330
+-69.12 -44.44 700.665 0.21733
+-69.120000 -44.440000 700.665200 0.217330
+-69.119995 -44.439999 700.665222 0.217330
+-69.12 -44.44 700.665 0.21733
+-69.120000 -44.440000 700.665200 0.217330
+-1 1 0 0 0 1
+-0 1 1 1 0 0
+-0 0 0 1 1 1
+-1 1 0 0 0 1
+-0 1 1 1 0 0
+-0 0 0 1 1 1
+-1 1 0 0 0 1
+-0 1 1 1 0 0
+-0 0 0 1 1 1
+-1 1 0 0 0 1
+-0 1 1 1 0 0
+-0 0 0 1 1 1
+-1 1 0 0 0 1
+-0 1 1 1 0 0
+-0 0 0 1 1 1
+-1 1 0 0 0 1
+-0 1 1 1 0 0
+-0 0 0 1 1 1
+-0 1 1 0 1 0
+-69.119995 69.12 69.120000
+-69.119995 69.12 69.120000
+--44.439999 -44.44 -44.440000
+--44.439999 -44.44 -44.440000
+-700.665222 700.665 700.665200
+-700.665222 700.665 700.665200
+-0.217330 0.21733 0.217330
+-0.217330 0.21733 0.217330
+-12.340000 12.34 12.340000
+--12.340000 -12.34 -12.340000
+-2.000000
+-0.909297
+Test: 23_type_coercion...
+Binary files 23_type_coercion.expect and 23_type_coercion.output differ
+Test: 24_math_library...
+--- 24_math_library.expect	2026-04-30 08:32:42.000000000 -0500
++++ 24_math_library.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,18 +0,0 @@
+-0.119712
+-0.992809
+-0.120579
+-0.120290
+-1.450506
+-0.119429
+-0.120288
+-1.007209
+-0.119427
+-1.127497
+-0.120000
+--2.120264
+--0.920819
+-0.775357
+-0.346410
+-12.000000
+-13.000000
+-12.000000
+Test: 25_quicksort...
+Test: 26_character_constants...
+Test: 27_sizeof...
+Test: 28_strings...
+Test: 29_array_address...
+Test: 30_hanoi...
+Test: 31_args...
+Test: 32_led...
+Test: 33_ternary_op...
+--- 33_ternary_op.expect	2026-04-30 08:32:42.000000000 -0500
++++ 33_ternary_op.output	2026-05-02 03:19:26.000000000 -0500
+@@ -1,14 +1,4 @@
+-33_ternary_op.c:26: warning: pointer/integer mismatch in conditional expression
+-0
+-1
+-4
+-9
+-16
+-15
+-18
+-21
+-24
+-27
+-152
+-okay
+-1
++dyld: Symbol not found: ___eprintf
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./33_ternary_op.exe
++  Expected in: /usr/lib/libSystem.B.dylib
++
+Test: 35_sizeof...
+Test: 36_array_initialisers...
+Test: 37_sprintf...
+Test: 38_multiple_array_index...
+Test: 39_typedef...
+Test: 40_stdio...
+Test: 41_hashif...
+Test: 42_function_pointer...
+--- 42_function_pointer.expect	2026-04-30 08:32:42.000000000 -0500
++++ 42_function_pointer.output	2026-05-02 03:18:26.000000000 -0500
+@@ -1,2 +0,0 @@
+-yo 24
+-42
+Test: 43_void_param...
+Test: 44_scoped_declarations...
+Test: 45_empty_for...
+Test: 46_grep...
+Test: 47_switch_return...
+Test: 48_nested_break...
+Test: 49_bracket_evaluation...
+--- 49_bracket_evaluation.expect	2026-04-30 08:32:42.000000000 -0500
++++ 49_bracket_evaluation.output	2026-05-02 03:19:30.000000000 -0500
+@@ -1 +1 @@
+-12.340000, 56.780000
++0.000000, -1.998940
+Test: 50_logical_second_arg...
+Test: 51_static...
+Test: 52_unnamed_enum...
+Test: 54_goto...
+Test: 55_lshift_type...
+Test: 60_errors_and_warnings...
+--- 60_errors_and_warnings.expect	2026-04-30 08:32:42.000000000 -0500
++++ 60_errors_and_warnings.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,264 +0,0 @@
+-[test_56_btype_excess_1]
+-60_errors_and_warnings.c:4: error: too many basic types
+-
+-[test_57_btype_excess_2]
+-60_errors_and_warnings.c:6: error: too many basic types
+-
+-[test_58_function_redefinition]
+-60_errors_and_warnings.c:9: error: redefinition of 'f'
+-
+-[test_global_redefinition]
+-60_errors_and_warnings.c:14: error: redefinition of 'xxx'
+-
+-[test_59_function_array]
+-60_errors_and_warnings.c:17: error: declaration of an array of functions
+-
+-[test_60_enum_redefinition]
+-60_errors_and_warnings.c:21: error: struct/union/enum already defined
+-
+-[test_62_enumerator_redefinition]
+-60_errors_and_warnings.c:26: error: redeclaration of 'RED'
+-
+-[test_63_local_enumerator_redefinition]
+-[returns 1]
+-
+-[test_61_undefined_enum]
+-60_errors_and_warnings.c:46: error: initialization of incomplete type
+-
+-[test_74_non_const_init]
+-60_errors_and_warnings.c:49: error: initializer element is not constant
+-
+-[test_pointer_assignment]
+-60_errors_and_warnings.c:79: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:82: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:86: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:88: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:91: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:92: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:94: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:95: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:98: warning: assignment discards qualifiers from pointer target type
+-60_errors_and_warnings.c:99: warning: assignment discards qualifiers from pointer target type
+-60_errors_and_warnings.c:103: warning: assignment discards qualifiers from pointer target type
+-60_errors_and_warnings.c:104: warning: assignment discards qualifiers from pointer target type
+-60_errors_and_warnings.c:109: warning: assignment of read-only location
+-
+-[test_enum_compat]
+-60_errors_and_warnings.c:119: error: incompatible types for redefinition of 'f3'
+-
+-[test_enum_compat_2]
+-60_errors_and_warnings.c:126: error: incompatible types for redefinition of 'f4'
+-
+-[test_ptr_to_str]
+-60_errors_and_warnings.c:129: error: type 'const int **' does not match any association
+-
+-[test_fnptr_to_str]
+-60_errors_and_warnings.c:131: error: type 'int (*(*)(float, char))(double, int)' does not match any association
+-
+-[test_array_to_str]
+-60_errors_and_warnings.c:133: error: type 'int (*)[3]' does not match any association
+-
+-[test_duplicate_def_1]
+-60_errors_and_warnings.c:135: error: redefinition of 'L'
+-
+-[test_duplicate_def_2]
+-60_errors_and_warnings.c:138: error: redeclaration of 'L'
+-
+-[test_abstract_decls]
+-60_errors_and_warnings.c:148: error: identifier expected
+-
+-[test_invalid_1]
+-60_errors_and_warnings.c:153: error: expression expected before ','
+-
+-[test_invalid_2]
+-60_errors_and_warnings.c:156: error: ';' expected (got '{')
+-
+-[test_invalid_3]
+-60_errors_and_warnings.c:160: error: ',' expected (got 'a')
+-
+-[test_invalid_4]
+-60_errors_and_warnings.c:164: error: division by zero in constant
+-
+-[test_conflicting_types]
+-60_errors_and_warnings.c:170: error: incompatible types for redefinition of 'i'
+-
+-[test_nested_types]
+-60_errors_and_warnings.c:177: error: struct/union/enum already defined
+-
+-[test_vla_1]
+-60_errors_and_warnings.c:184: error: need explicit inner array size in VLAs
+-
+-[test_invalid_alignas]
+-60_errors_and_warnings.c:188: error: identifier expected
+-
+-[test_static_assert]
+-60_errors_and_warnings.c:194: error: ONE is not 1
+-
+-[test_static_assert_2]
+-60_errors_and_warnings.c:198: error: 0 is 0
+-
+-[test_static_assert_c2x]
+-60_errors_and_warnings.c:202: error: _Static_assert fail
+-
+-[test_static_assert_empty_string]
+-60_errors_and_warnings.c:205: error: 
+-
+-[test_void_array]
+-60_errors_and_warnings.c:208: error: declaration of an array of incomplete type elements
+-
+-[test_incomplete_enum_array]
+-60_errors_and_warnings.c:211: error: declaration of an array of incomplete type elements
+-
+-[test_incomplete_struct_array]
+-60_errors_and_warnings.c:214: error: declaration of an array of incomplete type elements
+-
+-[test_const_fun_array]
+-60_errors_and_warnings.c:218: error: declaration of an array of functions
+-
+-[test_incomplete_array_array]
+-
+-[test_extern_array]
+-60_errors_and_warnings.c:234: error: incompatible types for redefinition of 'x'
+-
+-[test_func_1]
+-hello: a = 123
+-
+-[test_func_2]
+-hello: a = 123
+-
+-[test_func_3]
+-60_errors_and_warnings.c:264: warning: static storage ignored for redefinition of 'hello'
+-hello: a = 123
+-
+-[test_func_4]
+-hello: a = 123
+-
+-[test_func_5]
+-60_errors_and_warnings.c:264: error: incompatible types for redefinition of 'hello'
+-
+-[test_func_6]
+-60_errors_and_warnings.c:252: error: function without file scope cannot be static
+-
+-[test_var_1]
+-main : 1 ; 1
+-main : 2 ; 2
+-bar  : 3 ; 3
+-
+-[test_var_2]
+-main : 1 ; 1
+-main : 2 ; 2
+-bar  : 3 ; 3
+-
+-[test_var_3]
+-60_errors_and_warnings.c:296: error: incompatible types for redefinition of 'xxx'
+-
+-[test_var_4]
+-
+-[test_long_double_type_for_win32]
+-60_errors_and_warnings.c:327: warning: assignment from incompatible pointer type
+-
+-[test_stray_backslash]
+-60_errors_and_warnings.c:333: error: stray '\' in program
+-
+-[test_stray_backslash2]
+-\n
+-
+-[test_var_array]
+-60_errors_and_warnings.c:348: error: flexible array has zero size in this context
+-
+-[test_var_array2]
+-60_errors_and_warnings.c:358: error: flexible array has zero size in this context
+-
+-[test_var_array3]
+-60_errors_and_warnings.c:365: error: flexible array has zero size in this context
+-
+-[test_default_int_type]
+-60_errors_and_warnings.c:368: warning: type defaults to int
+-
+-[test_invalid_global_stmtexpr]
+-60_errors_and_warnings.c:372: error: statement expression outside of function
+-
+-[test_invalid_tokckill]
+-60_errors_and_warnings.c:375: error: ';' expected (got '3')
+-
+-[test_duplicate_member]
+-60_errors_and_warnings.c:381: error: duplicate member 'a'
+-
+-[test_duplicate_member_anon]
+-60_errors_and_warnings.c:394: error: duplicate member 'd'
+-
+-[test_conflicting_array_definition]
+-60_errors_and_warnings.c:399: error: too many initializers
+-
+-[test_incompatible_local_redef]
+-60_errors_and_warnings.c:406: error: incompatible redefinition of 'localfunctype'
+-
+-[test_cast_from_void]
+-60_errors_and_warnings.c:411: error: cannot convert 'void' to 'int'
+-
+-[test_switch_W1]
+-60_errors_and_warnings.c:427: warning: implicit declaration of function 'fink'
+-
+-[test_switch_W2]
+-60_errors_and_warnings.c:418: warning: unsupported option '-Wstuff'
+-60_errors_and_warnings.c:429: warning: 'stuff' attribute ignored
+-
+-[test_switch_W3]
+-60_errors_and_warnings.c:426: error: assignment discards qualifiers from pointer target type
+-
+-[test_switch_W4]
+-60_errors_and_warnings.c:427: warning: implicit declaration of function 'fink'
+-60_errors_and_warnings.c:429: error: 'stuff' attribute ignored
+-
+-[test_invalid_funcparam_1]
+-60_errors_and_warnings.c:432: error: redeclaration of 'a'
+-
+-[test_invalid_funcparam_2]
+-60_errors_and_warnings.c:435: error: identifier expected
+-
+-[test_array_funcparam]
+-arg[0] = "X"
+-arg[1] = "Y"
+-
+-[test_return_from_statement_expr]
+-[returns 78]
+-
+-[test_illegal_unicode]
+-60_errors_and_warnings.c:459: error: 0xffffffff is not a valid universal character
+-
+-[test_error_string]
+-60_errors_and_warnings.c:464: error: #error \123\456
+-
+-[test_error_incomplete_type]
+-60_errors_and_warnings.c:472: error: initialization of incomplete type
+-
+-[test_pp_error_1]
+-60_errors_and_warnings.c:480: error: #if with no expression
+-
+-[test_pp_error_2]
+-60_errors_and_warnings.c:483: error: bad preprocessor expression: #if 0 ( 1 , 2 )
+-
+-[test_pointer_plus_double]
+-60_errors_and_warnings.c:490: error: invalid operand types for binary operation
+-
+-[test_duplicate_case]
+-60_errors_and_warnings.c:499: warning: empty case range
+-60_errors_and_warnings.c:503: error: duplicate case value
+-
+-[test_normal_funcargs]
+-122333 1 2 3
+-
+-[test_reverse_funcargs]
+-333221 1 2 3
+-
+-[test_scope_1]
+-60_errors_and_warnings.c:548: warning: assignment from incompatible pointer type
+-foo 12 44 16
+-bar 15 12 34
+-
+-[test_scope_2]
+-60_errors_and_warnings.c:539: error: incompatible types for redefinition of 'foo'
+-
+-[test_scope_3]
+-60_errors_and_warnings.c:548: warning: assignment from incompatible pointer type
+-60_errors_and_warnings.c:549: error: initialization of incomplete type
+Test: 61_integers...
+Test: 64_macro_nesting...
+Test: 67_macro_concat...
+Test: 70_floating_point_literals...
+--- 70_floating_point_literals.expect	2026-04-30 08:32:42.000000000 -0500
++++ 70_floating_point_literals.output	2026-05-02 03:19:32.000000000 -0500
+@@ -1,55 +1,55 @@
+-0.123000
+-122999996416.000000
+-0.000000
+-122999996416.000000
++-1.998826
++-1.998901
++-0.000000
++-0.000000
+ 
+-123.123001
+-123122997002240.000000
+ 0.000000
+-123122997002240.000000
++0.000000
++0.000000
++nan
+ 
+-123.000000
+-123000003231744.000000
+ 0.000000
+-123000003231744.000000
++0.000000
++-1.996490
++nan
+ 
+-123000003231744.000000
+ 0.000000
+-123000003231744.000000
++0.000000
++-1.996490
+ 
+ 
+-428.000000
+-0.000026
+-428.000000
+-4096.000000
+-1099511627776.000000
++0.000000
++0.000000
++0.000000
++0.000000
++0.000000
+ 
+-1756112.000000
+-0.104672
+-1756592.000000
++0.000000
++0.000000
++-1.996490
+ 
+-1753088.000000
+-0.104492
+-1753088.000000
++0.000000
++0.000000
++0.000000
+ 
+-1753088.000000
+-0.104492
+-1753088.000000
++0.000000
++0.000000
++-1.996490
+ 
+ 
+-3424.000000
+-0.000204
+-3424.000000
++0.000000
++0.000000
++0.000000
+ 
+-1756112.000000
+-0.104672
+-1756112.000000
++0.000000
++0.000000
++0.000000
+ 
+-1753088.000000
+-0.104492
+-1753088.000000
++0.000000
++0.000000
++0.000000
+ 
+-1753088.000000
+-0.104492
+-1753088.000000
++0.000000
++0.000000
++0.000000
+ 
+Test: 71_macro_empty_arg...
+Test: 72_long_long_constant...
+Test: 73_arm64...
+--- 73_arm64.expect	2026-04-30 08:32:42.000000000 -0500
++++ 73_arm64.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,174 +0,0 @@
+-Arguments:
+-0
+-12
+-345
+-6789
+-abcde
+-fghijk
+-lmnopqr
+-stuvwxyz
+-ABCDEFGHI
+-JKLMNOPQRS
+-TUVWXYZ0123
+-456789abcdef
+-ghijklmnopqrs
+-tuvwxyzABCDEFG
+-HIJKLMNOPQRSTUV
+-WXYZ0123456789ab
+-cdefghijklmnopqrs
+-11.1
+-12.1 12.1
+-13.1 13.2 13.3
+-14.1 14.2 14.3 14.4
+-21.1
+-22.1 22.1
+-23.1 23.2 23.3
+-24.1 24.2 24.3 24.4
+-31.1
+-32.1 32.1
+-33.1 33.2 33.3
+-34.1 34.2 34.3 34.4
+-stu ABC JKL TUV 456 ghi
+-ABC JKL TUV 456 ghi tuv
+-14.1 14.4 23.1 23.3 32.1 32.2
+-0 14.1 14.4 12 24.1 24.4 345 34.1 34.4
+-Return values:
+-0
+-12
+-345
+-6789
+-abcde
+-fghijk
+-lmnopqr
+-stuvwxyz
+-ABCDEFGHI
+-JKLMNOPQRS
+-TUVWXYZ0123
+-456789abcdef
+-ghijklmnopqrs
+-tuvwxyzABCDEFG
+-HIJKLMNOPQRSTUV
+-WXYZ0123456789ab
+-cdefghijklmnopqrs
+-11.1
+-12.1 12.2
+-13.1 13.3
+-14.1 14.4
+-21.1
+-22.1 22.2
+-23.1 23.3
+-24.1 24.4
+-31.1
+-32.1 32.2
+-33.1 33.3
+-34.1 34.4
+-stdarg:
+-ABCDEFGHI ABCDEFGHI ABCDEFGHI ABCDEFGHI ABCDEFGHI ABCDEFGHI
+-lmnopqr ABCDEFGHI ABCDEFGHI ABCDEFGHI ABCDEFGHI ABCDEFGHI
+-HFA long double:
+-34.1,34.4 34.1,34.4 34.1,34.4 34.1,34.4
+-33.1,33.3 34.1,34.4 34.1,34.4 34.1,34.4
+-32.1,32.2 34.1,34.4 34.1,34.4 34.1,34.4
+-31.1,31.1 34.1,34.4 34.1,34.4 34.1,34.4
+-32.1,32.2 33.1,33.3 33.1,33.3 33.1,33.3 33.1,33.3
+-31.1,31.1 33.1,33.3 33.1,33.3 33.1,33.3 33.1,33.3
+-33.1,33.3 33.1,33.3 33.1,33.3 33.1,33.3
+-34.1,34.4 32.1,32.2 32.1,32.2 32.1,32.2 32.1,32.2
+-33.1,33.3 32.1,32.2 32.1,32.2 32.1,32.2 32.1,32.2
+-34.1,34.4 32.1,32.2 31.1,31.1 31.1,31.1 31.1,31.1 31.1,31.1
+-HFA double:
+-24.1,24.4 24.1,24.4 24.1,24.4 24.1,24.4
+-23.1,23.3 24.1,24.4 24.1,24.4 24.1,24.4
+-22.1,22.2 24.1,24.4 24.1,24.4 24.1,24.4
+-21.1,21.1 24.1,24.4 24.1,24.4 24.1,24.4
+-22.1,22.2 23.1,23.3 23.1,23.3 23.1,23.3 23.1,23.3
+-21.1,21.1 23.1,23.3 23.1,23.3 23.1,23.3 23.1,23.3
+-23.1,23.3 23.1,23.3 23.1,23.3 23.1,23.3
+-24.1,24.4 22.1,22.2 22.1,22.2 22.1,22.2 22.1,22.2
+-23.1,23.3 22.1,22.2 22.1,22.2 22.1,22.2 22.1,22.2
+-24.1,24.4 22.1,22.2 21.1,21.1 21.1,21.1 21.1,21.1 21.1,21.1
+-HFA float:
+-14.1,14.4 14.1,14.4 14.1,14.4 14.1,14.4
+-13.1,13.3 14.1,14.4 14.1,14.4 14.1,14.4
+-12.1,12.2 14.1,14.4 14.1,14.4 14.1,14.4
+-11.1,11.1 14.1,14.4 14.1,14.4 14.1,14.4
+-12.1,12.2 13.1,13.3 13.1,13.3 13.1,13.3 13.1,13.3
+-11.1,11.1 13.1,13.3 13.1,13.3 13.1,13.3 13.1,13.3
+-13.1,13.3 13.1,13.3 13.1,13.3 13.1,13.3
+-14.1,14.4 12.1,12.2 12.1,12.2 12.1,12.2 12.1,12.2
+-13.1,13.3 12.1,12.2 12.1,12.2 12.1,12.2 12.1,12.2
+-14.1,14.4 12.1,12.2 11.1,11.1 11.1,11.1 11.1,11.1 11.1,11.1
+-MOVI:
+-0
+-abcd
+-abcd0000
+-abcd00000000
+-abcd000000000000
+-ffffabcd
+-abcdffff
+-ffffffffffffabcd
+-ffffffffabcdffff
+-ffffabcdffffffff
+-abcdffffffffffff
+-aaaaaaaa
+-5555555555555555
+-77777777
+-3333333333333333
+-f8f8f8f8
+-1e1e1e1e1e1e1e1e
+-3f803f80
+-1ff01ff01ff01ff
+-7fffc0
+-3fff80003fff800
+-7fffffffffe00
+-abcd1234
+-abcd00001234
+-abcd000000001234
+-abcd12340000
+-abcd000012340000
+-abcd123400000000
+-ffffffffabcd1234
+-ffffabcdffff1234
+-abcdffffffff1234
+-ffffabcd1234ffff
+-abcdffff1234ffff
+-abcd1234ffffffff
+-ffffef0123456789
+-abcdef012345ffff
+-abcdef0123456789
+-3e8
+-3e8
+-463
+-36d
+-fffffffffffff3e9
+-7b3e8
+-3421
+-ffffd3af
+-fffffc17
+-fffffffffffffc18
+-fffffc93
+-fffffffffffffc93
+-0
+-3e8
+-3e8
+-ffffffff
+-3e8
+-fffffffffffffc17
+-e0
+-3f8
+-318
+-3e8
+-3e8
+-3e8
+-7d0
+-0
+-7d0
+-0
+-1f4
+-0
+-1f4
+-0
+-1f4
+-0
+-1f4
+-0
+Test: 75_array_in_struct_init...
+Test: 76_dollars_in_identifiers...
+Test: 77_push_pop_macro...
+Test: 78_vla_label...
+--- 78_vla_label.expect	2026-04-30 08:32:42.000000000 -0500
++++ 78_vla_label.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,6 +0,0 @@
+-boom!
+-boom!
+-11
+-12
+-0
+-1
+Test: 79_vla_continue...
+--- 79_vla_continue.expect	2026-04-30 08:32:42.000000000 -0500
++++ 79_vla_continue.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,5 +0,0 @@
+-OK
+-OK
+-OK
+-OK
+-OK
+Test: 80_flexarray...
+Test: 81_types...
+Test: 82_attribs_position...
+Test: 83_utf8_in_identifiers...
+--- 83_utf8_in_identifiers.expect	2026-04-30 08:32:42.000000000 -0500
++++ 83_utf8_in_identifiers.output	2026-05-02 03:19:33.000000000 -0500
+@@ -1,2 +1,2 @@
+-привет=0.1
++привет=-1.99885
+ Lefèvre=2
+Test: 84_hex-float...
+Test: 86_memory-model...
+Test: 87_dead_code...
+Test: 88_codeopt...
+--- 88_codeopt.expect	2026-04-30 08:32:42.000000000 -0500
++++ 88_codeopt.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,3 +0,0 @@
+-okay
+-okay
+-okay: 42 1
+Test: 89_nocode_wanted...
+Test: 90_struct-init...
+--- 90_struct-init.expect	2026-04-30 08:32:42.000000000 -0500
++++ 90_struct-init.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,59 +0,0 @@
+-ce: 1 12
+-gs: 1 2 3 4
+-gs2: 1 2 3 4
+-gt: 68 65 6c 6c 6f 0 0 0 0 0 0 0 0 0 0 0 2a
+-gu: 3 5 6 7 8 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-gu2: 3 5 6 7 8 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-gu3: 3 5 6 7 8 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-gu4: 3 5 6 7 0 5 62 6c 61 0 0 0 0 0 0 0 0 0 0 0 0 0 2c
+-gs3: 1 2 3 4
+-gv: 3 4 5 6 68 61 68 61 0 0 0 0 0 0 0 0 0 0 0 0 2d 2e
+-gv2: 7 8 9 a 68 69 68 69 0 0 0 0 0 0 0 0 0 0 0 0 2f 30
+-gv3: 7 8 9 a 68 6f 68 6f 0 0 0 0 0 0 0 0 0 0 0 0 31 32
+-sinit16: 1 0 0 0 2 0 0 0
+-gw: 1 2 3 4 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0
+-gsu: 5 6
+-guv: 6 5 0 0
+-guv.b: 5
+-guv2: 8 7 0 0
+-guv3: 7 8 0 0
+-gssu1: 5 0 0 0 3 0 0 0
+-gssu2: 5 0 0 0 3 0 0 0
+-phdr: 6 5 4 3 0 0 0 0 0 0 0 0 0 0 0 0 9 8 7 6 0 0 0 0 0 0 0 0 0 0 0 0
+-ls: 1 2 3 4
+-ls2: 1 2 3 4
+-lt: 68 65 6c 6c 6f 0 0 0 0 0 0 0 0 0 0 0 2a
+-lu: 3 5 6 7 8 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-lu1: 3 1 2 3 4 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-lu2: 3 1 2 3 4 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-ls21: 1 2 3 4
+-lu21: 3 1 2 3 4 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-lu22: 3 1 2 3 4 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-lu3: 3 5 6 7 8 4 68 75 68 75 0 0 0 0 0 0 0 0 0 0 0 0 2b
+-lu4: 3 5 6 7 0 5 62 6c 61 0 0 0 0 0 0 0 0 0 0 0 0 0 2c
+-ls3: 1 2 3 4
+-lv: 3 4 5 6 68 61 68 61 0 0 0 0 0 0 0 0 0 0 0 0 2d 2e
+-lv2: 1 2 3 4 68 69 68 69 0 0 0 0 0 0 0 0 0 0 0 0 2f 30
+-lv3: 7 8 9 a 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 32
+-lt2: 0 9 9 9 43 43 43 43 42 42 42 0 0 0 0 0 1
+-lssu1: 5 0 0 0 3 0 0 0
+-lssu2: 5 0 0 0 3 0 0 0
+-flow: 9 8 7 6 0 0 0 0 0 0 0 0 0 0 0 0 6 5 4 3 0 0 0 0 0 0 0 0 0 0 0 0
+-ls4: 1 2 3 4
+-one
+-(0)
+-ni
+-four
+-one
+-(0)
+-ni
+-four
+- 1 1 2 2
+-mdfa glob: 30 - 3 4 5 6 7 8 3 4 5 6 7 8 3 4 5 6 7 8 9 0 0 10 0 0 97 98 99 0 0 0
+-mdfa locl: 30 - 3 4 5 6 7 8 3 4 5 6 7 8 3 4 5 6 7 8 9 0 0 10 0 0 97 98 99 0 0 0
+-sea_fill0: okay
+-sea_fill1: okay
+-sea_fill2: okay
+-1438
+-test_init_struct_from_struct: 1 2 3 4 - 1 2 3 4 - 3 4 5 6
+-test_init_bf: 1 2 3
+Test: 91_ptr_longlong_arith32...
+--- 91_ptr_longlong_arith32.expect	2026-04-30 08:32:42.000000000 -0500
++++ 91_ptr_longlong_arith32.output	2026-05-02 03:19:33.000000000 -0500
+@@ -1 +1 @@
+-data = "0123-5678"
++data = "012345608"
+Test: 92_enum_bitfield...
+Test: 93_integer_promotion...
+Test: 94_generic...
+Test: 95_bitfields...
+--- 95_bitfields.expect	2026-04-30 08:32:42.000000000 -0500
++++ 95_bitfields.output	2026-05-02 03:19:34.000000000 -0500
+@@ -1,173 +1,173 @@
+ ---- TEST 1 ----
+-bits in use : 0000001FFFFFFFFF007F0FFF
+-bits as set : 000000076055555500440333
+-values      : 333 44 555555 06 07
++bits in use : 1F000000FFFFFFFFFF7F0000
++bits as set : 070000005555556033440000
++values      : 433 44 555555 06 07
+ align/size  : 4 12
+ 
+ ---- TEST 2 ----
+-bits in use : 000000000000003F7FFFFFFFFFFFFFFF00000000003F0FFF
+-bits as set : 0000000000000025123456789ABCDEF000000000001E0003
+-values      : 03 1e 123456789abcdef0 05 fffffffe
++bits in use : 000000003000000FFFFFFFFFFFFFFF7F00000000FF3F0000
++bits as set : 0000000020000005F0DEBC9A7856341200000000031E0000
++values      : fffffe03 1e 123456789abcdef0 05 fffffffe
+ align/size  : 8 24
+ 
+ ---- TEST 3 ----
+-bits in use : 001F1F1F000003FF
+-bits as set : 000E0619000002F5
+-values      : 15 17 19 06 0e
++bits in use : 1F001F00FF030000
++bits as set : 0E000600F5020000
++values      : 15 17 0e 06 0e
+ align/size  : 4 8
+ 
+ ---- TEST 4 ----
+-bits in use : 0007FFFF00000027
+-bits as set : 00078F0F00000023
++bits in use : FFFF070027000000
++bits as set : 0F8F070023000000
+ values      : 03 ffffffff 0f fffffff8 78
+ align/size  : 4 8
+ 
+ ---- TEST 5 ----
+-bits in use : FFFFFF3FFFFFFFFF000000003FFFFFFF00001FFFFFFFFFFF
+-bits as set : 007744000000007800000000300000000000000123456789
+-values      : 0000000123456789 f0000000 0000000000000078 44 77
++bits in use : FFFFFFFF3F00000000000000FFFFFF3FFFFFFFFFFF1F0000
++bits as set : 770045000000000000000000000000308967452301000000
++values      : 0000000123456789 f0000000 0000000000450077 45 77
+ align/size  : 8 24
+ 
+ ---- TEST 6 ----
+-bits in use : 0000007000FFFFFFFFFFFFFF
+-bits as set : 00000030002001FD00000004
++bits in use : 700000FFFF0000FFFFFFFFFF
++bits as set : 30000001200000FD04000000
+ values      : 01 02 03 04 fffffffd
+ align/size  : 4 12
+ 
+ ---- TEST 7 ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
++bits in use : FFFFFF3F0000FFFF
++bits as set : 0100260000000500
+ values      : 01 00 ffffffff 04 05
+-align/size  : 8 8
++align/size  : 4 8
+ 
+ 
+ 
+ ---- TEST 1 - PACKED ----
+-bits in use : FFFFFFFFFFFFFF
+-bits as set : 3B02AAAAAC4333
+-values      : 333 44 555555 06 07
++bits in use : FFF8FFFFFF0700
++bits as set : 3B28AAAA020400
++values      : 2aa 40 555545 06 07
+ align/size  : 1 7
+ 
+ ---- TEST 2 - PACKED ----
+-bits in use : 7FFFFFFFFFFFFFFFFFFFFF
+-bits as set : 4A48D159E26AF37BC1E003
+-values      : 03 1e 123456789abcdef0 05 fffffffe
++bits in use : 7FFFFFFFFFFFFFFFFF0300
++bits as set : 4A48D159E26AF37BC00100
++values      : 7b 1c 123456789abcdef0 05 fffffffe
+ align/size  : 1 11
+ 
+ ---- TEST 3 - PACKED ----
+-bits in use : 7FFF000003FF
+-bits as set : 38D9000002F5
+-values      : 15 17 19 06 0e
++bits in use : FC1FFF030000
++bits as set : B81AF5020000
++values      : 15 17 1a fffffff5 0e
+ align/size  : 1 6
+ 
+ ---- TEST 4 - PACKED ----
+-bits in use : 07FFFF00000027
+-bits as set : 078F0F00000023
+-values      : 03 ffffffff 0f fffffff8 78
++bits in use : 07F01F27000000
++bits as set : 07800F23000000
++values      : 03 ffffffff 0f fffffffc 78
+ align/size  : 1 7
+ 
+ ---- TEST 5 - PACKED ----
+-bits in use : FFFFFF07FFFFFFFFFFFFFFFF9FFFFFFFFFFF
+-bits as set : 007744000000000F18000000000123456789
+-values      : 0000000123456789 f0000000 0000000000000078 44 77
++bits in use : FFFFFFFFFFFF07001FFFFFFFFFFFFF1F0000
++bits as set : 770054000000000018000000452301000000
++values      : 0000000123450000 f0000000 00000000000002a0 54 77
+ align/size  : 1 18
+ 
+ ---- TEST 6 - PACKED ----
+-bits in use : 007000FFFFFFFFFFFFFF
+-bits as set : 0030002001FD00000004
+-values      : 01 02 03 04 fffffffd
++bits in use : F0FF0F0000FFFFFFFFFF
++bits as set : 2031000000FD04000000
++values      : 31 02 03 04 fffffffd
+ align/size  : 1 10
+ 
+ ---- TEST 7 - PACKED ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
+-values      : 01 00 ffffffff 04 05
++bits in use : FFFFFFFF00000000
++bits as set : 2906050000000000
++values      : 629 00 ffffffff c5 05
+ align/size  : 1 8
+ 
+ 
+ 
+ ---- TEST 1 - WITH ALIGN ----
+-bits in use : 000000000000001FFFFFFFFF007F0FFF
+-bits as set : 00000000000000076055555500440333
+-values      : 333 44 555555 06 07
++bits in use : 000000001F000000FFFFFFFFFF7F0000
++bits as set : 00000000070000005555556033440000
++values      : 433 44 555555 06 07
+ align/size  : 16 16
+ 
+ ---- TEST 2 - WITH ALIGN ----
+-bits in use : 0000000000000000000000000000003F7FFFFFFFFFFFFFFF00000000003F0FFF
+-bits as set : 00000000000000000000000000000025123456789ABCDEF000000000001E0003
+-values      : 03 1e 123456789abcdef0 05 fffffffe
++bits in use : 0000000000000000000000003000000FFFFFFFFFFFFFFF7F00000000FF3F0000
++bits as set : 00000000000000000000000020000005F0DEBC9A7856341200000000031E0000
++values      : fffffe03 1e 123456789abcdef0 05 fffffffe
+ align/size  : 16 32
+ 
+ ---- TEST 3 - WITH ALIGN ----
+-bits in use : 0000000000000000000000000000001F000000000000000000001F1F000003FF
+-bits as set : 0000000000000000000000000000000E000000000000000000000619000002F5
++bits in use : 00000000000000000000000000001F0000000000000000001F001F00FF030000
++bits as set : 00000000000000000000000000000E00000000000000000019000600F5020000
+ values      : 15 17 19 06 0e
+ align/size  : 16 32
+ 
+ ---- TEST 4 - WITH ALIGN ----
+-bits in use : 0007FFFF00000027
+-bits as set : 00078F0F00000023
++bits in use : FFFF070027000000
++bits as set : 0F8F070023000000
+ values      : 03 ffffffff 0f fffffff8 78
+ align/size  : 4 8
+ 
+ ---- TEST 5 - WITH ALIGN ----
+-bits in use : FFFFFF3FFFFFFFFF000000003FFFFFFF00001FFFFFFFFFFF
+-bits as set : 007744000000007800000000300000000000000123456789
+-values      : 0000000123456789 f0000000 0000000000000078 44 77
++bits in use : FFFFFFFF3F00000000000000FFFFFF3FFFFFFFFFFF1F0000
++bits as set : 770045000000000000000000000000308967452301000000
++values      : 0000000123456789 f0000000 0000000000450077 45 77
+ align/size  : 8 24
+ 
+ ---- TEST 6 - WITH ALIGN ----
+-bits in use : 0000007000FFFFFFFFFFFFFF
+-bits as set : 00000030002001FD00000004
++bits in use : 700000FFFF0000FFFFFFFFFF
++bits as set : 30000001200000FD04000000
+ values      : 01 02 03 04 fffffffd
+ align/size  : 4 12
+ 
+ ---- TEST 7 - WITH ALIGN ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
++bits in use : FFFFFF3F0000FFFF
++bits as set : 0100260000000500
+ values      : 01 00 ffffffff 04 05
+-align/size  : 8 8
++align/size  : 4 8
+ 
+ 
+ 
+ ---- TEST 1 - PACKED - WITH ALIGN ----
+-bits in use : 000000000000000000FFFFFFFFFFFFFF
+-bits as set : 0000000000000000003B02AAAAAC4333
+-values      : 333 44 555555 06 07
++bits in use : 000000000000F8800700F8FFFFFF0700
++bits as set : 00000000000038000300A8AAAA020400
++values      : 2aa 40 555555 06 07
+ align/size  : 16 16
+ 
+ ---- TEST 2 - PACKED - WITH ALIGN ----
+-bits in use : 3F01FFFFFFFFFFFFFFFFFFFF
+-bits as set : 250048D159E26AF37BC1E003
+-values      : 03 1e 123456789abcdef0 05 fffffffe
++bits in use : 3F01FFFFFFFFFFFFFFFF0300
++bits as set : 250048D159E26AF37BC00100
++values      : 7b 1c 123456789abcdef0 05 fffffffe
+ align/size  : 1 12
+ 
+ ---- TEST 3 - PACKED - WITH ALIGN ----
+-bits in use : 1F03FF000003FF
+-bits as set : 0E00D9000002F5
+-values      : 15 17 19 06 0e
++bits in use : 1FE01FFF030000
++bits as set : 0EC01AF5020000
++values      : 15 17 1a fffffff6 0e
+ align/size  : 1 7
+ 
+ ---- TEST 4 - PACKED - WITH ALIGN ----
+-bits in use : 07FFFF00000027
+-bits as set : 078F0F00000023
+-values      : 03 ffffffff 0f fffffff8 78
++bits in use : 07F01F27000000
++bits as set : 07800F23000000
++values      : 03 ffffffff 0f fffffffc 78
+ align/size  : 1 7
+ 
+ ---- TEST 5 - PACKED - WITH ALIGN ----
+-bits in use : FFFFFF07FFFFFFFFFFFFFFFF9FFFFFFFFFFF
+-bits as set : 007744000000000F18000000000123456789
+-values      : 0000000123456789 f0000000 0000000000000078 44 77
++bits in use : FFFFFFFFFFFF07001FFFFFFFFFFFFF1F0000
++bits as set : 770054000000000018000000452301000000
++values      : 0000000123450000 f0000000 00000000000002a0 54 77
+ align/size  : 1 18
+ 
+ ---- TEST 6 - PACKED - WITH ALIGN ----
+-bits in use : 007000FFFFFFFFFFFFFF
+-bits as set : 0030002001FD00000004
+-values      : 01 02 03 04 fffffffd
++bits in use : F0FF0F0000FFFFFFFFFF
++bits as set : 2031000000FD04000000
++values      : 31 02 03 04 fffffffd
+ align/size  : 1 10
+ 
+ ---- TEST 7 - PACKED - WITH ALIGN ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
+-values      : 01 00 ffffffff 04 05
++bits in use : FFFFFFFF00000000
++bits as set : 2906050000000000
++values      : 629 00 ffffffff c5 05
+ align/size  : 1 8
+Test: 95_bitfields_ms...
+--- 95_bitfields_ms.expect	2026-04-30 08:32:42.000000000 -0500
++++ 95_bitfields_ms.output	2026-05-02 03:19:35.000000000 -0500
+@@ -1,173 +1,173 @@
+ ---- TEST 1 - MS-BITFIELDS ----
+-bits in use : 0000001FFFFFFFFF0000007F00000FFF
+-bits as set : 00000007605555550000004400000333
++bits in use : 1F000000FFFFFFFF0000007FFF0F0000
++bits as set : 07000000555555600000004433030000
+ values      : 333 44 555555 06 07
+ align/size  : 4 16
+ 
+ ---- TEST 2 - MS-BITFIELDS ----
+-bits in use : 0000000000000003000000000000000F7FFFFFFFFFFFFFFF0000003F00000FFF
+-bits as set : 00000000000000020000000000000005123456789ABCDEF00000001E00000003
++bits in use : 0300000000000000000000000000000FFFFFFFFFFFFFFF7F0000003FFF0F0000
++bits as set : 02000000000000000000000000000005F0DEBC9A785634120000001E03000000
+ values      : 03 1e 123456789abcdef0 05 fffffffffffffffe
+ align/size  : 8 32
+ 
+ ---- TEST 3 - MS-BITFIELDS ----
+-bits in use : 001F001F0000001F000003FF
+-bits as set : 000E000600000019000002F5
++bits in use : 1F00001F1F000000FF030000
++bits as set : 0E00000619000000F5020000
+ values      : 15 17 19 06 0e
+ align/size  : 4 12
+ 
+ ---- TEST 4 - MS-BITFIELDS ----
+-bits in use : 0007FFFF00000027
+-bits as set : 00078F0F00000023
++bits in use : FFFF070027000000
++bits as set : 0F8F070023000000
+ values      : 03 ffffffff 0f fffffff8 78
+ align/size  : 4 8
+ 
+ ---- TEST 5 - MS-BITFIELDS ----
+-bits in use : 00000000FFFF00FF0000003FFFFFFFFF000000003FFFFFFF00001FFFFFFFFFFF
+-bits as set : 0000000000770044000000000000007800000000300000000000000123456789
++bits in use : 00000000FFFF00FFFFFFFFFF3F000000FFFFFF3F00000000FFFFFFFFFF1F0000
++bits as set : 0000000077000044780000000000000000000030000000008967452301000000
+ values      : 0000000123456789 fffffffff0000000 0000000000000078 44 77
+ align/size  : 8 32
+ 
+ ---- TEST 6 - MS-BITFIELDS ----
+-bits in use : 00000000000000700000FFFF000000FFFFFFFFFF
+-bits as set : 000000000000003000002001000000FD00000004
++bits in use : 0000000070000000FFFF0000000000FFFFFFFFFF
++bits as set : 000000003000000001200000000000FD04000000
+ values      : 01 02 03 04 fffffffd
+ align/size  : 4 20
+ 
+ ---- TEST 7 - MS-BITFIELDS ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
+-values      : 0000000000000001 0000000000000000 ffffffffffffffff 0000000000000004 0000000000000005
+-align/size  : 8 8
++bits in use : FFFFFF3F0000FFFF
++bits as set : 0100260000000500
++values      : 01 00 ffffffff 04 05
++align/size  : 4 8
+ 
+ 
+ 
+ ---- TEST 1 - MS-BITFIELDS - PACKED ----
+-bits in use : 0000001FFFFFFFFF7F00000FFF
+-bits as set : 00000007605555554400000333
++bits in use : 1F000000FFFFFFFF7FFF0F0000
++bits as set : 07000000555555604433030000
+ values      : 333 44 555555 06 07
+ align/size  : 1 13
+ 
+ ---- TEST 2 - MS-BITFIELDS - PACKED ----
+-bits in use : 00000000000000030F7FFFFFFFFFFFFFFF3F00000FFF
+-bits as set : 000000000000000205123456789ABCDEF01E00000003
++bits in use : 03000000000000000FFFFFFFFFFFFFFF7F3FFF0F0000
++bits as set : 020000000000000005F0DEBC9A785634121E03000000
+ values      : 03 1e 123456789abcdef0 05 fffffffffffffffe
+ align/size  : 1 22
+ 
+ ---- TEST 3 - MS-BITFIELDS - PACKED ----
+-bits in use : 001F1F0000001F000003FF
+-bits as set : 000E0600000019000002F5
++bits in use : 1F001F1F000000FF030000
++bits as set : 0E000619000000F5020000
+ values      : 15 17 19 06 0e
+ align/size  : 1 11
+ 
+ ---- TEST 4 - MS-BITFIELDS - PACKED ----
+-bits in use : 0007FFFF00000027
+-bits as set : 00078F0F00000023
++bits in use : FFFF070027000000
++bits as set : 0F8F070023000000
+ values      : 03 ffffffff 0f fffffff8 78
+ align/size  : 1 8
+ 
+ ---- TEST 5 - MS-BITFIELDS - PACKED ----
+-bits in use : FFFFFF0000003FFFFFFFFF000000003FFFFFFF00001FFFFFFFFFFF
+-bits as set : 007744000000000000007800000000300000000000000123456789
++bits in use : FFFFFFFFFFFFFF3F000000FFFFFF3F00000000FFFFFFFFFF1F0000
++bits as set : 770044780000000000000000000030000000008967452301000000
+ values      : 0000000123456789 fffffffff0000000 0000000000000078 44 77
+ align/size  : 1 27
+ 
+ ---- TEST 6 - MS-BITFIELDS - PACKED ----
+-bits in use : 00000000700000FFFFFFFFFFFFFF
+-bits as set : 000000003000002001FD00000004
++bits in use : 0070000000FFFF0000FFFFFFFFFF
++bits as set : 003000000001200000FD04000000
+ values      : 01 02 03 04 fffffffd
+ align/size  : 1 14
+ 
+ ---- TEST 7 - MS-BITFIELDS - PACKED ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
+-values      : 0000000000000001 0000000000000000 ffffffffffffffff 0000000000000004 0000000000000005
++bits in use : FFFFFF3F0000FFFF
++bits as set : 0100260000000500
++values      : 01 00 ffffffff 04 05
+ align/size  : 1 8
+ 
+ 
+ 
+ ---- TEST 1 - MS-BITFIELDS - WITH ALIGN ----
+-bits in use : 0000001FFFFFFFFF0000007F00000FFF
+-bits as set : 00000007605555550000004400000333
++bits in use : 1F000000FFFFFFFF0000007FFF0F0000
++bits as set : 07000000555555600000004433030000
+ values      : 333 44 555555 06 07
+ align/size  : 16 16
+ 
+ ---- TEST 2 - MS-BITFIELDS - WITH ALIGN ----
+-bits in use : 0000000000000003000000000000000F7FFFFFFFFFFFFFFF0000003F00000FFF
+-bits as set : 00000000000000020000000000000005123456789ABCDEF00000001E00000003
++bits in use : 0300000000000000000000000000000FFFFFFFFFFFFFFF7F0000003FFF0F0000
++bits as set : 02000000000000000000000000000005F0DEBC9A785634120000001E03000000
+ values      : 03 1e 123456789abcdef0 05 fffffffffffffffe
+ align/size  : 16 32
+ 
+ ---- TEST 3 - MS-BITFIELDS - WITH ALIGN ----
+-bits in use : 0000000000000000000000000000001F000000000000001F0000001F000003FF
+-bits as set : 0000000000000000000000000000000E000000000000000600000019000002F5
++bits in use : 00000000000000000000000000001F00000000000000001F1F000000FF030000
++bits as set : 00000000000000000000000000000E00000000000000000619000000F5020000
+ values      : 15 17 19 06 0e
+ align/size  : 16 32
+ 
+ ---- TEST 4 - MS-BITFIELDS - WITH ALIGN ----
+-bits in use : 0007FFFF00000027
+-bits as set : 00078F0F00000023
++bits in use : FFFF070027000000
++bits as set : 0F8F070023000000
+ values      : 03 ffffffff 0f fffffff8 78
+ align/size  : 4 8
+ 
+ ---- TEST 5 - MS-BITFIELDS - WITH ALIGN ----
+-bits in use : 00000000FFFF00FF0000003FFFFFFFFF000000003FFFFFFF00001FFFFFFFFFFF
+-bits as set : 0000000000770044000000000000007800000000300000000000000123456789
++bits in use : 00000000FFFF00FFFFFFFFFF3F000000FFFFFF3F00000000FFFFFFFFFF1F0000
++bits as set : 0000000077000044780000000000000000000030000000008967452301000000
+ values      : 0000000123456789 fffffffff0000000 0000000000000078 44 77
+ align/size  : 8 32
+ 
+ ---- TEST 6 - MS-BITFIELDS - WITH ALIGN ----
+-bits in use : 00000000000000700000FFFF000000FFFFFFFFFF
+-bits as set : 000000000000003000002001000000FD00000004
++bits in use : 0000000070000000FFFF0000000000FFFFFFFFFF
++bits as set : 000000003000000001200000000000FD04000000
+ values      : 01 02 03 04 fffffffd
+ align/size  : 4 20
+ 
+ ---- TEST 7 - MS-BITFIELDS - WITH ALIGN ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
+-values      : 0000000000000001 0000000000000000 ffffffffffffffff 0000000000000004 0000000000000005
+-align/size  : 8 8
++bits in use : FFFFFF3F0000FFFF
++bits as set : 0100260000000500
++values      : 01 00 ffffffff 04 05
++align/size  : 4 8
+ 
+ 
+ 
+ ---- TEST 1 - MS-BITFIELDS - PACKED - WITH ALIGN ----
+-bits in use : 0000000000001FFFFFFFFF7F00000FFF
+-bits as set : 00000000000007605555554400000333
++bits in use : 0000001F000000FFFFFFFF7FFF0F0000
++bits as set : 00000007000000555555604433030000
+ values      : 333 44 555555 06 07
+ align/size  : 16 16
+ 
+ ---- TEST 2 - MS-BITFIELDS - PACKED - WITH ALIGN ----
+-bits in use : 00000000000000030F0000007FFFFFFFFFFFFFFF3F00000FFF
+-bits as set : 000000000000000205000000123456789ABCDEF01E00000003
++bits in use : 03000000000000000F000000FFFFFFFFFFFFFF7F3FFF0F0000
++bits as set : 020000000000000005000000F0DEBC9A785634121E03000000
+ values      : 03 1e 123456789abcdef0 05 fffffffffffffffe
+ align/size  : 16 25
+ 
+ ---- TEST 3 - MS-BITFIELDS - PACKED - WITH ALIGN ----
+-bits in use : 001F000000000000001F0000001F000003FF
+-bits as set : 000E000000000000000600000019000002F5
++bits in use : 1F00000000000000001F1F000000FF030000
++bits as set : 0E00000000000000000619000000F5020000
+ values      : 15 17 19 06 0e
+ align/size  : 16 18
+ 
+ ---- TEST 4 - MS-BITFIELDS - PACKED - WITH ALIGN ----
+-bits in use : 0007FFFF00000027
+-bits as set : 00078F0F00000023
++bits in use : FFFF070027000000
++bits as set : 0F8F070023000000
+ values      : 03 ffffffff 0f fffffff8 78
+ align/size  : 1 8
+ 
+ ---- TEST 5 - MS-BITFIELDS - PACKED - WITH ALIGN ----
+-bits in use : FFFFFF0000003FFFFFFFFF000000003FFFFFFF00001FFFFFFFFFFF
+-bits as set : 007744000000000000007800000000300000000000000123456789
++bits in use : FFFFFFFFFFFFFF3F000000FFFFFF3F00000000FFFFFFFFFF1F0000
++bits as set : 770044780000000000000000000030000000008967452301000000
+ values      : 0000000123456789 fffffffff0000000 0000000000000078 44 77
+ align/size  : 1 27
+ 
+ ---- TEST 6 - MS-BITFIELDS - PACKED - WITH ALIGN ----
+-bits in use : 00000000700000FFFFFFFFFFFFFF
+-bits as set : 000000003000002001FD00000004
++bits in use : 0070000000FFFF0000FFFFFFFFFF
++bits as set : 003000000001200000FD04000000
+ values      : 01 02 03 04 fffffffd
+ align/size  : 1 14
+ 
+ ---- TEST 7 - MS-BITFIELDS - PACKED - WITH ALIGN ----
+-bits in use : 3FFFFFFFFFFF0000
+-bits as set : 0026000100050000
+-values      : 0000000000000001 0000000000000000 ffffffffffffffff 0000000000000004 0000000000000005
++bits in use : FFFFFF3F0000FFFF
++bits as set : 0100260000000500
++values      : 01 00 ffffffff 04 05
+ align/size  : 1 8
+Test: 96_nodata_wanted...
+--- 96_nodata_wanted.expect	2026-04-30 08:32:42.000000000 -0500
++++ 96_nodata_wanted.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,26 +0,0 @@
+-[test_static_data_error]
+-96_nodata_wanted.c:7: error: initializer element is not computable at load time
+-
+-[test_static_nodata_error]
+-96_nodata_wanted.c:14: error: initializer element is not computable at load time
+-
+-[test_global_data_error]
+-96_nodata_wanted.c:20: error: initializer element is not computable at load time
+-
+-[test_local_data_noerror]
+-96_nodata_wanted.c:25: warning: assignment makes integer from pointer without a cast
+-96_nodata_wanted.c:25: warning: cast between pointer and integer of different size
+-
+-[test_data_suppression_off]
+-data:
+-  8 - 8.0 - 8.0 - main - static string
+-  333 44 555555 6 7
+-size of data/text:
+-  non-zero/non-zero
+-
+-[test_data_suppression_on]
+-size of data/text:
+-  zero/zero
+-
+-[test_static_data]
+-a = 1
+Test: 97_utf8_string_literal...
+Test: 100_c99array-decls...
+Test: 101_cleanup...
+--- 101_cleanup.expect	2026-04-30 08:32:42.000000000 -0500
++++ 101_cleanup.output	2026-05-02 03:18:46.000000000 -0500
+@@ -1,75 +0,0 @@
+-c: a
+-c: o
+-glob_i: 65536
+-oo: 2.600000
+-c: f
+-str: I don't think this should be print(but gcc got it wrong too)
+-because what if free was call inside cleanup function I don't think this should be print(but gcc got it wrong too)
+-should be print before
+-str: that
+-str: this should appear only once
+-str: -that2
+-str: -that
+-str: test2
+-str: one
+----- 1
+-str: two
+-str: three
+--- loop 0 --
+-100
+-100
+-100
+-100
+-100
+-100
+-100
+-100
+-100
+-100
+-10
+--- loop 1 --
+-200
+-200
+-200
+-200
+-200
+-200
+-200
+-200
+-200
+-200
+-10
+--- loop 2 --
+-300
+-0
+--- loop 3 --
+-400
+-500
+-400
+-after break
+-1000
+-42
+-42
+-42 43 44 45 46 47 48 49
+-42 43 44 45 46 47 48 49
+-42 43 44 45
+-42 43 44 45
+-42 43
+-42 43
+-42.000000
+-42.000000
+-42 43
+-42 43
+-42.000000 43.000000 44.000000 45.000000
+-42.000000 43.000000 44.000000 45.000000
+-42
+-42
+----- 0
+----- 1
+-str: plop
+-str: tata !
+-str: 3
+-str: 2
+-str: 1
+-str: last goto out
+-str: wololo
+Test: 102_alignas...
+--- 102_alignas.expect	2026-04-30 08:32:42.000000000 -0500
++++ 102_alignas.output	2026-05-02 03:19:40.000000000 -0500
+@@ -1,2 +1 @@
+-102_alignas.c:4: warning: type defaults to int
+ 1 1 1 1
+Test: 103_implicit_memmove...
+Test: 104_inline...
+--- 104_inline.expect	2026-04-30 08:32:42.000000000 -0500
++++ 104_inline.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,39 +0,0 @@
+-0 inline_inline_2decl_only
+-0 inline_inline_undeclared
+-0 inline_inline_predeclared
+-0 inline_inline_postdeclared
+-0 inline_inline_prepostdeclared
+-0 inline_inline_undeclared2
+-0 inline_inline_predeclared2
+-0 inline_inline_postdeclared2
+-0 inline_inline_prepostdeclared2
+-1 extern_extern_postdeclared
+-1 extern_extern_postdeclared2
+-1 extern_extern_predeclared
+-1 extern_extern_predeclared2
+-1 extern_extern_prepostdeclared
+-1 extern_extern_prepostdeclared2
+-1 extern_extern_undeclared
+-1 extern_extern_undeclared2
+-1 extern_postdeclared
+-1 extern_postdeclared2
+-1 extern_predeclared
+-1 extern_predeclared2
+-1 extern_prepostdeclared
+-1 extern_undeclared
+-1 extern_undeclared2
+-1 inst2_extern_inline_postdeclared
+-1 inst2_extern_inline_predeclared
+-1 inst3_extern_inline_predeclared
+-1 inst_extern_inline_postdeclared
+-1 inst_extern_inline_predeclared
+-1 main
+-1 noinst_extern_inline_func
+-1 noinst_extern_inline_postdeclared
+-1 noinst_extern_inline_postdeclared2
+-1 noinst_extern_inline_undeclared
+-0 noinst_static_inline_postdeclared
+-0 noinst2_static_inline_postdeclared
+-0 noinst_static_inline_predeclared
+-0 noinst2_static_inline_predeclared
+-0 static_func
+Test: 105_local_extern...
+Test: 106_versym...
+Test: 107_stack_safe...
+--- 107_stack_safe.expect	2026-04-30 08:32:42.000000000 -0500
++++ 107_stack_safe.output	2026-05-02 03:19:41.000000000 -0500
+@@ -1 +1,4 @@
+-1 2 3 4
+\ No newline at end of file
++dyld: Symbol not found: ___floatundidf
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./107_stack_safe.exe
++  Expected in: /usr/lib/libSystem.B.dylib
++
+Test: 108_constructor...
+--- 108_constructor.expect	2026-04-30 08:32:42.000000000 -0500
++++ 108_constructor.output	2026-05-02 03:19:41.000000000 -0500
+@@ -1,3 +1 @@
+-constructor
+ main
+-destructor
+Test: 109_float_struct_calling...
+--- 109_float_struct_calling.expect	2026-04-30 08:32:42.000000000 -0500
++++ 109_float_struct_calling.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1 +0,0 @@
+-5.000000
+Test: 110_average...
+--- 110_average.expect	2026-04-30 08:32:42.000000000 -0500
++++ 110_average.output	2026-05-02 03:19:44.000000000 -0500
+@@ -1 +1,4 @@
+-15 2
++dyld: Symbol not found: ___floatdidf
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./110_average.exe
++  Expected in: /usr/lib/libSystem.B.dylib
++
+Test: 111_conversion...
+--- 111_conversion.expect	2026-04-30 08:32:42.000000000 -0500
++++ 111_conversion.output	2026-05-02 03:19:45.000000000 -0500
+@@ -1,2 +1,4 @@
+-42
+-1234567890
++dyld: Symbol not found: ___fixunsdfdi
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./111_conversion.exe
++  Expected in: /usr/lib/libSystem.B.dylib
++
+Test: 112_backtrace...
+--- 112_backtrace.expect	2026-04-30 08:32:42.000000000 -0500
++++ 112_backtrace.output	2026-05-02 03:19:46.000000000 -0500
+@@ -1,162 +1,4 @@
+-[test_backtrace_1]
+-* main
+-* f1()
+-* f2()
+-* f3()
+-112_backtrace.c:9: at f3: RUNTIME ERROR: invalid memory access
+-112_backtrace.c:14: by f2
+-112_backtrace.c:19: by f1
+-112_backtrace.c:24: by main
+-[returns 255]
++dyld: Symbol not found: ___bound_memset
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./112_backtrace.exe
++  Expected in: /usr/lib/libSystem.B.dylib
+ 
+-[test_bcheck_1]
+-* main
+-* f1()
+-112_backtrace.c:38: at f1: BCHECK: invalid pointer ........, size 0x? in memmove dest
+-112_backtrace.c:43: by main
+-[returns 255]
+-
+-[test_tcc_backtrace_2]
+-* main
+-* f1()
+-112_backtrace.c:64: at f1: Hello from f1!
+-112_backtrace.c:70: by main
+-* f2()
+-* exit f2
+-[returns 34]
+-
+-[test_tcc_backtrace_3]
+-* main
+-[returns 1]
+-
+-[test_bcheck_100]
+-112_backtrace.c:107: at main: BCHECK: invalid pointer ........, size 0x? in memcpy dest
+-[returns 255]
+-
+-[test_bcheck_101]
+-112_backtrace.c:109: at main: BCHECK: invalid pointer ........, size 0x? in memcpy src
+-[returns 255]
+-
+-[test_bcheck_102]
+-112_backtrace.c:111: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in memcpy
+-[returns 255]
+-
+-[test_bcheck_103]
+-112_backtrace.c:113: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in memcpy
+-[returns 255]
+-
+-[test_bcheck_104]
+-112_backtrace.c:115: at main: BCHECK: invalid pointer ........, size 0x? in memcmp s1
+-[returns 255]
+-
+-[test_bcheck_105]
+-112_backtrace.c:117: at main: BCHECK: invalid pointer ........, size 0x? in memcmp s2
+-[returns 255]
+-
+-[test_bcheck_106]
+-112_backtrace.c:119: at main: BCHECK: invalid pointer ........, size 0x? in memmove dest
+-[returns 255]
+-
+-[test_bcheck_107]
+-112_backtrace.c:121: at main: BCHECK: invalid pointer ........, size 0x? in memmove src
+-[returns 255]
+-
+-[test_bcheck_108]
+-112_backtrace.c:123: at main: BCHECK: invalid pointer ........, size 0x? in memset
+-[returns 255]
+-
+-[test_bcheck_109]
+-112_backtrace.c:125: at main: BCHECK: invalid pointer ........, size 0x? in strlen
+-[returns 255]
+-
+-[test_bcheck_110]
+-112_backtrace.c:127: at main: BCHECK: invalid pointer ........, size 0x? in strcpy dest
+-[returns 255]
+-
+-[test_bcheck_111]
+-112_backtrace.c:129: at main: BCHECK: invalid pointer ........, size 0x? in strcpy src
+-[returns 255]
+-
+-[test_bcheck_112]
+-112_backtrace.c:131: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strcpy
+-[returns 255]
+-
+-[test_bcheck_113]
+-112_backtrace.c:133: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strcpy
+-[returns 255]
+-
+-[test_bcheck_114]
+-112_backtrace.c:135: at main: BCHECK: invalid pointer ........, size 0x? in strncpy dest
+-[returns 255]
+-
+-[test_bcheck_115]
+-112_backtrace.c:137: at main: BCHECK: invalid pointer ........, size 0x? in strncpy src
+-[returns 255]
+-
+-[test_bcheck_116]
+-112_backtrace.c:139: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strncpy
+-[returns 255]
+-
+-[test_bcheck_117]
+-112_backtrace.c:141: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strncpy
+-[returns 255]
+-
+-[test_bcheck_118]
+-112_backtrace.c:143: at main: BCHECK: invalid pointer ........, size 0x? in strcmp s1
+-[returns 255]
+-
+-[test_bcheck_119]
+-112_backtrace.c:145: at main: BCHECK: invalid pointer ........, size 0x? in strcmp s2
+-[returns 255]
+-
+-[test_bcheck_120]
+-112_backtrace.c:147: at main: BCHECK: invalid pointer ........, size 0x? in strncmp s1
+-[returns 255]
+-
+-[test_bcheck_121]
+-112_backtrace.c:149: at main: BCHECK: invalid pointer ........, size 0x? in strncmp s2
+-[returns 255]
+-
+-[test_bcheck_122]
+-112_backtrace.c:151: at main: BCHECK: invalid pointer ........, size 0x? in strcat dest
+-[returns 255]
+-
+-[test_bcheck_123]
+-112_backtrace.c:153: at main: BCHECK: invalid pointer ........, size 0x? in strcat dest
+-[returns 255]
+-
+-[test_bcheck_124]
+-112_backtrace.c:155: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strcat
+-[returns 255]
+-
+-[test_bcheck_125]
+-112_backtrace.c:157: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strcat
+-[returns 255]
+-
+-[test_bcheck_126]
+-112_backtrace.c:159: at main: BCHECK: invalid pointer ........, size 0x? in strncat dest
+-[returns 255]
+-
+-[test_bcheck_127]
+-112_backtrace.c:161: at main: BCHECK: invalid pointer ........, size 0x? in strncat dest
+-[returns 255]
+-
+-[test_bcheck_128]
+-112_backtrace.c:163: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strncat
+-[returns 255]
+-
+-[test_bcheck_129]
+-112_backtrace.c:165: at main: BCHECK: overlapping regions ........(0x?), ........(0x?) in strncat
+-[returns 255]
+-
+-[test_bcheck_130]
+-112_backtrace.c:167: at main: BCHECK: invalid pointer ........, size 0x? in strchr
+-[returns 255]
+-
+-[test_bcheck_131]
+-112_backtrace.c:169: at main: BCHECK: invalid pointer ........, size 0x? in strrchr
+-[returns 255]
+-
+-[test_bcheck_132]
+-112_backtrace.c:171: at main: BCHECK: invalid pointer ........, size 0x? in strdup
+-[returns 255]
+Test: 113_btdll...
+--- 113_btdll.expect	2026-04-30 08:32:42.000000000 -0500
++++ 113_btdll.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,6 +0,0 @@
+-113_btdll.c:12: at f_1: hello from f_1() / 113_btdll.c:12
+-113_btdll.c:37: by main
+-113_btdll.c:20: at f_2: hello from f_2() / 113_btdll.c:20
+-113_btdll.c:38: by main
+-113_btdll.c:31: at f_main: hello from f_main() / 113_btdll.c:31
+-113_btdll.c:39: by main
+Test: 114_bound_signal...
+--- 114_bound_signal.expect	2026-04-30 08:32:42.000000000 -0500
++++ 114_bound_signal.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,2 +0,0 @@
+-start
+-end
+Test: 115_bound_setjmp...
+Test: 116_bound_setjmp2...
+--- 116_bound_setjmp2.expect	2026-04-30 08:32:42.000000000 -0500
++++ 116_bound_setjmp2.output	2026-05-02 03:19:47.000000000 -0500
+@@ -0,0 +1,4 @@
++dyld: Symbol not found: ___bound_ptr_indir4
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./116_bound_setjmp2.exe
++  Expected in: /usr/lib/libSystem.B.dylib
++
+Test: 117_builtins...
+--- 117_builtins.expect	2026-04-30 08:32:42.000000000 -0500
++++ 117_builtins.output	2026-05-02 03:19:47.000000000 -0500
+@@ -1,4 +1,48 @@
+-BOUNDS OFF:
+- 1:1 2:1 3:1 4:1 5:1 6:1 7:1 8:1 9:1 10:1 11:1 12:1 13:1 14:1 15:1
+-BOUNDS ON:
+- 1:1 2:1 3:1 4:1 5:1 6:1 7:1 8:1 9:1 10:1 11:1 12:1 13:1 14:1 15:1
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
++tcc: error: ppc-link: create_plt_entry not implemented
+Test: 118_switch...
+Test: 119_random_stuff...
+--- 119_random_stuff.expect	2026-04-30 08:32:42.000000000 -0500
++++ 119_random_stuff.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,7 +0,0 @@
+-tst_branch -- --
+-tst_adr 5
+-tst_compare: ok
+-tst_pack: j.f = 5, i.f = 5
+-schar to ushort cast: ffff0033
+-tst_indir_func 10
+-5
+Test: 120_alias...
+--- 120_alias.expect	2026-04-30 08:32:42.000000000 -0500
++++ 120_alias.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,11 +0,0 @@
+-in target function
+-in target function
+-in target function
+-g_int = 34
+-alias_int = 34
+-asm_int = 34
+-in unit2:
+-in target function
+-in target function
+-g_int = 34
+-alias_int = 34
+Test: 121_struct_return...
+--- 121_struct_return.expect	2026-04-30 08:32:42.000000000 -0500
++++ 121_struct_return.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,2 +0,0 @@
+-0 1 2 3 1234 2345
+-29
+Test: 122_vla_reuse...
+--- 122_vla_reuse.expect	2026-04-30 08:32:42.000000000 -0500
++++ 122_vla_reuse.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1 +0,0 @@
+-OK
+Test: 123_vla_bug...
+--- 123_vla_bug.expect	2026-04-30 08:32:42.000000000 -0500
++++ 123_vla_bug.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,5 +0,0 @@
+-default: i = 0
+-reached 3
+-after do_cmddefault: i = 2
+-default: i = 3
+-default: i = 4
+Test: 124_atomic_counter...
+--- 124_atomic_counter.expect	2026-04-30 08:32:42.000000000 -0500
++++ 124_atomic_counter.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,3 +0,0 @@
+-SUCCESS
+-SUCCESS
+-SUCCESS
+Test: 125_atomic_misc...
+--- 125_atomic_misc.expect	2026-04-30 08:32:42.000000000 -0500
++++ 125_atomic_misc.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,59 +0,0 @@
+-[test_atomic_compare_exchange]
+-1 99 77
+-0 80 80
+-85 33 80
+-90 66 80
+-
+-[test_atomic_store]
+-r = 12, i = 24
+-
+-[test_atomic_store_pointer]
+-*p = 2
+-
+-[test_atomic_store_struct]
+-1 2 3 4
+-
+-[test_atomic_op]
+-fetch_add: SUCCESS
+-fetch_sub: SUCCESS
+-fetch_or: SUCCESS
+-fetch_xor: SUCCESS
+-fetch_and: SUCCESS
+-
+-[test_atomic_op2]
+-fetch_add: SUCCESS
+-fetch_sub: SUCCESS
+-fetch_or: SUCCESS
+-fetch_xor: SUCCESS
+-fetch_and: SUCCESS
+-fetch_nand: SUCCESS
+-add_fetch: SUCCESS
+-sub_fetch: SUCCESS
+-or_fetch: SUCCESS
+-xor_fetch: SUCCESS
+-and_fetch: SUCCESS
+-nand_fetch: SUCCESS
+-
+-[test_atomic_thread_signal]
+-1
+-
+-[test_atomic_error_1]
+-125_atomic_misc.c:156: error: pointer expected
+-
+-[test_atomic_error_2]
+-125_atomic_misc.c:163: error: integral or integer-sized pointer target type expected
+-
+-[test_atomic_error_3]
+-125_atomic_misc.c:170: error: integral or integer-sized pointer target type expected
+-
+-[test_atomic_error_4]
+-125_atomic_misc.c:178: error: pointer target type mismatch in argument 2
+-
+-[test_atomic_warn_1]
+-125_atomic_misc.c:186: warning: assignment makes integer from pointer without a cast
+-
+-[test_atomic_warn_2]
+-125_atomic_misc.c:196: warning: assignment from incompatible pointer type
+-
+-[test_atomic_warn_3]
+-125_atomic_misc.c:204: warning: assignment of read-only location
+Test: 126_bound_global...
+--- 126_bound_global.expect	2026-04-30 08:32:42.000000000 -0500
++++ 126_bound_global.output	2026-05-02 03:19:49.000000000 -0500
+@@ -1,2 +1,4 @@
+-126_bound_global.c:11: at main: BCHECK: ........ (size 4) is outside of the region (..................)
+-126_bound_global.c:11: at main: RUNTIME ERROR: invalid memory access
++dyld: Symbol not found: ___bound_ptr_indir4
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./126_bound_global.exe
++  Expected in: /usr/lib/libSystem.B.dylib
++
+Test: 128_run_atexit...
+--- 128_run_atexit.expect	2026-04-30 08:32:42.000000000 -0500
++++ 128_run_atexit.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,17 +0,0 @@
+-[test_128_return]
+-startup5
+-cleanup5
+-1 cleanup4
+-1 cleanup3
+-cleanup2
+-cleanup1
+-[returns 1]
+-
+-[test_128_exit]
+-startup5
+-cleanup5
+-2 cleanup4
+-2 cleanup3
+-cleanup2
+-cleanup1
+-[returns 2]
+Test: 129_scopes...
+--- 129_scopes.expect	2026-04-30 08:32:42.000000000 -0500
++++ 129_scopes.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,31 +0,0 @@
+-129_scopes.c:10: ok : "!in"
+-129_scopes.c:11: ok : "in"
+-129_scopes.c:12: ok : "!in"
+-129_scopes.c:15: ok : "!in"
+-129_scopes.c:16: ok : "in"
+-129_scopes.c:17: ok : "!in"
+-129_scopes.c:20: ok : "!in"
+-129_scopes.c:21: ok : "in"
+-129_scopes.c:22: ok : "!in"
+-129_scopes.c:25: ok : "!in"
+-129_scopes.c:26: ok : "!in"
+-129_scopes.c:27: ok : "!in"
+-129_scopes.c:31: ok : "!in"
+-129_scopes.c:32: ok : "in"
+-129_scopes.c:33: ok : "!in"
+-129_scopes.c:36: ok : "!in"
+-129_scopes.c:37: ok : "in"
+-129_scopes.c:38: ok : "!in"
+-129_scopes.c:41: ok : "!in"
+-129_scopes.c:42: ok : "in"
+-129_scopes.c:43: ok : "!in"
+-129_scopes.c:59: ok : "c == 'a'"
+-129_scopes.c:69: ok : "st.a == 10"
+-129_scopes.c:88: ok : "!strcmp(a, "test")"
+-129_scopes.c:105: ok : "f5() == 10 + 4"
+-129_scopes.c:122: ok : "i6 == 33 && f6 == 44"
+-129_scopes.c:126: ok : "i6 == 11 && f6(22) == 22"
+-129_scopes.c:128: ok : "i6 == 33 && f6 == 44"
+-129_scopes.c:130: ok : "i6 == 11 && f6(22) == 22"
+-xx7 (1) : 78 90
+-xx7 (2) : 12 34
+Test: 130_large_argument...
+--- 130_large_argument.expect	2026-04-30 08:32:42.000000000 -0500
++++ 130_large_argument.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,3 +0,0 @@
+-1 2
+-3 4 5
+-13 12 11 10 9 8 7 6 5 4 3 2 1
+Test: 131_return_struct_in_reg...
+--- 131_return_struct_in_reg.expect	2026-04-30 08:32:42.000000000 -0500
++++ 131_return_struct_in_reg.output	2026-05-02 03:18:59.000000000 -0500
+@@ -1,20 +0,0 @@
+-05 0a
+-12 34
+-1245 5678
+-12345678 9abcdef0
+-123456789abcdef0 fedcba9876543210
+-1.0 2.0 3.0 4.0
+-
+-05 0a
+-12 34
+-1245 5678
+-12345678 9abcdef0
+-123456789abcdef0 fedcba9876543210
+-1.0 2.0 3.0 4.0
+-
+-05 0a
+-12 34
+-1245 5678
+-12345678 9abcdef0
+-123456789abcdef0 fedcba9876543210
+-1.0 2.0 3.0 4.0
+Test: 132_bound_test...
+--- 132_bound_test.expect	2026-04-30 08:32:42.000000000 -0500
++++ 132_bound_test.output	2026-05-02 03:19:53.000000000 -0500
+@@ -1,2 +1,4 @@
+-42000
+-8
++dyld: Symbol not found: ___bound_ptr_indir8
++  Referenced from: /Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2/./132_bound_test.exe
++  Expected in: /usr/lib/libSystem.B.dylib
++
+Test: 133_old_func...
+--- 133_old_func.expect	2026-04-30 08:32:42.000000000 -0500
++++ 133_old_func.output	2026-05-02 03:19:53.000000000 -0500
+@@ -1,3 +1,3 @@
+-4 30
+-4 30
+-1
++-1.99892 -1.99899
++1.57135e-310 1.21954e-296
++1.57644e-310
+Test: 134_double_to_signed...
+Test: 135_func_arg_struct_compare...
+--- 135_func_arg_struct_compare.expect	2026-04-30 08:32:42.000000000 -0500
++++ 135_func_arg_struct_compare.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1 +0,0 @@
+-done
+Test: 136_atomic_gcc_style...
+--- 136_atomic_gcc_style.expect	2026-04-30 08:32:42.000000000 -0500
++++ 136_atomic_gcc_style.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,11 +0,0 @@
+-assert "loaded == 42" : yes
+-assert "success" : yes
+-assert "atomic_var == 200" : yes
+-assert "expected == 100" : yes
+-assert "!success" : yes
+-assert "atomic_var == 100" : yes
+-assert "expected == 100" : yes
+-assert "atomic_var == 60" : yes
+-assert "loaded_ptr == NULL" : yes
+-assert "__atomic_load_n(&atomic_var, __ATOMIC_RELAXED) == 10" : yes
+-All atomic tests passed!
+Test: 137_funcall_struct_args...
+--- 137_funcall_struct_args.expect	2026-04-30 08:32:42.000000000 -0500
++++ 137_funcall_struct_args.output	1969-12-31 18:00:00.000000000 -0600
+@@ -1,2 +0,0 @@
+-x=999.500000
+-y=999.500000
+make: Leaving directory '/Users/macuser/tcc-darwin8-ppc/tcc/tests/tests2'
