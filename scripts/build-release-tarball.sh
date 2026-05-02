@@ -19,7 +19,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-VERSION="${VERSION:-v0.2.2-g3}"
+VERSION="${VERSION:-v0.2.3-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -60,13 +60,20 @@ Fully self-hosted release: tcc compiles AND links itself with no
 gcc-4.0 involvement. Targets 32-bit PowerPC on Mac OS X 10.4
 Tiger (Mach-O). Built and bootstrapped on a real iBook G3/G4.
 
-What's new in $VERSION (over v0.1.0-g3):
+What's new (cumulative since v0.1.0-g3):
   * Self-link: bootstrap-tcc-self.sh no longer needs gcc-4.0; tcc
     links its own tcc-self via auto-loaded /usr/lib/crt1.o.
   * Bundled libgcc helpers in libtcc1.a (long-long arithmetic,
-    IEEE 754 conversions).
-  * Self-host fixpoint reached: tcc -> tcc-self -> tcc-self2 ->
-    tcc-self3, with tcc-self2.o == tcc-self3.o byte-identical.
+    IEEE 754 conversions, __eprintf for assert).
+  * Self-host fixpoint: tcc -> tcc-self -> tcc-self2 -> tcc-self3,
+    with tcc-self2.o == tcc-self3.o byte-identical.
+  * Struct-by-value parameters (≤ 32 bytes): the highest-impact
+    remaining ABI gap is closed. Function args of struct type now
+    pass via r3..r10 per the Apple PPC ABI.
+  * EXE PIC reloc fallback handles forward-defined and aliased
+    symbols (a regression's break-out-of-loop bug is also fixed).
+  * VT_BOOL load/store, computed goto (\`goto *p\`), void* deref.
+  * tests2 baseline at this release: 87 / 122 (71%).
 
 Install:
   sudo mkdir -p $PREFIX
