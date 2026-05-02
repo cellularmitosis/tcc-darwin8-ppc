@@ -34,7 +34,11 @@ echo "  CC tcc.c (ONE_SOURCE; via $TCC)"
 "$TCC" -c "$SRC" -o "$WORK/tcc.o" -B./tcc -I./tcc
 
 echo "  LINK $OUT (via $TCC, no gcc-4.0)"
-"$TCC" -B./tcc -I./tcc -o "$OUT" "$WORK/tcc.o" "$LIBTCC1"
+# libtcc1.a is auto-linked by tcc_output_file for PPC EXE outputs
+# (since the change in tccelf.c that picks it up via tcc_lib_path),
+# so we don't pass $LIBTCC1 explicitly anymore — that would
+# double-link and trigger 'defined twice' errors.
+"$TCC" -B./tcc -I./tcc -o "$OUT" "$WORK/tcc.o"
 
 ls -la "$OUT"
 
@@ -55,12 +59,12 @@ if [ "${FIXPOINT:-0}" = "1" ]; then
     echo "  CC tcc.c (via $OUT) -> $OBJ2"
     "$OUT" -c "$SRC" -o "$OBJ2" -B./tcc -I./tcc
     echo "  LINK $OUT2 (via $OUT)"
-    "$OUT" -B./tcc -I./tcc -o "$OUT2" "$OBJ2" "$LIBTCC1"
+    "$OUT" -B./tcc -I./tcc -o "$OUT2" "$OBJ2"
 
     echo "  CC tcc.c (via $OUT2) -> $OBJ3"
     "$OUT2" -c "$SRC" -o "$OBJ3" -B./tcc -I./tcc
     echo "  LINK $OUT3 (via $OUT2)"
-    "$OUT2" -B./tcc -I./tcc -o "$OUT3" "$OBJ3" "$LIBTCC1"
+    "$OUT2" -B./tcc -I./tcc -o "$OUT3" "$OBJ3"
 
     if cmp "$OBJ2" "$OBJ3"; then
         echo "  FIXPOINT HOLDS: $(basename $OBJ2) == $(basename $OBJ3)"

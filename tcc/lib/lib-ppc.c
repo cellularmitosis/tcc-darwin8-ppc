@@ -31,6 +31,31 @@ double __floatundidf(unsigned long long x)
     return hi * 4294967296.0 + lo;
 }
 
+/* Signed 64-bit -> double. Sign-split, then forward to the unsigned
+ * version. tcc's PPC backend emits a call to __floatdidf for any
+ * `(double)(long long)x` that doesn't reduce to constants. */
+double __floatdidf(long long x)
+{
+    if (x < 0)
+        return -(double)__floatundidf((unsigned long long)-x);
+    return (double)__floatundidf((unsigned long long)x);
+}
+
+/* Signed 64-bit -> float. Same sign-split + forward pattern. The
+ * round-trip through double doesn't lose precision relative to the
+ * single-precision result because float has 24 bits of mantissa and
+ * we're doing the conversion at full double precision first. */
+float __floatdisf(long long x)
+{
+    return (float)__floatdidf(x);
+}
+
+/* Unsigned 64-bit -> float. Same as the double version but truncated. */
+float __floatundisf(unsigned long long x)
+{
+    return (float)__floatundidf(x);
+}
+
 /* double -> unsigned long long.
  *
  * IEEE 754 double layout (big-endian PPC, 8 bytes):

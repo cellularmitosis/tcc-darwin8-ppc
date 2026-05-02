@@ -3159,6 +3159,23 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
         if (access("/usr/lib/crt1.o", R_OK) == 0)
             tcc_add_file(s, "/usr/lib/crt1.o");
 
+        /* Auto-link libtcc1.a so user code that references libgcc
+         * helpers (long-long arithmetic, IEEE 754 conversions etc.)
+         * picks them up automatically. Other tcc targets do this via
+         * tcc_add_runtime() in elf_output_file; our PPC EXE writer
+         * goes through macho_output_file which doesn't, so we do it
+         * here. The `-w` (suppress library not found) is implicit:
+         * tcc_add_dll silently falls through if the file is missing
+         * (e.g. user passed -nostdlib). */
+        {
+            char path[1024];
+            if (s->tcc_lib_path) {
+                snprintf(path, sizeof path, "%s/libtcc1.a", s->tcc_lib_path);
+                if (access(path, R_OK) == 0)
+                    tcc_add_file(s, path);
+            }
+        }
+
         /* `NXArgc`, `NXArgv`, `environ` are NOT exported by libSystem
          * — they're conventionally DEFINED by /usr/lib/crt1.o, and
          * dyld's `_NSGetEnviron`/`_NSGetArgv` find them in the
