@@ -158,19 +158,56 @@ After v0.2.16, simple SELECT queries work but:
   (PC = junk, looks like wild jump via corrupted function pointer).
 - `sqlite3 :memory: "create table t(x); ..."` returns
   SQLITE_CORRUPT (11, "database disk image is malformed") — not a
-  crash, but B-tree state is wrong.
+  crash.
 
-Both probably involve the same underlying bug: a struct field at
-the wrong offset or a function pointer table populated with junk.
-sqlite uses `sqlite3_vfs` (lots of function pointers) and
-`sqlite3_io_methods` (more function pointers). Static initializers
-should populate them correctly, but tcc may have a layout bug for
-one of them.
+### CREATE TABLE corruption — pinpointed
 
-Next session investigation paths:
-1. Compare tcc-built and gcc-built `aVfs[]` static initializer
-   bytes — diff to find layout discrepancy.
-2. Walk the unixVfs struct in gdb to verify each function pointer
-   matches the symbol address.
-3. Look for STRUCT initializers with mixed types (int + pointer +
-   long long) where alignment might still differ.
+Instrumented `sqlite3CorruptError` to print the line number of the
+caller. The corruption is reported from `sqlite3.c:100154`:
+```c
+rc = sqlite3_exec(db, zSql, sqlite3InitCallback, &initData, 0);
+if( rc==SQLITE_OK ) rc = initData.rc;
+if( rc==SQLITE_OK && initData.nInitRow==0 ){
+    /* The OP_ParseSchema opcode with a non-NULL P4 argument should parse
+    ** at least one SQL statement. Any less than that indicates that
+    ** the sqlite_schema table is corrupt. */
+    rc = SQLITE_CORRUPT_BKPT;
+}
+```
+
+So `OP_ParseSchema` runs `SELECT * FROM ... sqlite_schema WHERE ...
+ORDER BY rowid` with the just-created table's row in mind, and the
+callback never fires (`nInitRow == 0`). Two possibilities:
+1. The CREATE TABLE didn't actually insert into sqlite_schema (B-tree
+   write side broken).
+2. The SELECT iteration doesn't find any rows (B-tree read or VDBE
+   cursor broken).
+
+Both point to a deeper VDBE / B-tree codegen issue, distinct from
+the four bugs already fixed this session.
+
+### File-open SEGV — partial diagnosis
+
+PC = junk address (0x1bcff8 in last build), bt shows wild jump via
+bad function pointer. r12 (often used for indirect call target on
+PPC) holds 0x1bb384 — also junk. The struct holding the function
+pointer is likely misaligned or initialized wrong.
+
+sqlite uses `sqlite3_vfs` and `sqlite3_io_methods` (heavy on
+function pointers). A `fnptr_test.c` standalone test confirmed
+that tcc's struct-of-function-pointers initializer works in
+isolation, so it's likely a more complex struct.
+
+### Next session paths
+
+1. Bisect the CREATE TABLE path: which VDBE op fails. Add markers
+   to `sqlite3VdbeExec`'s opcode dispatch to find which OP fires
+   wrong.
+2. For file open: the 0x2dd14 caller address (in the latest build)
+   is in a static helper near where sqlite3_strnicmp lives in the
+   text section. Compare tcc-built and gcc-built sqlite3.c objects
+   at that address range to diff the codegen.
+3. Look for tcc's struct-array static initializer bug — maybe an
+   alignment issue between sqlite_io_methods and sqlite3_file
+   where the function pointers land at +N offset but tcc reads at
+   +N+pad.
