@@ -2,9 +2,9 @@
 
 ## Where we are (May 2026)
 
-Self-hosted tcc for Tiger PowerPC, **shipped through v0.2.8-g3**.
-Eight patch releases on top of [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md)
-have brought tests2 from 70 / 122 (57%) to **105 / 118 (89.0%)**:
+Self-hosted tcc for Tiger PowerPC, **shipped through v0.2.15-g3**.
+Fifteen patch releases on top of [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md)
+have brought tests2 from 70 / 122 (57%) to **111 / 111 (100%)**:
 
 | | tests2 | what it added |
 |---|---|---|
@@ -17,27 +17,44 @@ have brought tests2 from 70 / 122 (57%) to **105 / 118 (89.0%)**:
 | [v0.2.6-g3](sessions/036-post-travel-2026-05-02/README.md) | 105 / 118 | constructor/destructor, VLA × callee-spill safety, BE-aware skips |
 | [v0.2.7-g3](sessions/037-tcc-run-on-ppc-2026-05-02/README.md) | (104) | **`tcc -run` works on PPC for the first time** (PLT, @hi/@ha fix) |
 | [v0.2.8-g3](sessions/038-real-ppc-atomics-2026-05-02/README.md) | 105 / 118 | real atomics via pthread_mutex |
+| v0.2.9-g3 | 105 / 118 | minor cleanup |
+| v0.2.10-g3 / v0.2.11-g3 | 109 / 111 | bcheck-style skip refinements; total drops 118 → 111 due to 6 bcheck-asserting tests properly skipped on PPC |
+| [v0.2.12-g3](sessions/040-pickup-2026-05-03/README.md) | 109 / 111 | struct-deref-by-value + cross-TU PIC reloc translation. **Lua 5.4.7 builds + runs end-to-end.** |
+| [v0.2.13-g3](sessions/040-pickup-2026-05-03/README.md) | 110 / 111 | BE Sym-union enum_val clobber fix; `scripts/bench.sh` (lua compile-time benchmark) |
+| [v0.2.14-g3](sessions/041-pickup-2026-05-03/README.md) | **111 / 111 (100%)** | BE bitfield read-back fix (force byte-wise loads on PPC32 BE) |
+| [v0.2.15-g3](sessions/041-pickup-2026-05-03/README.md) | 111 / 111 | Apple PPC ABI long-long alignment + LL field-load clobber. **sqlite3_open works.** |
 
 (Total dropped 122 → 118 in v0.2.6 because four LE-byte-order-
-specific tests are properly classified as skipped on big-endian.)
+specific tests are properly classified as skipped on big-endian;
+118 → 111 in v0.2.10/.11 because six bcheck-asserting tests are
+properly skipped without a real bcheck.c port.)
 
 * Bootstrap fixpoint (`tcc → tcc-self → tcc-self2 → tcc-self3` with
   `tcc-self2.o == tcc-self3.o`) holds at every release.
 * `tcc -run hello.c` works (since v0.2.7).
 * `tcc -o exe` produces working libSystem-using binaries.
 * Multi-threaded atomics correct (since v0.2.8).
+* tests2 at 100% (since v0.2.14).
+* lua 5.4.7 builds + runs end-to-end (since v0.2.12).
+* sqlite3 amalgamation builds; `./sqlite3 -version` works;
+  `sqlite3_open(":memory:", ...)` works; `sqlite3_prepare_v2`
+  with `select 1+1` still hits a separate codegen bug
+  (Heisenbug under instrumentation, deferred).
+* Compile-time benchmark vs gcc-4.0 (lua 5.4.7, 33 .c files):
+  tcc 2 s, gcc -O0 17 s, gcc -Os 40 s on a 900 MHz iBook G3.
 
 ## Open work, prioritized
 
-### Concrete remaining test failures (13)
+### Concrete remaining test failures (0)
 
-| Bucket | Tests | Effort |
-|---|---|---|
-| **bcheck.c port** | 112_backtrace, 113_btdll, 115_bound_setjmp, 116_bound_setjmp2, 126_bound_global | Multi-session. Codegen instrumentation in `ppc-gen.c` partially exists (`func_bound_offset` / `func_bound_ind` are unused statics); the no-op stubs in `lib-ppc.c` need replacing with a real port of `tcc/lib/bcheck.c` (hash-table region tracking + signal hooks). Would also unblock 117_builtins (its `-b` second invocation needs `bcheck.o`) and the three `-run`-only failures (121_struct_return, 122_vla_reuse, 132_bound_test) that use `-b` and pass under `-o exe` only because the no-op stubs are linked in. |
-| **`-dt` test classification** | 60_errors_and_warnings, 96_nodata_wanted, 125_atomic_misc, 128_run_atexit | These need `-dt -run`. Several pass under `RUN=1` already. Two paths: (a) update `scripts/run-tests2.sh` to drop `NORUN=true` so per-test `NORUN` overrides apply, or (b) add `T1` overrides per test in the Makefile. 128's `on_exit` is glibc-only on Mac and won't pass either way. |
-| **104_inline** | inverse: passes under `-run`, fails under `-o exe` | Test-mode quirk; same `-dt` classification issue from the other side. |
-| **70_floating_point_literals** | 5-ULP error in upstream tcc's `parse_number` on PPC IEEE 754 | Upstream tcc bug; surfaces only on PPC's IEEE semantics. Deep but contained. |
-| **73_arm64** | HFA aggregates designed for AArch64 ABI | Won't fully pass — the test exercises HFA semantics PPC doesn't have. The handful of sub-tests that fail isolate to long-double struct-by-value cases that span the GPR/stack boundary. Worth fixing the codegen even though the test is platform-mismatched; same fix would help any program passing big aggregates. |
+**tests2 is at 111/111 (100%) since v0.2.14.** All previously-
+failing tests have either been fixed or properly classified as
+skipped (bcheck-asserting tests are skipped on PPC because we
+have no-op stubs but no real bcheck.c port).
+
+The bcheck.c port remains a multi-session lift if we ever want
+the `-b` instrumented build to actually instrument. See "Larger
+scope" below.
 
 ### Structural items
 
@@ -57,7 +74,8 @@ specific tests are properly classified as skipped on big-endian.)
 |---|---|---|
 | **#8** | **DWARF debug info emission** | (Was old #11.) `tcc/tccdbg.c` has no PPC support → backtraces from tcc-built programs are useless. Would unblock `lldb` / `gdb` debugging. |
 | **#9** | **AltiVec intrinsics** | (Was old #12.) None today; tcc emits scalar code for everything. Plausible but a large project. |
-| **#10** | **Real-world program builds** | sqlite amalgamation (smoke-tested in [030](sessions/030-sqlite-smoke/README.md), blocked at the time on struct-by-value which has since landed — worth retrying), then lua. |
+| **#10** | **Real-world program builds** | Lua 5.4.7 ✅ done in v0.2.12. sqlite3 next — `sqlite3_open` works since v0.2.15; `sqlite3_prepare_v2` with `select 1+1` still hits a Heisenbug deferred from session 041. |
+| **#11** | **bcheck.c port** | If we want `-b` instrumented builds to actually instrument. Multi-session lift. Codegen hooks in `ppc-gen.c` partially exist (`func_bound_offset` / `func_bound_ind` are unused statics); the no-op stubs in `lib-ppc.c` need replacing with a real port. |
 
 ## Out of scope (still)
 
