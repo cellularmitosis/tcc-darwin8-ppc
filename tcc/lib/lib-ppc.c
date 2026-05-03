@@ -398,46 +398,76 @@ char *__bound_strchr(const char *s, int c) { return strchr(s,c); }
 char *__bound_strdup(const char *s) { return strdup(s); }
 
 /* ---------------------------------------------------------------------------
- * Atomic helper stubs (single-threaded — DO NOT use for real
- * concurrency).
+ * Atomic helper functions — pthread_mutex-backed.
  *
  * tcc's atomic codegen calls __atomic_load_N / __atomic_store_N /
  * __atomic_compare_exchange_N etc. as ordinary functions when the
- * backend lacks intrinsic codegen for them. The full atomic.S
- * helpers (lwarx/stwcx. variants) aren't ported to PPC yet; for
- * single-threaded test programs that just exercise atomic syntax,
- * a plain non-atomic implementation is observationally correct.
+ * backend lacks intrinsic codegen for them. A "real" implementation
+ * would use PPC's lwarx/stwcx. reservation primitives, but tcc's
+ * PPC backend doesn't yet emit inline asm and our build pipeline
+ * compiles lib-ppc.c with tcc itself (no assembler-file path). So
+ * we fall back to a single global pthread_mutex serializing every
+ * atomic operation.
  *
- * Multi-threaded tests (124_atomic_counter) will race; that's
- * documented as a "needs real PPC atomics" gap.
+ * Correctness: yes (all atomics are observationally serialized).
+ * Performance: poor under contention (every atomic op takes the
+ * same global mutex). Fine for compliance with the C11 atomics
+ * memory model; not fine if you actually care about scaling.
+ * libpthread is part of libSystem on Tiger, so no extra link
+ * dependency beyond what every program already pulls in.
  * --------------------------------------------------------------------------*/
 
-unsigned char __atomic_load_1(const unsigned char *p, int o) { (void)o; return *p; }
-unsigned short __atomic_load_2(const unsigned short *p, int o) { (void)o; return *p; }
-unsigned int __atomic_load_4(const unsigned int *p, int o) { (void)o; return *p; }
-unsigned long long __atomic_load_8(const unsigned long long *p, int o) { (void)o; return *p; }
+#include <pthread.h>
 
-void __atomic_store_1(unsigned char *p, unsigned char v, int o) { (void)o; *p = v; }
-void __atomic_store_2(unsigned short *p, unsigned short v, int o) { (void)o; *p = v; }
-void __atomic_store_4(unsigned int *p, unsigned int v, int o) { (void)o; *p = v; }
-void __atomic_store_8(unsigned long long *p, unsigned long long v, int o) { (void)o; *p = v; }
+static pthread_mutex_t __ppc_atomic_lock = PTHREAD_MUTEX_INITIALIZER;
+#define ATOMIC_LOCK()   pthread_mutex_lock(&__ppc_atomic_lock)
+#define ATOMIC_UNLOCK() pthread_mutex_unlock(&__ppc_atomic_lock)
 
-unsigned char __atomic_exchange_1(unsigned char *p, unsigned char v, int o)
-    { unsigned char r = *p; (void)o; *p = v; return r; }
-unsigned short __atomic_exchange_2(unsigned short *p, unsigned short v, int o)
-    { unsigned short r = *p; (void)o; *p = v; return r; }
-unsigned int __atomic_exchange_4(unsigned int *p, unsigned int v, int o)
-    { unsigned int r = *p; (void)o; *p = v; return r; }
-unsigned long long __atomic_exchange_8(unsigned long long *p,
-                                       unsigned long long v, int o)
-    { unsigned long long r = *p; (void)o; *p = v; return r; }
+#define ATOMIC_LOAD(BITS, TYPE) \
+TYPE __atomic_load_##BITS(const TYPE *p, int o) { \
+    TYPE r; (void)o; \
+    ATOMIC_LOCK(); r = *p; ATOMIC_UNLOCK(); \
+    return r; \
+}
+ATOMIC_LOAD(1, unsigned char)
+ATOMIC_LOAD(2, unsigned short)
+ATOMIC_LOAD(4, unsigned int)
+ATOMIC_LOAD(8, unsigned long long)
+#undef ATOMIC_LOAD
+
+#define ATOMIC_STORE(BITS, TYPE) \
+void __atomic_store_##BITS(TYPE *p, TYPE v, int o) { \
+    (void)o; \
+    ATOMIC_LOCK(); *p = v; ATOMIC_UNLOCK(); \
+}
+ATOMIC_STORE(1, unsigned char)
+ATOMIC_STORE(2, unsigned short)
+ATOMIC_STORE(4, unsigned int)
+ATOMIC_STORE(8, unsigned long long)
+#undef ATOMIC_STORE
+
+#define ATOMIC_EXCHANGE(BITS, TYPE) \
+TYPE __atomic_exchange_##BITS(TYPE *p, TYPE v, int o) { \
+    TYPE r; (void)o; \
+    ATOMIC_LOCK(); r = *p; *p = v; ATOMIC_UNLOCK(); \
+    return r; \
+}
+ATOMIC_EXCHANGE(1, unsigned char)
+ATOMIC_EXCHANGE(2, unsigned short)
+ATOMIC_EXCHANGE(4, unsigned int)
+ATOMIC_EXCHANGE(8, unsigned long long)
+#undef ATOMIC_EXCHANGE
 
 #define ATOMIC_CAS(BITS, TYPE) \
 int __atomic_compare_exchange_##BITS(TYPE *p, TYPE *exp, TYPE des, \
                                      int weak, int o1, int o2) { \
+    int ok; \
     (void)weak; (void)o1; (void)o2; \
-    if (*p == *exp) { *p = des; return 1; } \
-    *exp = *p; return 0; \
+    ATOMIC_LOCK(); \
+    if (*p == *exp) { *p = des; ok = 1; } \
+    else            { *exp = *p; ok = 0; } \
+    ATOMIC_UNLOCK(); \
+    return ok; \
 }
 ATOMIC_CAS(1, unsigned char)
 ATOMIC_CAS(2, unsigned short)
@@ -447,7 +477,9 @@ ATOMIC_CAS(8, unsigned long long)
 
 #define ATOMIC_RMW(NAME, BITS, TYPE, OP) \
 TYPE __atomic_fetch_##NAME##_##BITS(TYPE *p, TYPE v, int o) { \
-    TYPE r = *p; (void)o; *p = OP; return r; \
+    TYPE r; (void)o; \
+    ATOMIC_LOCK(); r = *p; *p = OP; ATOMIC_UNLOCK(); \
+    return r; \
 }
 ATOMIC_RMW(add, 1, unsigned char,      r + v)
 ATOMIC_RMW(add, 2, unsigned short,     r + v)
@@ -475,11 +507,18 @@ ATOMIC_RMW(nand, 4, unsigned int,      ~(r & v))
 ATOMIC_RMW(nand, 8, unsigned long long,~(r & v))
 #undef ATOMIC_RMW
 
-/* C11 atomic_flag_* — single-threaded stubs. */
-int atomic_flag_test_and_set(volatile unsigned char *p)
-    { unsigned char r = *p; *p = 1; return r != 0; }
-int atomic_flag_test_and_set_explicit(volatile unsigned char *p, int o)
-    { (void)o; return atomic_flag_test_and_set(p); }
-void atomic_flag_clear(volatile unsigned char *p) { *p = 0; }
-void atomic_flag_clear_explicit(volatile unsigned char *p, int o)
-    { (void)o; *p = 0; }
+/* C11 atomic_flag_test_and_set / clear, mutex-serialized. */
+int atomic_flag_test_and_set(volatile unsigned char *p) {
+    unsigned char r;
+    ATOMIC_LOCK(); r = *p; *p = 1; ATOMIC_UNLOCK();
+    return r != 0;
+}
+int atomic_flag_test_and_set_explicit(volatile unsigned char *p, int o) {
+    (void)o; return atomic_flag_test_and_set(p);
+}
+void atomic_flag_clear(volatile unsigned char *p) {
+    ATOMIC_LOCK(); *p = 0; ATOMIC_UNLOCK();
+}
+void atomic_flag_clear_explicit(volatile unsigned char *p, int o) {
+    (void)o; atomic_flag_clear(p);
+}
