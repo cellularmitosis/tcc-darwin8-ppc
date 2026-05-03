@@ -23,6 +23,7 @@ have brought tests2 from 70 / 122 (57%) to **111 / 111 (100%)**:
 | [v0.2.13-g3](sessions/040-pickup-2026-05-03/README.md) | 110 / 111 | BE Sym-union enum_val clobber fix; `scripts/bench.sh` (lua compile-time benchmark) |
 | [v0.2.14-g3](sessions/041-pickup-2026-05-03/README.md) | **111 / 111 (100%)** | BE bitfield read-back fix (force byte-wise loads on PPC32 BE) |
 | [v0.2.15-g3](sessions/041-pickup-2026-05-03/README.md) | 111 / 111 | Apple PPC ABI long-long alignment + LL field-load clobber. **sqlite3_open works.** |
+| [v0.2.16-g3](sessions/041-pickup-2026-05-03/README.md) | 111 / 111 | LL-arg shuffle clobber in gfunc_call. **sqlite SELECT works; zlib full test suite passes.** |
 
 (Total dropped 122 → 118 in v0.2.6 because four LE-byte-order-
 specific tests are properly classified as skipped on big-endian;
@@ -36,10 +37,10 @@ properly skipped without a real bcheck.c port.)
 * Multi-threaded atomics correct (since v0.2.8).
 * tests2 at 100% (since v0.2.14).
 * lua 5.4.7 builds + runs end-to-end (since v0.2.12).
-* sqlite3 amalgamation builds; `./sqlite3 -version` works;
-  `sqlite3_open(":memory:", ...)` works; `sqlite3_prepare_v2`
-  with `select 1+1` still hits a separate codegen bug
-  (Heisenbug under instrumentation, deferred).
+* sqlite3 amalgamation: in-memory SELECT queries work
+  (since v0.2.16). File-based sqlite_open_v2 still crashes
+  in the file-open path — distinct bug, deferred.
+* zlib 1.3.1 builds + full test suite passes (since v0.2.16).
 * Compile-time benchmark vs gcc-4.0 (lua 5.4.7, 33 .c files):
   tcc 2 s, gcc -O0 17 s, gcc -Os 40 s on a 900 MHz iBook G3.
 
