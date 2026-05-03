@@ -428,9 +428,7 @@ TYPE __atomic_load_##BITS(const TYPE *p, int o) { \
     ATOMIC_LOCK(); r = *p; ATOMIC_UNLOCK(); \
     return r; \
 }
-ATOMIC_LOAD(1, unsigned char)
-ATOMIC_LOAD(2, unsigned short)
-/* 4-byte ops live in atomic-ppc.S as lock-free lwarx/stwcx implementations. */
+/* 1, 2, 4-byte ops live in atomic-ppc.S (lock-free lwarx/stwcx). */
 ATOMIC_LOAD(8, unsigned long long)
 #undef ATOMIC_LOAD
 
@@ -439,9 +437,7 @@ void __atomic_store_##BITS(TYPE *p, TYPE v, int o) { \
     (void)o; \
     ATOMIC_LOCK(); *p = v; ATOMIC_UNLOCK(); \
 }
-ATOMIC_STORE(1, unsigned char)
-ATOMIC_STORE(2, unsigned short)
-/* 4-byte: atomic-ppc.S */
+/* 1, 2, 4-byte: atomic-ppc.S */
 ATOMIC_STORE(8, unsigned long long)
 #undef ATOMIC_STORE
 
@@ -451,9 +447,7 @@ TYPE __atomic_exchange_##BITS(TYPE *p, TYPE v, int o) { \
     ATOMIC_LOCK(); r = *p; *p = v; ATOMIC_UNLOCK(); \
     return r; \
 }
-ATOMIC_EXCHANGE(1, unsigned char)
-ATOMIC_EXCHANGE(2, unsigned short)
-/* 4-byte: atomic-ppc.S */
+/* 1, 2, 4-byte: atomic-ppc.S */
 ATOMIC_EXCHANGE(8, unsigned long long)
 #undef ATOMIC_EXCHANGE
 
@@ -468,9 +462,7 @@ int __atomic_compare_exchange_##BITS(TYPE *p, TYPE *exp, TYPE des, \
     ATOMIC_UNLOCK(); \
     return ok; \
 }
-ATOMIC_CAS(1, unsigned char)
-ATOMIC_CAS(2, unsigned short)
-/* 4-byte: atomic-ppc.S */
+/* 1, 2, 4-byte: atomic-ppc.S */
 ATOMIC_CAS(8, unsigned long long)
 #undef ATOMIC_CAS
 
@@ -480,38 +472,30 @@ TYPE __atomic_fetch_##NAME##_##BITS(TYPE *p, TYPE v, int o) { \
     ATOMIC_LOCK(); r = *p; *p = OP; ATOMIC_UNLOCK(); \
     return r; \
 }
-ATOMIC_RMW(add, 1, unsigned char,      r + v)
-ATOMIC_RMW(add, 2, unsigned short,     r + v)
-ATOMIC_RMW(add, 8, unsigned long long, r + v)
-ATOMIC_RMW(sub, 1, unsigned char,      r - v)
-ATOMIC_RMW(sub, 2, unsigned short,     r - v)
-ATOMIC_RMW(sub, 8, unsigned long long, r - v)
-ATOMIC_RMW(and, 1, unsigned char,      r & v)
-ATOMIC_RMW(and, 2, unsigned short,     r & v)
-ATOMIC_RMW(and, 8, unsigned long long, r & v)
-ATOMIC_RMW(or,  1, unsigned char,      r | v)
-ATOMIC_RMW(or,  2, unsigned short,     r | v)
-ATOMIC_RMW(or,  8, unsigned long long, r | v)
-ATOMIC_RMW(xor, 1, unsigned char,      r ^ v)
-ATOMIC_RMW(xor, 2, unsigned short,     r ^ v)
-ATOMIC_RMW(xor, 8, unsigned long long, r ^ v)
-ATOMIC_RMW(nand, 1, unsigned char,     ~(r & v))
-ATOMIC_RMW(nand, 2, unsigned short,    ~(r & v))
-ATOMIC_RMW(nand, 8, unsigned long long,~(r & v))
+/* 1, 2, 4-byte: atomic-ppc.S. 8-byte stays here -- PPC32 has no
+ * ldarx/stdcx (those are PPC64), so locking is the only option. */
+ATOMIC_RMW(add,  8, unsigned long long, r + v)
+ATOMIC_RMW(sub,  8, unsigned long long, r - v)
+ATOMIC_RMW(and,  8, unsigned long long, r & v)
+ATOMIC_RMW(or,   8, unsigned long long, r | v)
+ATOMIC_RMW(xor,  8, unsigned long long, r ^ v)
+ATOMIC_RMW(nand, 8, unsigned long long, ~(r & v))
 #undef ATOMIC_RMW
 
-/* C11 atomic_flag_test_and_set / clear, mutex-serialized. */
+/* C11 atomic_flag_test_and_set / clear -- wrapped over the byte
+ * atomics in atomic-ppc.S so they're lock-free too. */
+extern unsigned char __atomic_exchange_1(unsigned char *p, unsigned char v, int o);
+extern void __atomic_store_1(unsigned char *p, unsigned char v, int o);
+
 int atomic_flag_test_and_set(volatile unsigned char *p) {
-    unsigned char r;
-    ATOMIC_LOCK(); r = *p; *p = 1; ATOMIC_UNLOCK();
-    return r != 0;
+    return __atomic_exchange_1((unsigned char *)p, 1, 0) != 0;
 }
 int atomic_flag_test_and_set_explicit(volatile unsigned char *p, int o) {
-    (void)o; return atomic_flag_test_and_set(p);
+    return __atomic_exchange_1((unsigned char *)p, 1, o) != 0;
 }
 void atomic_flag_clear(volatile unsigned char *p) {
-    ATOMIC_LOCK(); *p = 0; ATOMIC_UNLOCK();
+    __atomic_store_1((unsigned char *)p, 0, 0);
 }
 void atomic_flag_clear_explicit(volatile unsigned char *p, int o) {
-    (void)o; atomic_flag_clear(p);
+    __atomic_store_1((unsigned char *)p, 0, o);
 }
