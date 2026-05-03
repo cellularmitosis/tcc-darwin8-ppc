@@ -11,13 +11,16 @@
 #   share/doc/tcc-darwin8-ppc/SELF_HOST_NOTES   (020 writeup)
 #   share/doc/tcc-darwin8-ppc/SELF_LINK_NOTES   (027 writeup)
 #
-# Run on the G3 (or wherever a working ./tcc exists). Defaults to
-# producing tcc-darwin8-ppc-v0.2.0-g3.tar.gz in the repo root.
+# Run on the G3 (or wherever a working ./tcc exists). Tarball lands
+# in <repo>/artifacts/ (gitignored — canonical copy is the GitHub
+# release asset).
 
 set -e
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
+OUTDIR="$ROOT/artifacts"
+mkdir -p "$OUTDIR"
 
 VERSION="${VERSION:-v0.2.7-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
@@ -115,10 +118,10 @@ Project: https://github.com/cellularmitosis/tcc-darwin8-ppc
 EOF
 
 # Step 4: tar it up.
-echo "==> step 4/4: package $TARNAME"
-( cd /tmp && tar czf "$ROOT/$TARNAME" "$PKGNAME" )
-ls -la "$ROOT/$TARNAME"
+echo "==> step 4/4: package artifacts/$TARNAME"
+( cd /tmp && tar czf "$OUTDIR/$TARNAME" "$PKGNAME" )
+ls -la "$OUTDIR/$TARNAME"
 
 echo
 echo "Done. Install with:"
-echo "  sudo tar -C /opt -xzf $TARNAME"
+echo "  sudo tar -C /opt -xzf artifacts/$TARNAME"

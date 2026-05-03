@@ -21,8 +21,10 @@ tcc/lib/**/*.o
 # session-local scratch
 docs/sessions/**/scratch/
 
-# release tarballs (published as GitHub release assets, not in git)
-tcc-darwin8-ppc-*.tar.gz
+# release tarballs land in artifacts/ via build-release-tarball.sh.
+# Canonical copies are the GitHub release assets; the local copies
+# are just whatever you've built recently.
+artifacts/
 
 # OS noise
 .DS_Store
