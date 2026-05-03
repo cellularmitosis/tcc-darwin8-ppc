@@ -3,17 +3,20 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.5-g3 SHIPPED.** TCC has never had a PowerPC backend
+**Status: v0.2.6-g3 SHIPPED.** TCC has never had a PowerPC backend
 in any release. As of session [027](docs/sessions/027-self-link/README.md),
 the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
 links `tcc-self`, which compiles AND links `tcc-self2`, which
 produces a `.o` byte-identical to what `tcc-self3` produces — the
 canonical self-host fixpoint, on a 22-year-old G3 / G4. The
-[v0.2.5-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.5-g3)
+[v0.2.6-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.6-g3)
 patch release ([035](docs/sessions/035-unsupervised-2026-05-02/README.md))
-adds **long-frame prolog/epilog** (>32 KB stack frames) and
-**VLAs** on top of v0.2.4's struct-by-value/return work — bumping
-`tests2` baseline to **101 / 122 (82.8%)**. A ~149 KB
+adds **constructor / destructor support** (`__mod_init_func` /
+`__mod_term_func` Mach-O sections) and a **VLA × function-call
+safety buffer** that prevents callee param-spills from clobbering
+live VLAs — bumping `tests2` baseline to **105 / 118 (89.0%)**.
+(Total dropped from 122 to 118 because four LE-byte-order-specific
+tests are now properly skipped on BE.) A ~149 KB
 `/opt`-installable tarball is built end-to-end by
 `scripts/build-release-tarball.sh`.
 
@@ -58,6 +61,7 @@ adds **long-frame prolog/epilog** (>32 KB stack frames) and
 | ✅ | **`v0.2.3-g3` patch release** ([035](docs/sessions/035-unsupervised-2026-05-02/README.md)) — **struct-by-value parameters** (Apple PPC ABI), EXE PIC reloc loop fix, VT_BOOL/ggoto/void-deref, `__eprintf`, tests2 capture-fix. tests2 jumps to 87 / 122 (71%) |
 | ✅ | **`v0.2.4-g3` patch release** ([035](docs/sessions/035-unsupervised-2026-05-02/README.md)) — **struct returns** (hidden pointer), dynamic param-area sizing, big-endian sub-word param offset, FP-to-LL helper return swap, absolute-address load/store, no-op bound-check + atomic stubs, Tiger realpath workaround. tests2 jumps to **96 / 122 (79%)** |
 | ✅ | **`v0.2.5-g3` patch release** ([035](docs/sessions/035-unsupervised-2026-05-02/README.md)) — **long-frame prolog/epilog** (>32KB stack frames), long-offset local load/store, **VLAs** (variable-length arrays), `.init_array → __mod_init_func` classification (for .o output). tests2 jumps to **101 / 122 (83%)** |
+| ✅ | **`v0.2.6-g3` patch release** ([035](docs/sessions/035-unsupervised-2026-05-02/README.md)) — **constructor / destructor support** (full EXE side: `__mod_init_func` + `__mod_term_func` emission, with a `sects[8]→[16]` overflow fix that was hanging tcc on `108_constructor`), **VLA × callee param-spill safety buffer** (fixes `79_vla_continue`), and BE-aware skips for 4 inherently-LE tests. tests2 jumps to **105 / 118 (89%)** |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
