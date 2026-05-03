@@ -2018,9 +2018,7 @@ ST_FUNC int gv(int rc)
                         } else if (orig_v_loc_pre == VT_LLOCAL) {
                             /* Re-anchor to the original VT_LLOCAL so
                              * the HIGH load reloads the pointer fresh
-                             * from the saved local. The pointer was
-                             * spilled there by save_reg_upstack at
-                             * some earlier point. */
+                             * from the saved local. */
                             vtop->r = orig_v_full_pre;
                             vtop->c.i = orig_c_i_pre;
                             vtop->r2 = orig_r2_pre;

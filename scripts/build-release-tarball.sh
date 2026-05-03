@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.15-g3}"
+VERSION="${VERSION:-v0.2.16-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -185,8 +185,22 @@ What's new (cumulative since v0.1.0-g3):
         re-derives the pointer fresh from the saved local).
     Real-world impact: \`sqlite3_open(":memory:", ...)\` now
     completes (was crashing inside sqlite3PcacheRefCount).
-    sqlite3_prepare_v2 still crashes — separate codegen bug
-    that's a Heisenbug under instrumentation; deferred.
+
+  * v0.2.16: LL-arg shuffle in gfunc_call clobbered another arg's
+    address register. Surfaced by \`sqlite3 :memory: "select 1+1"\`
+    (SEGV in sqlite3RunParser) and by zlib \`./example\` (SEGV
+    in gz_open's LSEEK call). The second pass of gfunc_call
+    processes args from vtop downward; arg2 (a long long) gets
+    materialized into temp regs then \`mr\`'d into target_hi /
+    target_lo (PPC ABI slots). Those mr's clobber the registers,
+    one of which held arg1's lvalue address. Fix: save_reg on
+    target_hi and target_lo before materializing the LL — moves
+    any vstack entry using those regs to a stack local first.
+
+    Real-world impact: \`sqlite3 :memory: "select 1+1"\` returns
+    2 (was SEGV). zlib's full test suite passes. File-based
+    sqlite (\`/tmp/test.db\`) still crashes inside sqlite3_open_v2
+    — distinct bug in the file-open path; deferred.
 
 Install:
   sudo mkdir -p $PREFIX
