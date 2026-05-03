@@ -463,6 +463,80 @@ Tarball: `tcc-darwin8-ppc-v0.2.6-g3.tar.gz` (153 KB).
 tests2 baseline at v0.2.6-g3: **105 / 118 = 89.0%**, up from
 101 / 122 = 82.8% at v0.2.5-g3.
 
+### Continued: foundational `-run` support (`create_plt_entry`)
+
+Picked up the largest remaining lever after v0.2.6-g3. Since session
+003, `ppc-link.c::create_plt_entry` had been a `tcc_error_noabort`
+stub, which meant `tcc -run` failed on every program that called any
+external libSystem function (i.e. essentially all of them).
+
+`8d72814` lands a working PLT for the JIT path. Each PLT entry is a
+16-byte stub:
+
+    lis   r12, ha(target)
+    ori   r12, r12, lo(target)
+    mtctr r12
+    bctr
+
+`create_plt_entry` stashes the symbol's GOT offset in the entry; then
+`relocate_plt` walks the PLT, looks up each entry's symbol via the
+GOT relocation list, and writes the real instructions in place. (The
+GOT-reloc-list path was the gotcha: without `s1->dynsym` -- which is
+the case in `-run` mode -- `put_got_entry` files the JMP_SLOT relocs
+on `s1->got->reloc`, not `s1->plt->reloc`, so the i386 / ARM pattern
+of "iterate `s1->plt->reloc`" yields zero entries. Iterate
+`s1->got->reloc` instead and match by `r_offset == got_offset`.)
+
+Two side fixes were needed:
+
+* `tccelf.c::relocate_syms`: try dlsym both with and without the
+  leading-underscore strip. Most Mach-O exports want the strip
+  (`_printf` -> dlsym("printf")), but a handful of tcc-internal
+  symbols (`dyld_stub_binding_helper`) are stored naked in our
+  symtab, and the unconditional strip mangled them.
+
+* tccrun.c: provide a tcc-internal stub
+  (`tcc_dyld_stub_binding_helper_unsupported`) that aborts cleanly
+  if libtcc1.a's lazy-binding scaffolding ever fires in `-run`
+  mode. libtcc1.a (compiled by us) has Apple-ABI lazy stubs around
+  __eprintf's calls to fprintf/abort/fflush; dyld would normally
+  patch the la_ptr slots at first call, but in -run there is no
+  dyld and the slots stay relocated against the dyld helper. The
+  common -run programs never reach this path (their direct
+  printf is resolved through a real PLT entry, not a libtcc1
+  lazy stub), but the failure mode if they did would have been
+  SEGV; the stub turns that into a clean abort with an
+  explanation.
+
+`scripts/run-tests2.sh` gets a `RUN=1` opt-in to exercise the -run
+path. Default NORUN=true still uses -o exe.
+
+Net effect: simple `-run` programs now work end-to-end. Verified:
+
+    $ ./tcc -run -B./tcc hi.c     # int main(){printf("hi\n");}
+    hi
+    $ ./tcc -run -B./tcc -I./tcc tests2/03_struct.c
+    12 / 34 / ... / ~fred()
+
+Tests2 baseline NORUN=true unchanged at ~104-105 / 118 (timing-
+sensitive flips on 114_bound_signal and 124_atomic_counter). Under
+NORUN=false (RUN=1) a substantial subset of the suite regresses to
+88 / 118 -- the EXE writer has had more iterations than the -run
+path, and many EXE-specific things (struct-by-value with full
+calling-convention plumbing, etc.) don't yet survive the -run
+relocation flow. Worth follow-up but didn't block landing the
+foundation.
+
+The `-dt` test family (60_errors_and_warnings, 96_nodata_wanted,
+117_builtins, 125_atomic_misc) hits a double-free during the
+multi-invocation `-dt` mode: tcc compiles+runs sub-test 1, frees
+something on cleanup, then crashes mid-way through sub-test 2 with
+"Deallocation of a pointer not malloced". Stack-pointer free.
+Looks like cleanup_symbols / cleanup_sections / freeing
+section->data corrupting state across compile-and-run cycles.
+Worth investigating in a follow-up: probably one specific section
+type that double-frees.
+
 ### Remaining failures at v0.2.6-g3 (13 tests in 3 buckets)
 
 All remaining failures need substantial follow-up work:
