@@ -108,26 +108,61 @@ or   r0,r3,r3;  or r3,r4,r4;  or r4,r0,r0  ; LL return swap
 * `./sqlite3 :memory: "select 1+1"` — now reaches `sqlite3_prepare_v2`
   before crashing (was crashing in `sqlite3_open` before).
 
-## Crash 2 (next): `sqlite3_prepare_v2`
+## Crash 2 (deferred): `sqlite3_prepare_v2`
+
+After v0.2.15, `select 1+1` still crashes — but now inside
+`sqlite3RunParser` → `sqlite3Parser` → `yy_reduce` (LEMON-
+generated rule reducer).
+
+### Triangulation
+
+* `sqlite3_open` works.
+* `sqlite3_prepare_v2(db, "create table t(x)", ...)` returns
+  rc=26 (error) but doesn't crash.
+* `sqlite3_prepare_v2(db, "pragma user_version", ...)` returns
+  rc=0; crash happens during `sqlite3_step`.
+* `sqlite3_prepare_v2(db, "select 1", ...)` crashes during
+  prepare — specifically inside `yy_reduce`.
+
+So the bug is reached only by SELECT-style statements that need
+expression-tree construction during parsing.
+
+### Crash assembly
 
 ```
-#0 0x000d78b0 ... sqlite3_backup_pagecount+offset
-#1 0x000d7a9c ...
-#2 0x001c0d1c ... sqlite3_vtab_distinct+offset
-#3 0x00189b20 ... sqlite3_prepare16_v3+offset
-#4 0x001cdcfc ... sqlite3_vtab_distinct+offset
-#5 0x001d5de4 ...
-#6 0x001d83fc ... sqlite3_keyword_check+offset
-#7 0x001712b0 ... sqlite3_reset_auto_extension+offset
-#8 0x001715b8 ...
-#9 0x00171978 ... sqlite3_prepare_v2+offset
-#10 0x0003c728 ... sqlite3_intck_test_sql+offset
-#11 0x00055a38 ... main+offset
+li r7, 0
+mr r5, r7         ; r5 = 0 (was previously some pointer)
+lwz r4, 0(r5)     ; lwz r4, 0(0) — loads from absolute address 0; SEGV
 ```
 
-Crash is `lwz r4, 0(r5)` with `r5 = 0` (loading from absolute
-address 0 — NULL deref via the special PPC `rA=0 ⇒ literal 0`
-encoding). Looks like a function-call argument setup gone wrong,
-distinct from the LL field load bug.
+This is a deliberate `*(NULL)` deref by tcc-emitted code. tcc
+intentionally set `r5 = 0` then dereffed through it.
 
-To investigate next session.
+### Heisenbug clue
+
+Adding a single `write(2, marker, n)` call **at the top of
+`yy_reduce`, before the `switch` dispatch**, makes the crash
+disappear. Adding the same marker inside `case 0`'s body (which
+shifts cases 1+ but not the switch dispatch) does NOT fix it. So
+the buggy code is in the function setup or switch dispatch, not
+in any individual case body.
+
+Could be:
+* A stack-frame-size sensitivity: my LL field-load fix uses
+  `save_reg_upstack` which may allocate a temp local that lands at
+  a problematic offset (e.g., just past `0x7fff` 16-bit signed
+  range, falling through to a buggy code path).
+* PIC anchor / @ha-@lo offset interaction: yy_reduce's PIC anchor
+  computation may end up at an address where some downstream
+  `lis+addi` pair encodes wrong.
+* Switch dispatch codegen (jump table or compare-chain).
+
+### Next steps
+
+1. Bisect the switch by inserting markers at increasingly later
+   case bodies until the bug reappears — find which case body is
+   the buggy one.
+2. Or: dump tcc's emitted code for yy_reduce (with and without
+   marker) and diff to find the divergence.
+3. Or: build with `-O0`-equivalent volatility annotations on
+   yy_reduce locals (forcing all-spill) and see if bug persists.
