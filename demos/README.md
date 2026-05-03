@@ -21,6 +21,7 @@ tarball), demos for new capabilities use `v<X>.<Y>.<Z>-<slug>.c`.
 | [s013-floating-point.c](s013-floating-point.c) | [013 — IEEE 754 single + double FP](../docs/sessions/013-floating-point/README.md) | `27` | `poly(a, b, c, x) = a*x*x + b*x + c` evaluated as `poly(1, 2, 3, 4)`. FP load/store/arithmetic, FP arg passing (f1..f8), int↔FP conversions, FP comparisons. |
 | [s016-hello-printf.sh](s016-hello-printf.sh) | [016 — PPC PIC stubs](../docs/sessions/016-ppc-plt-stubs/README.md) | prints `hello from tcc-built program` | First-ever `printf` from tcc-emitted code on G3. PowerPC `__picsymbolstub1` + `__la_symbol_ptr` + indirect symbol table for late-binding external function calls. |
 | [s025-self-link.sh](s025-self-link.sh) | [025 — Mach-O .o reader](../docs/sessions/025-macho-o-reader/README.md) | prints `hello from tcc-built and tcc-linked program` | Full self-link via tcc, no gcc. `tcc -o exe file.c` auto-loads `/usr/lib/crt1.o` and produces a working printf+malloc+strcpy executable end-to-end. |
+| [v0.2.12-lua.sh](v0.2.12-lua.sh) | [040 — sqlite3/lua pickup](../docs/sessions/040-pickup-2026-05-03/README.md) | prints `fib(20) = 6765` then `done` | First non-trivial third-party program: lua 5.4.7 (~30 .c files, full standard library) builds and runs end-to-end with tcc. Surfaced two backend bugs (struct-deref-by-value; cross-TU PIC reloc translation) that v0.2.12 fixes. |
 
 ## How to run any demo
 

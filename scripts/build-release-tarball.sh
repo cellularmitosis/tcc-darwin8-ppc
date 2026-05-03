@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.11-g3}"
+VERSION="${VERSION:-v0.2.12-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -123,6 +123,24 @@ What's new (cumulative since v0.1.0-g3):
     failures remain (60_errors_and_warnings test_scope_1 + a
     96_nodata_wanted bitfield case) -- both look like specific
     codegen bugs in narrow paths.
+
+  * v0.2.12: two backend bugs surfaced trying to compile sqlite3
+    amalgamation (3.46.1, 257K lines). Both now fixed:
+      - struct-deref-by-value: passing *p (struct via pointer
+        deref) by value now compiles. Previously errored
+        "deref of basic type 0x7 not yet supported".
+      - cross-TU PIC reloc translation: the Mach-O reader was
+        unconditionally skipping all scattered SECTDIFF relocs,
+        so when linking multiple tcc-built .o files, the second
+        TU's references to extern data symbols (__sF, etc.) read
+        from random addresses. Fix translates them to
+        R_PPC_HA16_PIC / LO16_PIC like our own codegen, with
+        per-reloc anchor recorded for the linker.
+    Real-world impact: lua 5.4.7 now builds and runs
+    end-to-end (hello-world, fib, math.lua, the full standard
+    library). sqlite3 amalgamation builds cleanly and \`./sqlite3
+    -version\` / \`.help\` work; \`select 1+1\` still hits a
+    separate codegen bug under investigation.
 
 Install:
   sudo mkdir -p $PREFIX
