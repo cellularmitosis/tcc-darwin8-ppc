@@ -398,21 +398,20 @@ char *__bound_strchr(const char *s, int c) { return strchr(s,c); }
 char *__bound_strdup(const char *s) { return strdup(s); }
 
 /* ---------------------------------------------------------------------------
- * Atomic helper functions — pthread_mutex-backed.
+ * Atomic helper functions — split between lock-free and mutex paths.
  *
  * tcc's atomic codegen calls __atomic_load_N / __atomic_store_N /
  * __atomic_compare_exchange_N etc. as ordinary functions when the
- * backend lacks intrinsic codegen for them. A "real" implementation
- * would use PPC's lwarx/stwcx. reservation primitives, but tcc's
- * PPC backend doesn't yet emit inline asm and our build pipeline
- * compiles lib-ppc.c with tcc itself (no assembler-file path). So
- * we fall back to a single global pthread_mutex serializing every
- * atomic operation.
+ * backend lacks intrinsic codegen for them. The 4-byte variants
+ * live in atomic-ppc.S as lock-free lwarx/stwcx implementations
+ * compiled by gcc-4.0 (tcc PPC's built-in assembler doesn't cover
+ * those instructions; gcc fills the gap via a per-file Makefile
+ * rule). This file provides the 1, 2, and 8 byte variants plus
+ * atomic_flag_*, all serialized through a single pthread_mutex --
+ * PPC32 has no lbarx/sbarx for 1/2-byte atomics (would need
+ * word-RMW with masking) and no ldarx/stdcx for 8-byte (PPC64
+ * only), so locking is the simplest correct option.
  *
- * Correctness: yes (all atomics are observationally serialized).
- * Performance: poor under contention (every atomic op takes the
- * same global mutex). Fine for compliance with the C11 atomics
- * memory model; not fine if you actually care about scaling.
  * libpthread is part of libSystem on Tiger, so no extra link
  * dependency beyond what every program already pulls in.
  * --------------------------------------------------------------------------*/
@@ -431,7 +430,7 @@ TYPE __atomic_load_##BITS(const TYPE *p, int o) { \
 }
 ATOMIC_LOAD(1, unsigned char)
 ATOMIC_LOAD(2, unsigned short)
-ATOMIC_LOAD(4, unsigned int)
+/* 4-byte ops live in atomic-ppc.S as lock-free lwarx/stwcx implementations. */
 ATOMIC_LOAD(8, unsigned long long)
 #undef ATOMIC_LOAD
 
@@ -442,7 +441,7 @@ void __atomic_store_##BITS(TYPE *p, TYPE v, int o) { \
 }
 ATOMIC_STORE(1, unsigned char)
 ATOMIC_STORE(2, unsigned short)
-ATOMIC_STORE(4, unsigned int)
+/* 4-byte: atomic-ppc.S */
 ATOMIC_STORE(8, unsigned long long)
 #undef ATOMIC_STORE
 
@@ -454,7 +453,7 @@ TYPE __atomic_exchange_##BITS(TYPE *p, TYPE v, int o) { \
 }
 ATOMIC_EXCHANGE(1, unsigned char)
 ATOMIC_EXCHANGE(2, unsigned short)
-ATOMIC_EXCHANGE(4, unsigned int)
+/* 4-byte: atomic-ppc.S */
 ATOMIC_EXCHANGE(8, unsigned long long)
 #undef ATOMIC_EXCHANGE
 
@@ -471,7 +470,7 @@ int __atomic_compare_exchange_##BITS(TYPE *p, TYPE *exp, TYPE des, \
 }
 ATOMIC_CAS(1, unsigned char)
 ATOMIC_CAS(2, unsigned short)
-ATOMIC_CAS(4, unsigned int)
+/* 4-byte: atomic-ppc.S */
 ATOMIC_CAS(8, unsigned long long)
 #undef ATOMIC_CAS
 
@@ -483,27 +482,21 @@ TYPE __atomic_fetch_##NAME##_##BITS(TYPE *p, TYPE v, int o) { \
 }
 ATOMIC_RMW(add, 1, unsigned char,      r + v)
 ATOMIC_RMW(add, 2, unsigned short,     r + v)
-ATOMIC_RMW(add, 4, unsigned int,       r + v)
 ATOMIC_RMW(add, 8, unsigned long long, r + v)
 ATOMIC_RMW(sub, 1, unsigned char,      r - v)
 ATOMIC_RMW(sub, 2, unsigned short,     r - v)
-ATOMIC_RMW(sub, 4, unsigned int,       r - v)
 ATOMIC_RMW(sub, 8, unsigned long long, r - v)
 ATOMIC_RMW(and, 1, unsigned char,      r & v)
 ATOMIC_RMW(and, 2, unsigned short,     r & v)
-ATOMIC_RMW(and, 4, unsigned int,       r & v)
 ATOMIC_RMW(and, 8, unsigned long long, r & v)
 ATOMIC_RMW(or,  1, unsigned char,      r | v)
 ATOMIC_RMW(or,  2, unsigned short,     r | v)
-ATOMIC_RMW(or,  4, unsigned int,       r | v)
 ATOMIC_RMW(or,  8, unsigned long long, r | v)
 ATOMIC_RMW(xor, 1, unsigned char,      r ^ v)
 ATOMIC_RMW(xor, 2, unsigned short,     r ^ v)
-ATOMIC_RMW(xor, 4, unsigned int,       r ^ v)
 ATOMIC_RMW(xor, 8, unsigned long long, r ^ v)
 ATOMIC_RMW(nand, 1, unsigned char,     ~(r & v))
 ATOMIC_RMW(nand, 2, unsigned short,    ~(r & v))
-ATOMIC_RMW(nand, 4, unsigned int,      ~(r & v))
 ATOMIC_RMW(nand, 8, unsigned long long,~(r & v))
 #undef ATOMIC_RMW
 
