@@ -2,122 +2,62 @@
 
 ## Where we are (May 2026)
 
-Self-hosting tcc on Tiger PowerPC: **shipped as
-[v0.1.0-g3](sessions/022-v0.1.0-g3-release/README.md)**. A
-`/opt`-installable tarball that compiles `tcc.c` into a `.o`
-byte-identical to its own — the canonical self-host fixpoint, on a
-22-year-old G3.
+Self-hosted tcc for Tiger PowerPC, **shipped through v0.2.8-g3**.
+Eight patch releases on top of [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md)
+have brought tests2 from 70 / 122 (57%) to **105 / 118 (89.0%)**:
 
-Since the v0.1.0 release, sessions 023-025 closed the
-"executable output" gap. Today, plain `tcc -o exe file.c` produces a
-working libSystem-using binary on Tiger, with no `gcc-4.0`
-involvement at link time:
+| | tests2 | what it added |
+|---|---|---|
+| [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md) | 70 / 122 | full self-link, no gcc-4.0 in pipeline |
+| [v0.2.1-g3](sessions/032-v0.2.1-release/README.md) | 75 / 122 | >8-arg fns, FP shadow for variadic |
+| [v0.2.2-g3](sessions/033-v0.2.2-release/README.md) | 77 / 122 | more libgcc helpers, auto-link libtcc1.a |
+| [v0.2.3-g3](sessions/035-unsupervised-2026-05-02/README.md) | 87 / 122 | struct-by-value parameters |
+| [v0.2.4-g3](sessions/035-unsupervised-2026-05-02/README.md) | 96 / 122 | struct returns, dynamic param-area |
+| [v0.2.5-g3](sessions/035-unsupervised-2026-05-02/README.md) | 101 / 122 | long-frame prolog, VLAs |
+| [v0.2.6-g3](sessions/036-post-travel-2026-05-02/README.md) | 105 / 118 | constructor/destructor, VLA × callee-spill safety, BE-aware skips |
+| [v0.2.7-g3](sessions/037-tcc-run-on-ppc-2026-05-02/README.md) | (104) | **`tcc -run` works on PPC for the first time** (PLT, @hi/@ha fix) |
+| [v0.2.8-g3](sessions/038-real-ppc-atomics-2026-05-02/README.md) | 105 / 118 | real atomics via pthread_mutex |
 
-* [023](sessions/023-macho-executable/README.md) — Phase A+B exec
-  writer (syscall-only programs).
-* [024](sessions/024-libsystem-init/README.md) — extern-data PIC,
-  __mh_execute_header, libSystem-init attempts.
-* [025](sessions/025-macho-o-reader/README.md) — classic Mach-O `.o`
-  reader, auto-loads `/usr/lib/crt1.o`. Full self-link for normal
-  programs.
+(Total dropped 122 → 118 in v0.2.6 because four LE-byte-order-
+specific tests are properly classified as skipped on big-endian.)
 
-The one remaining hole: `tcc-self` itself still needs `gcc-4.0` to
-link, because `tcc.c` references libgcc runtime helpers
-(`__udivdi3`, `__ashldi3`, `__fixdfdi`, etc.) that aren't yet in
-our `libtcc1.a`. Closing that loop is the v0.2.0 milestone.
-
-## Next milestone: v0.2.0
-
-A `/opt`-installable tarball that:
-
-1. Bootstraps end-to-end via tcc alone (no `gcc-4.0` anywhere in the
-   pipeline).
-2. Passes a meaningful chunk of TCC's own `tests/` and `tests2/`
-   suites.
-3. Builds at least one nontrivial real-world program (sqlite
-   amalgamation is the canonical smoke test).
+* Bootstrap fixpoint (`tcc → tcc-self → tcc-self2 → tcc-self3` with
+  `tcc-self2.o == tcc-self3.o`) holds at every release.
+* `tcc -run hello.c` works (since v0.2.7).
+* `tcc -o exe` produces working libSystem-using binaries.
+* Multi-threaded atomics correct (since v0.2.8).
 
 ## Open work, prioritized
 
-### Toward v0.2.0
+### Concrete remaining test failures (13)
 
-1. ✅ **Bundle libgcc helpers into `libtcc1.a`.** Done in
-   [026](sessions/026-libgcc-helpers/README.md) — `lib-ppc.c`
-   provides ten helpers (`__floatundidf`, `__fixunsdfdi`,
-   `__fixdfdi`, `__ashldi3`, `__lshrdi3`, `__ashrdi3`,
-   `__udivdi3`, `__umoddi3`, `__divdi3`, `__moddi3`). Verified
-   end-to-end by tcc-linking a long-long signed-divide program.
+| Bucket | Tests | Effort |
+|---|---|---|
+| **bcheck.c port** | 112_backtrace, 113_btdll, 115_bound_setjmp, 116_bound_setjmp2, 126_bound_global | Multi-session. Codegen instrumentation in `ppc-gen.c` partially exists (`func_bound_offset` / `func_bound_ind` are unused statics); the no-op stubs in `lib-ppc.c` need replacing with a real port of `tcc/lib/bcheck.c` (hash-table region tracking + signal hooks). Would also unblock 117_builtins (its `-b` second invocation needs `bcheck.o`) and the three `-run`-only failures (121_struct_return, 122_vla_reuse, 132_bound_test) that use `-b` and pass under `-o exe` only because the no-op stubs are linked in. |
+| **`-dt` test classification** | 60_errors_and_warnings, 96_nodata_wanted, 125_atomic_misc, 128_run_atexit | These need `-dt -run`. Several pass under `RUN=1` already. Two paths: (a) update `scripts/run-tests2.sh` to drop `NORUN=true` so per-test `NORUN` overrides apply, or (b) add `T1` overrides per test in the Makefile. 128's `on_exit` is glibc-only on Mac and won't pass either way. |
+| **104_inline** | inverse: passes under `-run`, fails under `-o exe` | Test-mode quirk; same `-dt` classification issue from the other side. |
+| **70_floating_point_literals** | 5-ULP error in upstream tcc's `parse_number` on PPC IEEE 754 | Upstream tcc bug; surfaces only on PPC's IEEE semantics. Deep but contained. |
+| **73_arm64** | HFA aggregates designed for AArch64 ABI | Won't fully pass — the test exercises HFA semantics PPC doesn't have. The handful of sub-tests that fail isolate to long-double struct-by-value cases that span the GPR/stack boundary. Worth fixing the codegen even though the test is platform-mismatched; same fix would help any program passing big aggregates. |
 
-2. ✅ **Resolve the keymgr / DWARF init-order bug + four other
-   independent bugs converging on the same SIGBUS-on-launch
-   symptom.** Done in
-   [027](sessions/027-self-link/README.md) — auto-injected keymgr
-   stub that calls `_dyld_register_func_for_{add,remove}_image` (a
-   load-bearing side effect that kicks libSystem's init);
-   populated `__DATA,__dyld` with the dyld helper pointers; set
-   `REFERENCED_DYNAMICALLY` on `_environ`/`_NXArgc`/`_NXArgv`/
-   `__mh_execute_header`; **sorted external defined symbols
-   alphabetically** (dyld uses binary search!); skipped crt1's
-   private machinery from the external symbol table; bypassed a
-   tcc PPC backend bug in `put_nlist`'s narrow-arg call sequence.
+### Structural items
 
-3. ✅ **Self-host fixpoint reached.** `bootstrap-tcc-self.sh
-   FIXPOINT=1` runs the canonical chain: tcc → tcc-self.o →
-   tcc-self → tcc-self2.o → tcc-self2 → tcc-self3.o, then
-   verifies `tcc-self2.o == tcc-self3.o` byte-identical
-   ([027](sessions/027-self-link/README.md)). The pre-existing
-   23-25 era 32-byte regression vs gcc-built tcc's output remains
-   (so tcc.o ≠ tcc-self.o), but tcc-self → tcc-self2 → tcc-self3
-   is a stable fixpoint, which is what self-host actually means.
+| | item | notes |
+|---|---|---|
+| **#1** | **Real lwarx/stwcx atomics** | The v0.2.8 pthread_mutex implementation is correct but slow (4.2M lock cycles for 124_atomic_counter). Lock-free PPC atomics need either tcc inline-asm support OR a `.S` → `.o` build path through gcc-4.0. |
+| **#2** | **2-element HFA struct-by-value on GPR overflow** | 73_arm64 isolates this. Generic struct-by-value codegen issue when arguments span r3..r10 + stack. |
+| **#3** | **Mach-O `tcc -ar` driver** | Currently `XAR = $(AR)` for PPC because tcc's `-ar` is ELF-only. Eventual port lets libtcc1.a be built without external `ar`. |
+| **#4** | **Mach-O archive alacarte loader** | (Was old roadmap #7.) Parse `__.SYMDEF SORTED` and selectively pull members vs. current force-whole-archive. Would also unblock the libgcc.a whole-archive crash from 025. |
+| **#5** | **`ppc-macho-stubs.c` cleanup** | (Was old #8.) Was supposed to be deleted "when phase 3 lands." Phase 3 long since landed. Verify nothing references it and remove. |
+| **#6** | **De-duplicate UNDEF symbols** | (Was old #9.) Spotted in 026: tcc-linked binaries have duplicate UNDEF entries for `___keymgr_dwarf2_register_sections`, `_atexit`, `_exit` when both crt1.o and another input reference them. `macho_translate_sym` coalescing path needs work. |
+| **#7** | **Self-link diagnostics** | (Was old #10.) When the EXE writer fails the user gets `dyld` errors with no context. Better messages would shorten future 025-style debugging considerably. |
 
-4. **Wire up TCC's own testsuites.** `tcc/tests/` and `tcc/tests2/`
-   together hold ~330 small C programs covering language and
-   codegen edge cases. Get the Make targets running on PPC, capture
-   a baseline pass/fail count, fix the obvious wins, document the
-   rest. (Session 028.)
+### Larger scope
 
-5. **Real-world program smoke tests.** Build sqlite3 amalgamation
-   with `tcc -o`, then lua. Document what breaks, fix what's quick,
-   capture the rest as follow-ups. (Session 029.)
-
-6. **Cut v0.2.0.** Update `scripts/build-release-tarball.sh` to
-   bundle the self-link path. Regenerate demos. Update the README
-   status table. Tag, release notes, GitHub upload. (Session 030.)
-
-### After v0.2.0
-
-7. **Proper Mach-O archive alacarte loader.** Parse `__.SYMDEF
-   SORTED` and selectively pull members that resolve undefined
-   symbols, instead of the current force-whole-archive on Mach-O.
-   Would also fix the libgcc.a whole-archive crash noted in 025.
-
-8. **`ppc-macho-stubs.c` cleanup.** Was supposed to be deleted
-   "when phase 3 lands." Phase 3 has long since landed; verify
-   nothing references it and remove.
-
-9. **De-duplicate UNDEF symbols in the Mach-O reader.** Spotted in
-   026: tcc-linked binaries have duplicate UNDEF entries for
-   `___keymgr_dwarf2_register_sections`, `_atexit`, `_exit` when
-   both crt1.o and another input reference them. Looks like the
-   `macho_translate_sym` coalescing path needs work.
-
-10. **Improve self-link diagnostics.** Currently when something
-    goes wrong in the EXE writer the user gets `dyld` errors with
-    no context. Better error messages would shorten future
-    debugging sessions like 025 considerably.
-
-### Larger scope (post-v0.2.0)
-
-11. **DWARF debug info emission.** Currently `tcc/tccdbg.c` has no
-    PPC support, so backtraces from tcc-built programs are useless.
-    Would unblock `lldb`/`gdb` debugging.
-
-12. **AltiVec intrinsics.** None today; tcc emits scalar code for
-    everything. The port is plausible but a large project.
-
-13. **Bounds-checking mode.** `-bt` and `-bcheck`. Same story as
-    AltiVec — exists for other backends, just nobody wired up the
-    PPC version.
+| | item | notes |
+|---|---|---|
+| **#8** | **DWARF debug info emission** | (Was old #11.) `tcc/tccdbg.c` has no PPC support → backtraces from tcc-built programs are useless. Would unblock `lldb` / `gdb` debugging. |
+| **#9** | **AltiVec intrinsics** | (Was old #12.) None today; tcc emits scalar code for everything. Plausible but a large project. |
+| **#10** | **Real-world program builds** | sqlite amalgamation (smoke-tested in [030](sessions/030-sqlite-smoke/README.md), blocked at the time on struct-by-value which has since landed — worth retrying), then lua. |
 
 ## Out of scope (still)
 
@@ -127,50 +67,57 @@ A `/opt`-installable tarball that:
 - 64-bit PPC (G5 in 64-bit mode). 32-bit only; runs on G5 in 32-bit
   mode anyway.
 - libtcc thread safety. Disabled at build time.
-- Inline assembly support beyond the basic `__asm__` block.
+- Inline assembly support beyond the basic `__asm__` block (gating
+  some of #1 above; if it ever lands, would unblock several
+  follow-ups).
 
 ## Testing methodology
 
 In rough order of cost vs. confidence:
 
-1. **The four pre-release demos** (`demos/s00*-*.c`,
-   `demos/s025-self-link.sh`). Quick smoke that the basic codegen +
-   exec output works after every nontrivial change.
+1. **`scripts/run-tests2.sh`** — full TCC tests2 suite.
+   `NORUN=true` (default) exercises `-o exe`; `RUN=1` exercises
+   `tcc -run`. ~7 min wall under default since v0.2.8 (was ~3 min
+   before real atomics; 124_atomic_counter takes 6+ min through
+   the global mutex).
 
-2. **Self-host fixpoint.** Run
-   `scripts/bootstrap-tcc-self.sh` and confirm `tcc-self` compiles
-   `tcc.c` into a `.o` byte-identical to the original. Catches
-   regressions in any path that affects compilation correctness.
+2. **`FIXPOINT=1 ./scripts/bootstrap-tcc-self.sh`** — bootstrap
+   fixpoint. tcc → tcc-self → tcc-self2 → tcc-self3, verifying
+   `tcc-self2.o == tcc-self3.o`. Catches any regression that
+   affects tcc.c's own compilation.
 
-3. **TCC's own `tests/` and `tests2/`** (Phase 4 above, currently
-   not wired up). When working, this is the broadest catch-net for
-   codegen bugs.
+3. **The pre-release demos** (`demos/s00*-*.c`,
+   `demos/s025-self-link.sh`). Fast smoke for basic codegen + exec
+   output after non-trivial changes.
 
-4. **Differential testing against `gcc-4.0`** for any new feature.
-   Compile the same C with both, compare exit code / stdout.
+4. **Differential testing against `gcc-4.0`** for new features.
+   Compile the same C with both, compare output / exit code.
    Cheapest way to catch semantic divergence.
 
-5. **Real-world program builds** (sqlite, lua). Smoke test for
-   things the synthetic tests don't exercise (long compilation
-   units, real-world preprocessor patterns, etc.).
+5. **Real-world program builds** (sqlite, lua). Smoke-tests the
+   broader codegen surface that synthetic tests don't exercise.
 
 ## Risk register
 
-- **libgcc.a whole-archive load is broken** (known limitation from
-  025). The whole-archive path loads all 75 members but produces a
-  binary that crashes even simple `printf`. Bypassed for v0.2.0 by
-  bundling helpers into libtcc1.a; properly fixed by item #5.
+- **bcheck blocker**. Five test failures plus three `-run` regressions
+  all gate on the same `bcheck.c` port. Multi-session lift. Until
+  it lands the test count is stuck around 89-90%.
 
-- **Mach-O testsuite expectations.** Some `tcc/tests*/` tests
-  assume ELF idioms (e.g. checking `nm` output formats). Likely
-  some failures will be testsuite-format issues, not real bugs.
-  Need to triage.
+- **lwarx/stwcx blocker**. The pthread_mutex atomics are correct
+  but the mutex-contention scaling is bad. A real implementation
+  needs tcc to grow inline-asm OR a separate `.S` build path; that's
+  a prerequisite, not a small thing.
 
-- **Tiger's libSystem is old.** Functions added after 10.4 (e.g.
-  several POSIX 2008 additions) aren't available. Programs that
-  use them will fail to link with informative errors; not really a
-  risk so much as a constraint to communicate.
+- **Tiger's libSystem is old**. Functions added after 10.4 (e.g.
+  several POSIX 2008 additions) aren't available. Programs using
+  them fail to link with informative errors. Constraint to
+  communicate, not really a risk.
 
-- **No DWARF / no debugger.** Debugging tcc-built programs is
+- **No DWARF / no debugger**. Debugging tcc-built programs is
   hex-dump-and-disassemble work. Slows down anyone hitting an
-  obscure bug. See item #8.
+  obscure bug. Item #8 above.
+
+- **Out-of-tree upstream divergence**. We modify tcc/ in place
+  rather than maintaining a patch set. If we ever want to rebase
+  onto a newer upstream, that's a session task — not a routine
+  workflow.
