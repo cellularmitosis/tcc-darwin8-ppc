@@ -127,42 +127,50 @@ generated rule reducer).
 So the bug is reached only by SELECT-style statements that need
 expression-tree construction during parsing.
 
-### Crash assembly
+### Crash root cause [FIXED in v0.2.16-g3]
 
-```
-li r7, 0
-mr r5, r7         ; r5 = 0 (was previously some pointer)
-lwz r4, 0(r5)     ; lwz r4, 0(0) — loads from absolute address 0; SEGV
-```
+The crash was tcc's `gfunc_call` LL-arg shuffle clobbering another
+arg's address register. Specifically, in calls like
+`func(state->fd, 0LL, SEEK_CUR)`:
 
-This is a deliberate `*(NULL)` deref by tcc-emitted code. tcc
-intentionally set `r5 = 0` then dereffed through it.
+1. arg1 (state->fd lvalue) was computed: `r4 = state + 20`.
+2. arg2 (LL value) was materialized via `gv(RC_INT)`, then `mr`
+   shuffled into ABI slots r4 and r5.
+3. The `mr r4, r5` step CLOBBERED r4 — but arg1 still needed r4!
+4. arg1's later `lwz r3, 0(r4)` loaded from r4=0 instead of
+   state+20 → SEGV.
 
-### Heisenbug clue
+Fix: in the LL move block of `gfunc_call`, call save_reg on
+target_hi and target_lo BEFORE materializing the LL. That spills
+any vstack entry using those regs to a local; arg1 reloads from
+the local later.
 
-Adding a single `write(2, marker, n)` call **at the top of
-`yy_reduce`, before the `switch` dispatch**, makes the crash
-disappear. Adding the same marker inside `case 0`'s body (which
-shifts cases 1+ but not the switch dispatch) does NOT fix it. So
-the buggy code is in the function setup or switch dispatch, not
-in any individual case body.
+After fix:
+- `./sqlite3 :memory: "select 1+1"` → 2
+- `./sqlite3 :memory: "select hex(1234)"` → 31323334
+- zlib `./example` full test suite passes
 
-Could be:
-* A stack-frame-size sensitivity: my LL field-load fix uses
-  `save_reg_upstack` which may allocate a temp local that lands at
-  a problematic offset (e.g., just past `0x7fff` 16-bit signed
-  range, falling through to a buggy code path).
-* PIC anchor / @ha-@lo offset interaction: yy_reduce's PIC anchor
-  computation may end up at an address where some downstream
-  `lis+addi` pair encodes wrong.
-* Switch dispatch codegen (jump table or compare-chain).
+## Crash 3 (deferred): file-based sqlite_open and CREATE TABLE
 
-### Next steps
+After v0.2.16, simple SELECT queries work but:
 
-1. Bisect the switch by inserting markers at increasingly later
-   case bodies until the bug reappears — find which case body is
-   the buggy one.
-2. Or: dump tcc's emitted code for yy_reduce (with and without
-   marker) and diff to find the divergence.
-3. Or: build with `-O0`-equivalent volatility annotations on
-   yy_reduce locals (forcing all-spill) and see if bug persists.
+- `sqlite3_open("/tmp/test.db", ...)` SEGV in xOpen dispatch
+  (PC = junk, looks like wild jump via corrupted function pointer).
+- `sqlite3 :memory: "create table t(x); ..."` returns
+  SQLITE_CORRUPT (11, "database disk image is malformed") — not a
+  crash, but B-tree state is wrong.
+
+Both probably involve the same underlying bug: a struct field at
+the wrong offset or a function pointer table populated with junk.
+sqlite uses `sqlite3_vfs` (lots of function pointers) and
+`sqlite3_io_methods` (more function pointers). Static initializers
+should populate them correctly, but tcc may have a layout bug for
+one of them.
+
+Next session investigation paths:
+1. Compare tcc-built and gcc-built `aVfs[]` static initializer
+   bytes — diff to find layout discrepancy.
+2. Walk the unixVfs struct in gdb to verify each function pointer
+   matches the symbol address.
+3. Look for STRUCT initializers with mixed types (int + pointer +
+   long long) where alignment might still differ.
