@@ -1540,24 +1540,43 @@ ST_FUNC void gfunc_call(int nb_args)
              * Mechanism: spill FP register to a scratch slot at
              * 16(r1) (linkage area's saved-CR word, unused during a
              * call), reload as int register(s) into the shadow GPRs. */
-            if (gslot >= 0 && gslot < 8) {
+            if (gslot >= 0) {
                 int fpr = fslot + 1;           /* PPC reg number f1..f8 */
-                int target_lo = gslot + 3;     /* r3..r10 */
                 if (bt == VT_FLOAT) {
-                    /* stfs fS, 16(r1) ; lwz rT, 16(r1) */
-                    o(0xd0010010 | (fpr << 21));
-                    o(0x80010010 | (target_lo << 21));
+                    if (gslot < 8) {
+                        /* shadow in GPR: stfs fS, 16(r1); lwz rT, 16(r1) */
+                        int target_lo = gslot + 3;
+                        o(0xd0010010 | (fpr << 21));
+                        o(0x80010010 | (target_lo << 21));
+                    } else {
+                        /* shadow on stack: stfs fS, (24+gslot*4)(r1) */
+                        o(0xd0010000 | (fpr << 21)
+                                     | ((24 + gslot * 4) & 0xffff));
+                    }
                 } else if (gslot + 1 < 8) {
-                    /* stfd fS,16(r1) ; lwz rT,16(r1) ; lwz rT+1,20(r1) */
+                    /* both halves of double in GPR shadow:
+                     * stfd fS,16(r1) ; lwz rT,16(r1) ; lwz rT+1,20(r1) */
+                    int target_lo = gslot + 3;
                     o(0xd8010010 | (fpr << 21));
                     o(0x80010010 | (target_lo << 21));
                     o(0x80010014 | ((target_lo+1) << 21));
+                } else if (gslot < 8) {
+                    /* double straddling r10/stack: high half in r10,
+                     * low half on stack at (24+(gslot+1)*4)(r1).
+                     * Spill the FP reg to scratch then load both halves
+                     * separately so the GPR and stack writes use a
+                     * common source. */
+                    int target_lo = gslot + 3;
+                    o(0xd8010010 | (fpr << 21));   /* stfd fS, 16(r1) */
+                    o(0x80010010 | (target_lo << 21)); /* lwz r10, 16(r1) */
+                    /* lwz r0, 20(r1) ; stw r0, 24+(gslot+1)*4 (r1) */
+                    o(0x80010014);                   /* lwz r0, 20(r1) */
+                    o(0x90010000 | ((24 + (gslot + 1) * 4) & 0xffff));
                 } else {
-                    /* double straddling r10/stack: put high half in r10,
-                     * low half is already on the outgoing stack via the
-                     * standard spill path. */
-                    o(0xd8010010 | (fpr << 21));
-                    o(0x80010010 | (target_lo << 21));
+                    /* double's GPR shadow entirely on stack:
+                     * stfd fS, (24+gslot*4)(r1) writes both halves. */
+                    o(0xd8010000 | (fpr << 21)
+                                 | ((24 + gslot * 4) & 0xffff));
                 }
             }
         } else {
