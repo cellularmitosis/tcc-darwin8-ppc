@@ -1,13 +1,11 @@
 /*
- * ppc-macho.c -- 32-bit PowerPC Mach-O object-file writer for tcc.
+ * ppc-macho.c -- 32-bit PowerPC Mach-O object-file + executable
+ * writer for tcc. Also implements the .o reader and dyld/dylib
+ * loader hooks (`tcc_add_macos_sdkpath`, `macho_load_dll`,
+ * `macho_load_tbd`, `macho_output_file`, `macho_tbd_soname`,
+ * `__clear_cache`).
  *
- * Targets Mac OS X 10.4 (Tiger) on PPC G3/G4/G5. Produces MH_OBJECT
- * files (relocatable .o) only. Executables/dylibs are out of scope --
- * we rely on Tiger's gcc-4.0 / ld(1) to do final linking.
- *
- * Replaces ppc-macho-stubs.c. Provides the same exported symbols
- * (tcc_add_macos_sdkpath, macho_load_dll, macho_load_tbd,
- * macho_output_file, macho_tbd_soname, __clear_cache).
+ * Targets Mac OS X 10.4 (Tiger) on PPC G3/G4/G5.
  *
  * This file deliberately does NOT include tccmacho.c -- that file is
  * heavily 64-bit-LE oriented (LC_SEGMENT_64, mach_header_64, write32le
@@ -4137,7 +4135,7 @@ bad:
 }
 
 /* ====================================================================
- * Other exports (unchanged from ppc-macho-stubs.c).
+ * Mach-O integration shims (SDK paths, dylib/tbd loaders).
  * ================================================================== */
 
 ST_FUNC void tcc_add_macos_sdkpath(TCCState *s)
