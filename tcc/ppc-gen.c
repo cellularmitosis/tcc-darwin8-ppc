@@ -1612,6 +1612,20 @@ ST_FUNC void gfunc_call(int nb_args)
                     int lo_reg, hi_reg;
                     int target_hi = gslot + 3;       /* r3..r10 */
                     int target_lo = gslot + 1 + 3;
+                    /* Spill any vstack entries that use the target ABI
+                     * slots BEFORE materializing the LL. Without this,
+                     * a previously-emitted address pointer for a later-
+                     * processed arg (e.g., `state+20` in r4 for arg1
+                     * waiting in vstack) sits in target_hi or target_lo
+                     * and gets clobbered when we `mr target, src` —
+                     * arg1's later setup then loads from r4 = clobbered
+                     * value instead of the original address.
+                     *
+                     * save_reg(tcc_idx) moves any vstack entry using
+                     * that register to a stack local and marks the reg
+                     * free. Subsequent arg setup reloads from the local. */
+                    save_reg(target_hi - 3);   /* target_hi PPC -> TREG idx */
+                    save_reg(target_lo - 3);
                     gv(RC_INT);
                     lo_reg = TREG_TO_GPR(vtop->r & VT_VALMASK);
                     if (vtop->r2 < VT_CONST) {
