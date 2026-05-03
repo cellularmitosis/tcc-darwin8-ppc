@@ -339,3 +339,66 @@ ef6fa2b tests2 Makefile: capture compile-step stderr too
 ```
 
 Plus the v0.2.3-g3 tag and GitHub release.
+
+---
+
+## Resumption — 2026-05-02 (post-handoff, post-travel)
+
+Picked the session back up after the laptop returned from travel.
+Per HANDOFF-2.md the immediate task was to verify HEAD `d82b12a`
+(the constructor/destructor commit landed mid-session before the
+unplug) — fixpoint and full tests2.
+
+### What I found
+
+Fixpoint: still holds at HEAD `d82b12a`. Full tests2: 101 / 122 =
+82.8% — but **108_constructor failed**, contradicting the
+"manually verified passing" claim in HANDOFF-2.md. The integrated
+test compile of 108_constructor.c hung tcc forever (~12 minutes
+wall, growing to ~500 MB of RAM, never producing an exe).
+
+The single-constructor and single-destructor cases compiled
+instantly and worked correctly, so the trigger was something
+specific to having both halves in the same TU.
+
+### Root cause
+
+Stack array overflow in `macho_output_exe`. The fixed-size
+`struct exe_sect sects[8]` array, sized when only 7 sections were
+ever needed, was overflowed once `__mod_init_func` AND
+`__mod_term_func` were both present in addition to text + rodata
++ stub + data + nlptr + dyld + bss = 9 sections total. Writing
+sects[8] clobbered the next-adjacent stack locals
+(`sect_idx_init_array`, `sect_idx_nlptr`, `sect_idx_dyld`).
+The corrupted indices then read garbage `file_off` values
+(273492, 547853, ...) which the section write-out loop's
+`while (out.len < target) put8(&out, 0)` "padded" to with
+hundreds of MB of zero bytes — runaway memory + no progress.
+
+The previous session's "manually verified passing" appears to
+have been a measurement error — likely a pre-fix tcc binary or
+a different invocation that happened not to trigger the crt1
+machinery (and so produced fewer than 8 sections).
+
+### Fix
+
+Bumped `sects[]` from 8 to 16 (`tcc/ppc-macho.c:1614`). One-line
+change. Headroom for future additions (debug, eh_frame).
+
+### Result at HEAD `7151bf1`
+
+- `FIXPOINT=1 ./scripts/bootstrap-tcc-self.sh` — holds
+- `./scripts/run-tests2.sh` — **102 / 122 = 83.6%** (was 101)
+- 108_constructor PASSES (verified both standalone and in suite)
+- No regressions.
+
+### Commits this resumption
+
+```
+7151bf1 ppc-macho: fix sects[8] overflow when init_array+fini_array present
+```
+
+### Trajectory updated
+
+77 → 79 → 83 → 84 → 87 → 89 → 91 → 92 → 93 → 95 → 96 → 98 →
+101 → **102** (HEAD `7151bf1`).
