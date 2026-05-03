@@ -19,7 +19,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-VERSION="${VERSION:-v0.2.6-g3}"
+VERSION="${VERSION:-v0.2.7-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -85,10 +85,17 @@ What's new (cumulative since v0.1.0-g3):
   * VLA + function-call interaction is now safe: each VLA reserves
     a 128-byte buffer below its data so callee param-spills don't
     corrupt the array.
-  * tests2 baseline at this release: 105 / 118 (89.0%) — note total
-    count is 118 not 122 because four LE-byte-order-specific tests
-    (90_struct-init, 91_ptr_longlong_arith32, 95_bitfields,
-    95_bitfields_ms) are now properly skipped on big-endian.
+  * tcc -run mode works for the first time on PPC:
+    create_plt_entry + relocate_plt now generate proper 4-instruction
+    branch islands (lis/ori/mtctr/bctr) that JIT-resolve every libc
+    call through dlsym. Simple programs (printf hi-world, struct
+    tests, etc.) now run end-to-end via "tcc -run".
+  * tests2 baseline at this release: 104 / 118 (88.1%) under the
+    default -o exe path, 102 / 118 (86.4%) under tcc -run (set
+    RUN=1 in scripts/run-tests2.sh). Total count is 118 not 122
+    because four LE-byte-order-specific tests (90_struct-init,
+    91_ptr_longlong_arith32, 95_bitfields, 95_bitfields_ms) are
+    properly skipped on big-endian.
 
 Install:
   sudo mkdir -p $PREFIX
