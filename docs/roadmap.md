@@ -43,7 +43,7 @@ specific tests are properly classified as skipped on big-endian.)
 
 | | item | notes |
 |---|---|---|
-| **#1** | **Real lwarx/stwcx atomics** | The v0.2.8 pthread_mutex implementation is correct but slow (4.2M lock cycles for 124_atomic_counter). Lock-free PPC atomics need either tcc inline-asm support OR a `.S` → `.o` build path through gcc-4.0. |
+| ~~**#1**~~ | ~~Real lwarx/stwcx atomics~~ | ✅ Done in `ba7848b` (4-byte) + `defd38c` (1-byte and 2-byte via word-RMW with masking). Per-file Makefile rule routes `tcc/lib/atomic-ppc.S` through gcc-4.0 to dodge tcc's missing PPC inline-asm. 124_atomic_counter dropped from 6m23s → 2.4s (137x speedup). 8-byte ops still serialize through the mutex (PPC32 has no ldarx/stdcx). |
 | **#2** | **2-element HFA struct-by-value on GPR overflow** | 73_arm64 isolates this. Generic struct-by-value codegen issue when arguments span r3..r10 + stack. |
 | **#3** | **Mach-O `tcc -ar` driver** | Currently `XAR = $(AR)` for PPC because tcc's `-ar` is ELF-only. Eventual port lets libtcc1.a be built without external `ar`. |
 | **#4** | **Mach-O archive alacarte loader** | (Was old roadmap #7.) Parse `__.SYMDEF SORTED` and selectively pull members vs. current force-whole-archive. Would also unblock the libgcc.a whole-archive crash from 025. |
