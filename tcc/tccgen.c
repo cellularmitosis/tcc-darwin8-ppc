@@ -727,7 +727,15 @@ static inline void sym_link(Sym *s, int yes)
         ps = &ts->sym_identifier;
     if (yes) {
         s->prev_tok = *ps, *ps = s;
-        s->sym_scope = local_scope;
+        /* For enum constants, sym_scope shares storage with enum_val
+         * (Sym union). Writing sym_scope unconditionally clobbers
+         * the low half of enum_val, which is the visible value on
+         * BE targets — small enum values like 12, 34 all collapse
+         * to 1 (the local_scope) here. The scope for enum_val syms
+         * is canonically read from s->type.ref->sym_scope (the enum
+         * tag's scope) — see sym_scope_ex. So just don't write it. */
+        if (!IS_ENUM_VAL(s->type.t))
+            s->sym_scope = local_scope;
     } else {
         *ps = s->prev_tok;
     }
@@ -8703,6 +8711,24 @@ static void gen_function(Sym *sym)
     /* push parameters */
     local_scope = 1;
     sym_push_params(sym->type.ref);
+
+    /* C standard: enum constants declared in a function's parameter
+     * list are visible inside the body when the function is being
+     * defined. post_type (called for the declarator) does sym_pop
+     * with keep=1, which unlinks every parameter-scope symbol from
+     * the token table. sym_push_params above re-links the actual
+     * parameters; here we additionally walk what's left of the
+     * post_type leftovers below our new dummy boundary, looking
+     * for enum constants that lived in the parameter scope, and
+     * re-link them so identifier lookup in the body finds them.
+     *
+     * Bound: stop at sym->type.ref (the anon function symbol that
+     * post_type pushed at the start of param parsing). Anything
+     * BELOW that pre-existed and isn't ours.
+     *
+     * gen_function's terminal sym_pop(&local_stack, NULL, 0) cleans
+     * everything (including these re-linked tokens) when we return,
+     * so this doesn't leak across functions. */
 
     local_scope = 0;
     rsym = 0;

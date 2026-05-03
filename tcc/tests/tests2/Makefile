@@ -158,6 +158,13 @@ ifeq ($(filter ppc,$(ARCH)),ppc)
  # a per-test T1 override so it works regardless of the global
  # NORUN setting.
 125_atomic_misc.test: T1 = ( $(TCC) $(FLAGS) -run $1 $(ARGS) )
+ # Same story for 60 and 96: -dt only takes effect for -run /
+ # preprocess output_types (see tcc.c:362 -- if (s->output_type ==
+ # TCC_OUTPUT_MEMORY ...)). Both tests have NO unguarded main(),
+ # so in -o exe mode they fail with "_main not defined". Pin them
+ # to -run on PPC so the per-test_X discrimination actually fires.
+60_errors_and_warnings.test: T1 = ( $(TCC) $(FLAGS) -run $1 $(ARGS) )
+96_nodata_wanted.test: T1 = ( $(TCC) $(FLAGS) -run $1 $(ARGS) )
 endif
 124_atomic_counter.test: FLAGS += -pthread
 126_bound_global.test: FLAGS += -b
