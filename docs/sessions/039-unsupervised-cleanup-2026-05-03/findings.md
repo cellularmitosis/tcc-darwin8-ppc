@@ -88,6 +88,84 @@ GPR-shadow slot (0-based):
 For float args, only one slot needed. `stfs fS, (24+gslot*4)(r1)`
 when `gslot >= 8`.
 
+## Word-RMW byte/short atomic pattern on PPC32 BE
+
+PPC32 has `lwarx`/`stwcx.` for word atomics but no `lbarx`/`sbarx`
+for byte/short. Sub-word atomics work by lwarx-ing the containing
+4-byte word, masking out the byte/short region, OR-ing in the new
+value, then stwcx-ing the whole word. Reservation tracks the
+word, so concurrent RMW of the same byte from multiple threads
+serializes correctly via the reservation cancel.
+
+Big-endian byte/short addressing within a word:
+* byte at addr A: `shift = (3 - (A & 3)) * 8 = ((A ^ 3) & 3) << 3`
+  (places byte at bits `[shift, shift+7]` of the word).
+* half at addr A (assumed 2-aligned): `shift = (1 - ((A>>1) & 1)) * 16
+  = ((A ^ 2) & 2) << 3` (bits `[shift, shift+15]`).
+
+Implementation pattern in PPC asm (byte fetch_add):
+```
+clrrwi  r9,  r3, 2             # word ptr
+xori    r10, r3, 3
+rlwinm  r10, r10, 3, 27, 28    # shift
+li      r11, 0xff
+slw     r11, r11, r10          # mask = 0xff << shift
+sync
+1:
+lwarx   r0,  0, r9             # load word with reservation
+srw     r7,  r0, r10           # extract old byte (low 8 bits + garbage)
+add     r7,  r7, r4            # apply OP
+slw     r7,  r7, r10           # shift back to position
+and     r7,  r7, r11           # mask to byte position
+andc    r6,  r0, r11           # preserved bits (other bytes)
+or      r6,  r6, r7            # combined word
+stwcx.  r6,  0, r9             # store-conditional
+bne-    1b                     # retry on reservation loss
+isync
+srw     r3,  r0, r10           # return old byte (zero-ext)
+rlwinm  r3,  r3, 0, 24, 31
+blr
+```
+
+For 8-byte ops there's no equivalent PPC32 (ldarx/stdcx are PPC64
+only); fall back to a pthread_mutex.
+
+## Bitfield struct layout: tcc differs from gcc-4.0 on mixed-type fields (NOT YET FIXED)
+
+Hits 96_nodata_wanted test_data_suppression_off. Test struct:
+```c
+struct {
+    unsigned x : 12;
+    unsigned char y : 7;
+    unsigned z : 28, a: 4, b: 5;
+} s = { 0x333, 0x44, 0x555555, 6, 7 };
+```
+
+GCC-4.0 byte dump (PPC, BE): `33 30 88 00 05 55 55 56 38 00 00 00`
+* word 0 (BE) = `0x33308800`: bits 31..20 = 0x333 (x), bits 19..13
+  = 0x44 (y), bits 12..0 = padding. **First-declared-field at
+  HIGHEST bits**.
+
+Tcc byte dump: `00 00 44 33 60 55 55 55 00 00 00 07`
+* word 0 (BE) = `0x00004433`: bits 0..11 = 0x433 (x — corrupted!),
+  bits 8..14 = 0x44 (y, OVERLAPPING x's high 4 bits). **First-
+  declared-field at LOWEST bits**, AND y's offset is computed to
+  start at bit 8 (the first byte after x's first 8 bits) instead
+  of at bit 12 (just past x).
+
+Two separate bugs in tcc's bitfield layout for PPC:
+1. Wrong endianness ordering — fields should be packed from MSB
+   (BE) for Apple PPC ABI, not LSB.
+2. Mixed-type packing places `unsigned char y : 7` at the next
+   BYTE boundary after x's first byte, not after x ends.
+
+Fix is in `tccgen.c::struct_layout` (the `pcc` mode bitfield
+section around line 4275+). Probably needs PPC-specific byte-
+order awareness or (more likely) tcc's bitfield code has had a
+long-standing BE bug that's only now exposed. Worth comparing
+against tcc's other BE targets (mips, sparc) before assuming the
+fix is PPC-specific.
+
 ## Enum-in-parameter-list scope extension (NOT YET FIXED)
 
 C standard quirk: when a function is *defined* (not just declared)
