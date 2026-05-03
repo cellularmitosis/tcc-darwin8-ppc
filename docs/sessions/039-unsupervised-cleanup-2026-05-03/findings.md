@@ -88,6 +88,36 @@ GPR-shadow slot (0-based):
 For float args, only one slot needed. `stfs fS, (24+gslot*4)(r1)`
 when `gslot >= 8`.
 
+## Enum-in-parameter-list scope extension (NOT YET FIXED)
+
+C standard quirk: when a function is *defined* (not just declared)
+with an enum declared inside its parameter list, the enum
+constants are visible inside the function body. This is the
+"parameter scope extends into function body" rule from the
+standard.
+
+Tcc currently *does not* extend parameter scope into the body for
+enum constants. So this code:
+
+```c
+int bar(enum ee { a = 12, b = 34 } i) {
+    return a + b;       /* should be 12 + 34 = 46 */
+}
+```
+
+…compiles to `return 0 + 0` (or 1+1, in our case — both `a` and
+`b` resolve to `1`, suggesting they're being parsed as default-
+ordinal-1 enum constants somewhere). Hits 60_errors_and_warnings
+test_scope_1.
+
+Workaround: declare the enum at file scope or inside the function
+body. Both work.
+
+The fix is in tccgen.c around the parameter parsing — needs to
+keep enum constants from parameter scope alive through the body
+parse. Likely involves not popping the parameter scope when
+transitioning from declarator to body.
+
 ## Apple PPC nlist's high byte carries the LIBRARY ORDINAL
 
 Two-level namespace lookup: each undef external has `n_desc >> 8`
