@@ -47,38 +47,35 @@ crashing inside open).
 
 Commits: `bc1ff4d`, `560ae06` (release).
 
-### 4. sqlite3_prepare_v2 — crash, partial diagnosis
+### 4. LL-arg shuffle clobber — sqlite + zlib unblocked [v0.2.16-g3]
 
-After v0.2.15, `select 1+1` still crashes — but now inside
-`sqlite3RunParser` (after parsing 4 tokens) rather than during
-open. Crash assembly:
-```
-li r7, 0
-mr r5, r7        ; r5 = 0
-lwz r4, 0(r5)    ; load from absolute address 0 — SEGV
-```
+After v0.2.15, `select 1+1` still crashed inside
+`sqlite3RunParser`. Reproduced more cleanly with zlib (`./example`
+crashed in `gz_open` calling `LSEEK(state->fd, 0LL, SEEK_CUR)`).
 
-This is a deliberate `*(NULL)` deref by tcc-emitted code. Could be
-either:
-- A struct field at the wrong offset (post-fix layout mismatch).
-- A codegen bug emitting `*0` instead of `&something`.
+Both calls have signature `func(int_address_pointer,
+long_long_value, int_const)`. tcc's PPC `gfunc_call` second pass
+processes args from vtop down: arg3 (int) first, then arg2 (LL)
+which materializes its halves into temp regs and `mr`s them into
+ABI slots target_hi (r4) and target_lo (r5). The shuffle clobbers
+r4 — but arg1's lvalue address (`state+20`) was sitting there,
+waiting to be derefed in the next iteration. arg1 then loads from
+r4=0 and SEGVs.
 
-**Heisenbug**: adding `write(2, marker, n)` calls inside
-sqlite3RunParser to triangulate makes the crash disappear. Adding
-markers anywhere in the parse path perturbs codegen enough to dodge
-the issue. Suggests register pressure / allocation sensitivity.
+Fix: in `ppc-gen.c::gfunc_call` LL move block, call save_reg on
+target_hi and target_lo BEFORE materializing the LL. That spills
+any conflicting vstack entry to a stack local; subsequent arg setup
+re-loads from the local instead of the clobbered register.
 
-Triangulation chain (tcc binary, fallback symbol attribution):
-```
-crash function <- inner static helper
-  <- sqlite3_vtab_distinct+offset (probably sqlite3Parser)
-  <- sqlite3_prepare16_v3+offset
-  <- sqlite3_reset_auto_extension+offset
-  <- sqlite3_prepare_v2 (real)
-  <- main
-```
+After this fix:
+- `./sqlite3 :memory: "select 1+1"` → 2
+- `./sqlite3 :memory: "select hex(1234)"` → 31323334
+- `./sqlite3 :memory: "select length('hello')"` → 5
+- zlib `./example` full test suite passes
+- File-based sqlite (`/tmp/test.db`) still crashes inside
+  `sqlite3_open_v2` — distinct bug in xOpen dispatch, deferred.
 
-Deferred for next session — see `sqlite-debug.md`.
+Commits: `bc50586` (fix), `49132a4` (release).
 
 ## Performance benchmark (unchanged from v0.2.13)
 
@@ -92,19 +89,22 @@ Deferred for next session — see `sqlite-debug.md`.
 - Bootstrap fixpoint holds.
 - tests2: 111 / 111 (100.0%).
 - lua 5.4.7 demo (`demos/v0.2.12-lua.sh`): works.
-- sqlite3 amalgamation builds; `./sqlite3 -version` works;
-  `./sqlite3 :memory: "select 1+1"` crashes inside RunParser.
+- sqlite3 amalgamation: `./sqlite3 -version` works;
+  `./sqlite3 :memory: "select 1+1"` returns 2;
+  `./sqlite3 :memory: "select hex(1234)"` returns "31323334".
+- zlib 1.3.1: `./example` full test suite passes.
 
 ## Releases shipped
 
 - [v0.2.14-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.14-g3) — tests2 100% (BE bitfield fix).
 - [v0.2.15-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.15-g3) — sqlite3_open works (Apple ABI LL alignment + LL field-load clobber fixes).
+- [v0.2.16-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.16-g3) — sqlite SELECT works, zlib tests pass (LL-arg shuffle clobber fix).
 
 ## Open work for next session
 
-1. **sqlite3_prepare_v2 crash** — primary target. The Heisenbug
-   nature suggests trying `volatile` annotations or other source-
-   level perturbations to localize the buggy expression.
+1. **File-based sqlite crash** — `sqlite3_open_v2("/tmp/test.db",
+   ...)` crashes in the file-open path (distinct from the
+   in-memory open path which now works).
 2. **Mach-O `tcc -ar` driver** (roadmap #3).
 3. **Mach-O archive alacarte loader** (roadmap #4).
 4. **bcheck.c port** — would un-skip 6 tests, multi-session lift.
