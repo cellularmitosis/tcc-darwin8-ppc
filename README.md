@@ -1,5 +1,7 @@
 # tcc-darwin8-ppc
 
+![](docs/media/tcc-tiger-logo.jpg)
+
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
