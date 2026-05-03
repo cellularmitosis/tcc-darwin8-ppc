@@ -183,9 +183,14 @@ ST_FUNC void relocate_plt(TCCState *s1)
         }
 
         addr = (uint32_t)((ElfW(Sym) *)s1->symtab->data)[sym_index].st_value;
-        hi = ((addr + 0x8000) >> 16) & 0xffff;
+        /* lis+ori, not lis+addi -- ori is zero-extending so we use
+         * @hi (plain high half), NOT @ha (the +0x8000 adjustment that
+         * compensates for addi's sign extension). Using @ha here
+         * yields the wrong absolute address whenever lo's top bit is
+         * set (i.e. for ~50% of libSystem entry points). */
+        hi = (addr >> 16) & 0xffff;
         lo = addr & 0xffff;
-        ppc_link_write32be(p,    0x3d800000u | hi);     /* lis  r12, ha */
+        ppc_link_write32be(p,    0x3d800000u | hi);     /* lis  r12, hi */
         ppc_link_write32be(p+4,  0x618c0000u | lo);     /* ori  r12,r12,lo */
         ppc_link_write32be(p+8,  0x7d8903a6u);           /* mtctr r12 */
         ppc_link_write32be(p+12, 0x4e800420u);           /* bctr */
