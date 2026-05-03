@@ -12,7 +12,7 @@ infrastructure improvement that unlocks future work.
 | | start | end |
 |---|---|---|
 | HEAD | `56996ae` | (this session's HEAD, see exit state) |
-| tests2 NORUN=true | 105 / 118 (89.0%) | **106 / 118 (89.8%)** |
+| tests2 NORUN=true | 105 / 118 (89.0%) | **108 / 118 (91.5%)** |
 | Bootstrap fixpoint | holds | holds |
 | Roadmap structural items | 5 open | 2 open (#1, #5, #6 closed) |
 
@@ -142,15 +142,53 @@ What stays in `lib-ppc.c` under the global pthread_mutex:
 137× speedup vs v0.2.8 baseline. The full tests2 suite wall time
 drops with it.
 
+### `84ae52c` — variadic FP arg shadow spill (gslot >= 8 case)
+
+When a variadic call has FP args whose GPR shadow slots run past
+r10 (gslot >= 8), the shadow must be written to the outgoing
+parameter stack at `r1+24+gslot*4`. printf and friends read FP
+args from there when fpr_used >= 8 or when chasing va_arg by
+GPR slot.
+
+Our codegen handled the all-in-GPR case (gslot < 7 for double,
+< 8 for float) and the FP-overflow case (fslot >= 8) correctly,
+but had a hole where (fslot < 8 AND gslot >= 7-or-8). For the
+straddle case (gslot == 7 for double, half in r10 half on stack)
+the comment claimed "low half is already on the outgoing stack
+via the standard spill path" — but no such spill happens. For
+the fully-past case (gslot >= 8) we emitted no shadow at all.
+
+Symptom: `printf("%.1f %.1f %.1f %.1f %.1Lf %.1Lf", ...)` with 6
+FP args printed garbage for the last two. Tracked back from
+73_arm64's fa3 sub-test ("14.1 14.4 23.1 23.3 -0.0 0.0" instead
+of expected "14.1 14.4 23.1 23.3 32.1 32.2").
+
+Fix: rewrite the variadic FP shadow block to handle five cases
+explicitly:
+
+1. float, gslot in r3..r10:    stfs→lwz to GPR
+2. float, gslot on stack:      stfs directly to outgoing param
+3. double, both halves in GPR: stfd→lwz/lwz to GPR pair
+4. double, gslot==7 straddle:  stfd; lwz r10; lwz r0; stw r0,stack
+5. double, both halves stack:  stfd directly to outgoing param
+
+**Effect**: 73_arm64 (always failing; HFA test designed for
+AArch64) flips to passing — turns out the only thing keeping it
+from passing on PPC was this shadow bug. 70_floating_point_literals
+also flips: what looked like a 5-ULP `parse_number` precision bug
+was actually printf reading garbage from stack-shadowed FP args.
+tests2 jumps 106 → **108 / 118 (91.5%)**.
+
 ## Files touched
 
 * `tcc/ppc-macho-stubs.c` — deleted
 * `tcc/ppc-macho.c` — UNDEF dedup, N_WEAK_REF emission, comment cleanup
-* `tcc/lib/atomic-ppc.S` — new file, lwarx/stwcx 4-byte atomics
-* `tcc/lib/lib-ppc.c` — drop 4-byte atomic stubs, refresh comment
+* `tcc/lib/atomic-ppc.S` — new file, lwarx/stwcx 1/2/4-byte atomics
+* `tcc/lib/lib-ppc.c` — drop 1/2/4-byte atomic stubs, refresh comment
 * `tcc/lib/Makefile` — per-file rule for atomic-ppc.S via gcc-4.0
-* `README.md` — status table to v0.2.8-g3, layout block refresh
-* `docs/roadmap.md` — mark #5 + #6 done
+* `tcc/ppc-gen.c` — variadic FP shadow spill for gslot >= 8
+* `README.md` — status table updates
+* `docs/roadmap.md` — mark #1 + #5 + #6 done
 
 ## Findings see findings.md
 

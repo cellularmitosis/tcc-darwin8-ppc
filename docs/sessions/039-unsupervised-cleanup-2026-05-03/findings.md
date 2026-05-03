@@ -56,6 +56,38 @@ the generic `$(X)%.o : %.S` rule for `atomic-ppc.S` only.
 `$(CC) = gcc-4.0` is set in `tcc/config.mak` from the configure
 probe. `$(X)` is the cross-prefix (empty for native PPC builds).
 
+## Variadic FP arg passing on Apple PPC has BOTH FPR and GPR-shadow paths
+
+When calling a variadic function with FP args, the Apple PPC ABI
+requires the FP value to live in TWO places:
+
+1. The FP register `f1..f8` (so non-variadic callees can read it
+   from there).
+2. The corresponding GPR shadow slot — `r3..r10` if `gslot < 8`,
+   or the outgoing parameter stack at `r1 + 24 + gslot*4` if
+   `gslot >= 8` (so variadic callees walking `va_arg` by GPR
+   slot see the right bytes).
+
+Forgetting (2) when `gslot >= 8` produces "garbage in printf"
+bugs that look like they should be parser or precision issues.
+73_arm64's "0.0 0.0" output and 70_floating_point_literals'
+"5-ULP error" were both this: printf reads from the GPR shadow
+when fpr_used >= 8 OR when the va_arg tracking points there;
+if the shadow wasn't filled, you get whatever was on the stack.
+
+Specific cases for a `double` arg, where `gslot` is the starting
+GPR-shadow slot (0-based):
+
+* `gslot < 7`: both halves fit in r3..r10. Use `stfd; lwz; lwz`.
+* `gslot == 7`: high half in r10, low half spills to stack at
+  `r1 + 24 + 8*4 = r1+56`. **Don't forget the stack write.**
+* `gslot >= 8`: both halves on stack at `r1 + 24 + gslot*4` /
+  `r1 + 24 + (gslot+1)*4`. `stfd fS, (24+gslot*4)(r1)` writes
+  both halves with one instruction.
+
+For float args, only one slot needed. `stfs fS, (24+gslot*4)(r1)`
+when `gslot >= 8`.
+
 ## Apple PPC nlist's high byte carries the LIBRARY ORDINAL
 
 Two-level namespace lookup: each undef external has `n_desc >> 8`

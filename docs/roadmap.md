@@ -44,7 +44,7 @@ specific tests are properly classified as skipped on big-endian.)
 | | item | notes |
 |---|---|---|
 | ~~**#1**~~ | ~~Real lwarx/stwcx atomics~~ | ✅ Done in `ba7848b` (4-byte) + `defd38c` (1-byte and 2-byte via word-RMW with masking). Per-file Makefile rule routes `tcc/lib/atomic-ppc.S` through gcc-4.0 to dodge tcc's missing PPC inline-asm. 124_atomic_counter dropped from 6m23s → 2.4s (137x speedup). 8-byte ops still serialize through the mutex (PPC32 has no ldarx/stdcx). |
-| **#2** | **2-element HFA struct-by-value on GPR overflow** | 73_arm64 isolates this. Generic struct-by-value codegen issue when arguments span r3..r10 + stack. |
+| ~~**#2**~~ | ~~2-element HFA struct-by-value on GPR overflow~~ | ✅ Done in `84ae52c`. Wasn't actually a struct-by-value bug — the failing 73_arm64 sub-cases isolated to printf's variadic FP arg passing when GPR shadow slots run past r10. The straddle (gslot==7) and fully-past (gslot>=8) cases didn't write the FP value to the outgoing param stack, so printf read garbage. Same fix flipped 70_floating_point_literals to passing (the "5-ULP error" was printf reading garbage stack words, not parse_number precision). |
 | **#3** | **Mach-O `tcc -ar` driver** | Currently `XAR = $(AR)` for PPC because tcc's `-ar` is ELF-only. Eventual port lets libtcc1.a be built without external `ar`. |
 | **#4** | **Mach-O archive alacarte loader** | (Was old roadmap #7.) Parse `__.SYMDEF SORTED` and selectively pull members vs. current force-whole-archive. Would also unblock the libgcc.a whole-archive crash from 025. |
 | ~~**#5**~~ | ~~`ppc-macho-stubs.c` cleanup~~ | ✅ Done in `00751c8`. Stubs file was dead since session 009 — `ppc-macho.c` had subsumed all its symbols. |
