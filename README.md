@@ -5,20 +5,23 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.9-g3 SHIPPED.** TCC has never had a PowerPC backend
-in any release. As of session [027](docs/sessions/027-self-link/README.md),
+**Status: v0.2.11-g3 SHIPPED.** TCC has never had a PowerPC
+backend in any release. As of session [027](docs/sessions/027-self-link/README.md),
 the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
 links `tcc-self`, which compiles AND links `tcc-self2`, which
 produces a `.o` byte-identical to what `tcc-self3` produces — the
-canonical self-host fixpoint, on a 22-year-old G3 / G4. The
-[v0.2.9-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.9-g3)
-patch release ([039](docs/sessions/039-unsupervised-cleanup-2026-05-03/README.md))
-makes 1-, 2-, and 4-byte atomics **lock-free via lwarx/stwcx** in
-a new `tcc/lib/atomic-ppc.S` — `124_atomic_counter` drops from
-6m23s under v0.2.8's pthread_mutex implementation to **2.4s**
-(137× speedup). Plus `104_inline` now passes via an
-`N_WEAK_REF`-emission fix in the Mach-O EXE writer. tests2 holds
-at **106 / 118 (89.8%)** under the default `-o exe` path. A
+canonical self-host fixpoint, on a 22-year-old G3 / G4. tests2
+sits at **109 / 111 (98.2%)** under the default `-o exe` path —
+two specific codegen bugs (60 scope, 96 bitfield) remain.
+[v0.2.11-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.11-g3)
+adds the missing `__atomic_OP_fetch` family + memory fences +
+`__atomic_is_lock_free`, and properly classifies the
+bcheck-asserting / `-dt`-only tests via the tests2 Makefile. The
+big win this session was [v0.2.10-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.10-g3)'s
+**variadic FP arg shadow spill fix** — a long-standing codegen
+bug where printf with > 4 FP args read garbage from
+unfilled-stack-shadow positions. That alone flipped 73_arm64 and
+70_floating_point_literals from "won't pass" to "passing". A
 ~150 KB `/opt`-installable tarball is built end-to-end by
 `scripts/build-release-tarball.sh`.
 
@@ -67,6 +70,8 @@ at **106 / 118 (89.8%)** under the default `-o exe` path. A
 | ✅ | **`v0.2.7-g3` patch release** ([037](docs/sessions/037-tcc-run-on-ppc-2026-05-02/README.md)) — **`tcc -run` works on PPC for the first time**: `create_plt_entry` / `relocate_plt` generate lis/ori/mtctr/bctr branch islands, R_PPC_JMP_SLOT / R_PPC_GLOB_DAT relocs write resolved addresses big-endian into the GOT, and a tcc-internal stub catches libtcc1.a's lazy-binding scaffolding when it would otherwise SEGV. Critical bug found and fixed during implementation: the lis+ori sequence must use `@hi`, not `@ha`, since `ori` is zero-extending. tests2 holds at 104 / 118 under `-o exe`; new `RUN=1` mode lands at 102 / 118 (86.4%) |
 | ✅ | **`v0.2.8-g3` patch release** ([038](docs/sessions/038-real-ppc-atomics-2026-05-02/README.md)) — **real atomics**: `__atomic_*` and `atomic_flag_*` helpers in libtcc1.a are now serialized through a single `pthread_mutex_t` (vs the prior single-threaded stubs that raced). 124_atomic_counter (16 threads × 65535 ops) now passes. Slow under contention (a future lwarx/stwcx implementation gated on tcc inline-asm support is the natural follow-up); correct for C11 atomics compliance. tests2 jumps to **105 / 118 (89%)** |
 | ✅ | **`v0.2.9-g3` patch release** ([039](docs/sessions/039-unsupervised-cleanup-2026-05-03/README.md)) — **lock-free atomics for 1-, 2-, and 4-byte widths via lwarx/stwcx** in a new `tcc/lib/atomic-ppc.S` (compiled by gcc-4.0 via per-file Makefile rule, since tcc PPC has no inline asm). 124_atomic_counter drops 6m23s → **2.4s** (137× speedup). Plus `104_inline` win via `N_WEAK_REF` emission for STB_WEAK undefs in Mach-O nlist; ppc-macho-stubs.c (dead since session 009) deleted; UNDEF nlist entries deduped. tests2 jumps to **106 / 118 (89.8%)** |
+| ✅ | **`v0.2.10-g3` patch release** ([039](docs/sessions/039-unsupervised-cleanup-2026-05-03/README.md)) — **variadic FP arg shadow spill** when GPR slots run past r10. printf calls with > 4 FP args were reading garbage from unfilled stack shadow positions; the fix flipped 73_arm64 (HFA test) and 70_floating_point_literals (had been miscategorized as upstream parser bug). tests2 jumps to **108 / 118 (91.5%)** |
+| ✅ | **`v0.2.11-g3` patch release** ([039](docs/sessions/039-unsupervised-cleanup-2026-05-03/README.md)) — atomic OP_fetch family + fences + is_lock_free; honest test classification (bcheck-asserting tests skipped per-arch since we have no-op stubs but no real port; 125 pinned to -run via T1 override). tests2 jumps to **109 / 111 (98.2%)** |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
