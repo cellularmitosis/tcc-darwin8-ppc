@@ -157,7 +157,8 @@ What's new (cumulative since v0.1.0-g3):
     Also adds scripts/bench.sh — a compile-time benchmark that
     builds lua 5.4.7 (33 .c files) with tcc / gcc -O0 / gcc -Os,
     discards the first run, reports steady-state seconds. Initial
-    numbers on a 1.33 GHz iBook G4: tcc 2s, gcc-O0 17s, gcc-Os 41s.
+    numbers on a 900 MHz iBook G3 (PowerPC 750):
+    tcc 2s, gcc-O0 17s, gcc-Os 41s.
 
 Install:
   sudo mkdir -p $PREFIX

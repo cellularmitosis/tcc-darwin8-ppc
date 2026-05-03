@@ -18,8 +18,8 @@ fixes a long-standing BE-only tcc bug where every parameter-scope
 enum constant collapsed to value 1 (sym_scope writes were
 clobbering the low half of enum_val in the Sym union). Also adds
 `scripts/bench.sh` — a compile-time benchmark of lua 5.4.7 with
-tcc / gcc -O0 / gcc -Os. On a 1.33 GHz iBook G4: **tcc 2s, gcc -O0
-17s, gcc -Os 41s** for 33 .c files. Lua 5.4.7 build also works
+tcc / gcc -O0 / gcc -Os. On a 900 MHz iBook G3 (PowerPC 750):
+**tcc 2s, gcc -O0 17s, gcc -Os 41s** for 33 .c files. Lua 5.4.7 build also works
 end-to-end ([demo](demos/v0.2.12-lua.sh)). sqlite3 amalgamation
 builds and `./sqlite3 -version` works, but a deeper codegen bug
 under investigation still breaks `select 1+1`. A ~160 KB

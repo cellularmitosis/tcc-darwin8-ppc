@@ -1379,8 +1379,19 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
 
             anchor_off = ppc_pic_pairs_lookup((int)reloc_off);
             if (anchor_off < 0) {
+                ElfW(Sym) *sm = &((ElfW(Sym) *)s1->symtab->data)[symidx];
+                const char *name = (char *)s1->symtab->link->data + sm->st_name;
                 tcc_error_noabort("ppc-macho: no PIC anchor recorded "
-                                  "for reloc at 0x%x", reloc_off);
+                                  "for reloc at section '%s'+0x%x "
+                                  "(reloc type %d, sym '%s'). "
+                                  "Either ppc_emit_pic_base_setup did "
+                                  "not run for the function containing "
+                                  "this reloc, or an input .o's "
+                                  "scattered SECTDIFF pair didn't "
+                                  "register its anchor in "
+                                  "macho_translate_relocs.",
+                                  s->name, reloc_off, type,
+                                  name && name[0] ? name : "?");
                 return -1;
             }
             anchor_va = sect_vmaddr + (uint32_t)anchor_off;
@@ -1494,7 +1505,18 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
         case R_PPC_REL24: {
             int32_t bdisp = (int32_t)(target_addr - (sect_vmaddr + reloc_off));
             if (bdisp < -(1 << 25) || bdisp >= (1 << 25)) {
-                tcc_error_noabort("ppc-macho: REL24 out of range");
+                ElfW(Sym) *sm = &((ElfW(Sym) *)s1->symtab->data)[symidx];
+                const char *name = (char *)s1->symtab->link->data + sm->st_name;
+                tcc_error_noabort("ppc-macho: REL24 (bl) out of range "
+                                  "for sym '%s': call site at 0x%x, "
+                                  "target at 0x%x, displacement 0x%x "
+                                  "(>+/-32MB). Likely the .text section "
+                                  "grew past the 32MB direct-branch reach "
+                                  "and this call needs a stub.",
+                                  name && name[0] ? name : "?",
+                                  (unsigned)(sect_vmaddr + reloc_off),
+                                  (unsigned)target_addr,
+                                  (unsigned)bdisp);
                 return -1;
             }
             inst = ((uint32_t)sect_data[reloc_off] << 24)
@@ -1613,8 +1635,12 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     /* Maximum used so far is 9 with all data sections present:
      * text + rodata + stub + data + init_array + fini_array
      *      + nlptr + dyld + bss. Keep some headroom for future
-     *      additions (debug, eh_frame, ...). */
-    struct exe_sect sects[16];
+     *      additions (debug, eh_frame, ...). EXE_MAX_SECTS guards
+     *      every nsec++ in the layout block below — bump it (and
+     *      the array size in lockstep) if a future section type
+     *      pushes us past the limit. */
+#define EXE_MAX_SECTS 16
+    struct exe_sect sects[EXE_MAX_SECTS];
     int nsec = 0;
     int sect_idx_text = -1, sect_idx_rodata = -1, sect_idx_data = -1;
     int sect_idx_stub = -1, sect_idx_nlptr = -1, sect_idx_dyld = -1;
@@ -1750,6 +1776,15 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         n_data_sects++;     /* __bss (zerofill) */
 
     total_msects = n_text_sects + n_data_sects;
+    if (total_msects > EXE_MAX_SECTS) {
+        tcc_error_noabort("ppc-macho: section count %d exceeds the "
+                          "compiled-in limit %d (text=%d data=%d). "
+                          "Bump EXE_MAX_SECTS in ppc-macho.c and the "
+                          "matching exe_sect array.",
+                          total_msects, EXE_MAX_SECTS,
+                          n_text_sects, n_data_sects);
+        return -1;
+    }
 
     /* ---- LC sizes -> hdr_and_lc_size. ---- */
     text_seg_cmd_size = 56 + 68u * n_text_sects;
