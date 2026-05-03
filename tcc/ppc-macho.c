@@ -2209,36 +2209,59 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         tcc_free(edd); tcc_free(edv);
     }
 
-    /* Undef externals: one per stub, then one per data nlptr. n_desc
-     * carries the two-level namespace library ordinal in its high
-     * byte; ord 1 = first LC_LOAD_DYLIB (libSystem in our case).
+    /* Undef externals: emit one UNDEF nlist entry per unique symtab
+     * elfsym index, with both stubs[] and nlptrs[] pointing into the
+     * deduped pool. Pre-dedup, crt1.o-loaded programs duplicated
+     * `_atexit` / `_exit` (referenced as both call targets and data
+     * pointers from crt1.o's static init machinery), wasting strtab
+     * bytes and dyld lookups.
+     *
+     * n_desc carries the two-level namespace library ordinal in its
+     * high byte; ord 1 = first LC_LOAD_DYLIB (libSystem in our case).
      * Without this dyld looks for the symbol in our own executable
      * and fails. */
-    if (nstubs > 0) {
-        stub_sym_idx = tcc_mallocz(nstubs * sizeof(int));
-        for (i = 0; i < nstubs; i++) {
-            ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + stubs[i].elfsym_idx;
-            const char *name = (char *)s1->symtab->link->data + esym->st_name;
-            uint32_t strx = (uint32_t)strtab.len;
-            uint16_t n_desc = (1u << 8);
-            obuf_put(&strtab, name, strlen(name) + 1);
-            stub_sym_idx[i] = n_localsym + n_extdefsym + n_undefsym;
-            put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
-            n_undefsym++;
+    {
+        int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+        int *elfsym_to_undef = NULL;
+        if (nstubs > 0 || n_nlptrs > 0) {
+            elfsym_to_undef = tcc_malloc(nsyms * sizeof(int));
+            for (i = 0; i < nsyms; i++) elfsym_to_undef[i] = -1;
         }
-    }
-    if (n_nlptrs > 0) {
-        data_sym_idx = tcc_mallocz(n_nlptrs * sizeof(int));
-        for (i = 0; i < n_nlptrs; i++) {
-            ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + nlptrs[i].elfsym_idx;
-            const char *name = (char *)s1->symtab->link->data + esym->st_name;
-            uint32_t strx = (uint32_t)strtab.len;
-            uint16_t n_desc = (1u << 8);
-            obuf_put(&strtab, name, strlen(name) + 1);
-            data_sym_idx[i] = n_localsym + n_extdefsym + n_undefsym;
-            put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
-            n_undefsym++;
+        if (nstubs > 0) {
+            stub_sym_idx = tcc_mallocz(nstubs * sizeof(int));
+            for (i = 0; i < nstubs; i++) {
+                int e = stubs[i].elfsym_idx;
+                if (elfsym_to_undef[e] < 0) {
+                    ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
+                    const char *name = (char *)s1->symtab->link->data + esym->st_name;
+                    uint32_t strx = (uint32_t)strtab.len;
+                    uint16_t n_desc = (1u << 8);
+                    obuf_put(&strtab, name, strlen(name) + 1);
+                    elfsym_to_undef[e] = n_localsym + n_extdefsym + n_undefsym;
+                    put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
+                    n_undefsym++;
+                }
+                stub_sym_idx[i] = elfsym_to_undef[e];
+            }
         }
+        if (n_nlptrs > 0) {
+            data_sym_idx = tcc_mallocz(n_nlptrs * sizeof(int));
+            for (i = 0; i < n_nlptrs; i++) {
+                int e = nlptrs[i].elfsym_idx;
+                if (elfsym_to_undef[e] < 0) {
+                    ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
+                    const char *name = (char *)s1->symtab->link->data + esym->st_name;
+                    uint32_t strx = (uint32_t)strtab.len;
+                    uint16_t n_desc = (1u << 8);
+                    obuf_put(&strtab, name, strlen(name) + 1);
+                    elfsym_to_undef[e] = n_localsym + n_extdefsym + n_undefsym;
+                    put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
+                    n_undefsym++;
+                }
+                data_sym_idx[i] = elfsym_to_undef[e];
+            }
+        }
+        tcc_free(elfsym_to_undef);
     }
 
     /* ---- Build indirect symbol table.
