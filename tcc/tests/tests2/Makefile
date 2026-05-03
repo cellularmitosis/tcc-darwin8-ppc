@@ -42,6 +42,17 @@ endif
 ifeq (-$(CONFIG_WIN32)-$(CONFIG_i386)$(CONFIG_arm)-,--yes-)
  SKIP += 95_bitfields%.test # type_align is different on 32bit-non-windows
 endif
+ifeq ($(CONFIG_BIGENDIAN),yes)
+ # These tests' .expect files bake in little-endian byte order: the
+ # `dump()` byte-loop walking a struct, the `*(unsigned*)(s+4)+=…`
+ # arithmetic that mutates a string by overlaying an integer, and
+ # bitfield layouts that follow LE bit numbering. None are tcc bugs;
+ # the expected output was authored on x86. Skip on BE platforms.
+ SKIP += 90_struct-init.test
+ SKIP += 91_ptr_longlong_arith32.test
+ SKIP += 95_bitfields.test
+ SKIP += 95_bitfields_ms.test
+endif
 ifeq (-$(CONFIG_WIN32)-,-yes-)
  SKIP += 106_versym.test # No pthread support
  SKIP += 114_bound_signal.test # No pthread support
