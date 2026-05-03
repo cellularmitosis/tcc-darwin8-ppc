@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.14-g3}"
+VERSION="${VERSION:-v0.2.15-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -169,6 +169,24 @@ What's new (cumulative since v0.1.0-g3):
     wise load_packed_bf / store_packed_bf paths on PPC32. Cost:
     ~2-4 byte loads per access vs 1 int load + shifts. tests2
     climbs to **111/111 (100.0%)** — first time at full pass.
+
+  * v0.2.15: two PPC long-long bugs surfaced trying to compile
+    sqlite3_open. Both now fixed:
+      - Apple PPC ABI long-long alignment: tcc was using 8-byte
+        alignment for double / long long inside structs; the Apple
+        PPC32 ABI (and gcc-4.0 on Tiger) uses 4-byte. Fix: gate
+        \`*a = 4\` in tccgen.c::type_size on PPC.
+      - LL field-load address-clobber: the PPC32 BE LL split-load
+        \`incr_offset(+4); load LOW; incr_offset(-4); load HIGH\`
+        clobbers the address register on the LOW load, so the -4
+        step operates on the loaded value rather than the address.
+        For VT_LLOCAL lvalues, snapshot vtop's r/c.i/r2 before
+        the LOW load and re-anchor for the HIGH load (which then
+        re-derives the pointer fresh from the saved local).
+    Real-world impact: \`sqlite3_open(":memory:", ...)\` now
+    completes (was crashing inside sqlite3PcacheRefCount).
+    sqlite3_prepare_v2 still crashes — separate codegen bug
+    that's a Heisenbug under instrumentation; deferred.
 
 Install:
   sudo mkdir -p $PREFIX
