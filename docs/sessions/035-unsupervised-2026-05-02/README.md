@@ -534,8 +534,25 @@ something on cleanup, then crashes mid-way through sub-test 2 with
 "Deallocation of a pointer not malloced". Stack-pointer free.
 Looks like cleanup_symbols / cleanup_sections / freeing
 section->data corrupting state across compile-and-run cycles.
-Worth investigating in a follow-up: probably one specific section
-type that double-frees.
+
+**Resolution**: not a tcc memory bug at all. Bisected to: any
+program calling a libSystem function whose %lo half had its top bit
+set (memset, free, fprintf, ~50% of libSystem) crashed with the
+"Deallocation of a pointer not malloced" warning — the bl into the
+PLT was effectively jumping to a *related-but-wrong* address that
+on Tiger libSystem often landed inside the malloc family.
+
+Root cause: my freshly-written `relocate_plt` paired `lis` with
+`ori`, but used the @ha-style high half (the +0x8000-adjusted form
+designed to compensate for `addi`'s sign extension on the low
+half). Since `ori` is zero-extending, the +0x8000 adjustment was
+wrong by 0x10000 whenever the lo half's top bit was set. Fixed in
+`a140db0` by switching to plain @hi for the lis+ori sequence.
+
+**Effect**: tests2 RUN=1 (NORUN=false) jumps from **88/118 to
+102/118 = 86.4%**. NORUN=true unchanged at 104/118 (the PLT path
+is only exercised under -run). Many tests including 117_builtins,
+104_inline, and several -dt tests now run cleanly under -run.
 
 ### Remaining failures at v0.2.6-g3 (13 tests in 3 buckets)
 
