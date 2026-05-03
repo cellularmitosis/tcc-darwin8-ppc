@@ -667,3 +667,24 @@ ___atomic_fetch_nand_2:
 	srw	r3, r0, r10
 	rlwinm	r3, r3, 0, 16, 31
 	blr
+
+/* ============================================================
+ * Memory fences. atomic_thread_fence on PPC is `sync`
+ * (full memory barrier). atomic_signal_fence is just a
+ * compiler barrier on a single CPU (still issue `sync` here
+ * for safety -- semantically stronger than required, but
+ * never wrong). Both ignore the memory_order arg (we always
+ * emit the strongest variant).
+ * ============================================================ */
+
+	.globl _atomic_thread_fence
+	.align 2
+_atomic_thread_fence:
+	sync
+	blr
+
+	.globl _atomic_signal_fence
+	.align 2
+_atomic_signal_fence:
+	sync
+	blr

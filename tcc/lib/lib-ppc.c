@@ -499,3 +499,89 @@ void atomic_flag_clear(volatile unsigned char *p) {
 void atomic_flag_clear_explicit(volatile unsigned char *p, int o) {
     __atomic_store_1((unsigned char *)p, 0, o);
 }
+
+/* __atomic_OP_fetch family: returns the NEW value (post-op) instead
+ * of the old. Implemented as wrappers over the existing fetch_OP
+ * helpers from atomic-ppc.S / lib-ppc.c. The compiler folds these
+ * into single calls when LTO is on; without LTO they're a small
+ * extra `add r3, r3, r4`-style epilogue. */
+extern unsigned char  __atomic_fetch_add_1(unsigned char *p,  unsigned char v,  int o);
+extern unsigned short __atomic_fetch_add_2(unsigned short *p, unsigned short v, int o);
+extern unsigned int   __atomic_fetch_add_4(unsigned int *p,   unsigned int v,   int o);
+extern unsigned char  __atomic_fetch_sub_1(unsigned char *p,  unsigned char v,  int o);
+extern unsigned short __atomic_fetch_sub_2(unsigned short *p, unsigned short v, int o);
+extern unsigned int   __atomic_fetch_sub_4(unsigned int *p,   unsigned int v,   int o);
+extern unsigned char  __atomic_fetch_and_1(unsigned char *p,  unsigned char v,  int o);
+extern unsigned short __atomic_fetch_and_2(unsigned short *p, unsigned short v, int o);
+extern unsigned int   __atomic_fetch_and_4(unsigned int *p,   unsigned int v,   int o);
+extern unsigned char  __atomic_fetch_or_1 (unsigned char *p,  unsigned char v,  int o);
+extern unsigned short __atomic_fetch_or_2 (unsigned short *p, unsigned short v, int o);
+extern unsigned int   __atomic_fetch_or_4 (unsigned int *p,   unsigned int v,   int o);
+extern unsigned char  __atomic_fetch_xor_1(unsigned char *p,  unsigned char v,  int o);
+extern unsigned short __atomic_fetch_xor_2(unsigned short *p, unsigned short v, int o);
+extern unsigned int   __atomic_fetch_xor_4(unsigned int *p,   unsigned int v,   int o);
+extern unsigned char  __atomic_fetch_nand_1(unsigned char *p,  unsigned char v,  int o);
+extern unsigned short __atomic_fetch_nand_2(unsigned short *p, unsigned short v, int o);
+extern unsigned int   __atomic_fetch_nand_4(unsigned int *p,   unsigned int v,   int o);
+
+#define ADD_FETCH(BITS, TYPE) \
+TYPE __atomic_add_fetch_##BITS(TYPE *p, TYPE v, int o) \
+    { return __atomic_fetch_add_##BITS(p, v, o) + v; }
+ADD_FETCH(1, unsigned char)
+ADD_FETCH(2, unsigned short)
+ADD_FETCH(4, unsigned int)
+ADD_FETCH(8, unsigned long long)
+#undef ADD_FETCH
+
+#define SUB_FETCH(BITS, TYPE) \
+TYPE __atomic_sub_fetch_##BITS(TYPE *p, TYPE v, int o) \
+    { return __atomic_fetch_sub_##BITS(p, v, o) - v; }
+SUB_FETCH(1, unsigned char)
+SUB_FETCH(2, unsigned short)
+SUB_FETCH(4, unsigned int)
+SUB_FETCH(8, unsigned long long)
+#undef SUB_FETCH
+
+#define AND_FETCH(BITS, TYPE) \
+TYPE __atomic_and_fetch_##BITS(TYPE *p, TYPE v, int o) \
+    { return __atomic_fetch_and_##BITS(p, v, o) & v; }
+AND_FETCH(1, unsigned char)
+AND_FETCH(2, unsigned short)
+AND_FETCH(4, unsigned int)
+AND_FETCH(8, unsigned long long)
+#undef AND_FETCH
+
+#define OR_FETCH(BITS, TYPE) \
+TYPE __atomic_or_fetch_##BITS(TYPE *p, TYPE v, int o) \
+    { return __atomic_fetch_or_##BITS(p, v, o) | v; }
+OR_FETCH(1, unsigned char)
+OR_FETCH(2, unsigned short)
+OR_FETCH(4, unsigned int)
+OR_FETCH(8, unsigned long long)
+#undef OR_FETCH
+
+#define XOR_FETCH(BITS, TYPE) \
+TYPE __atomic_xor_fetch_##BITS(TYPE *p, TYPE v, int o) \
+    { return __atomic_fetch_xor_##BITS(p, v, o) ^ v; }
+XOR_FETCH(1, unsigned char)
+XOR_FETCH(2, unsigned short)
+XOR_FETCH(4, unsigned int)
+XOR_FETCH(8, unsigned long long)
+#undef XOR_FETCH
+
+#define NAND_FETCH(BITS, TYPE) \
+TYPE __atomic_nand_fetch_##BITS(TYPE *p, TYPE v, int o) \
+    { return ~(__atomic_fetch_nand_##BITS(p, v, o) & v); }
+NAND_FETCH(1, unsigned char)
+NAND_FETCH(2, unsigned short)
+NAND_FETCH(4, unsigned int)
+NAND_FETCH(8, unsigned long long)
+#undef NAND_FETCH
+
+/* __atomic_is_lock_free: 1, 2, 4-byte ops are lock-free on PPC32
+ * (lwarx/stwcx + word-RMW for byte/short). 8-byte still goes
+ * through pthread_mutex (no ldarx/stdcx on PPC32). */
+int __atomic_is_lock_free(unsigned long size, const volatile void *ptr) {
+    (void)ptr;
+    return size <= 4;
+}
