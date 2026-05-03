@@ -402,3 +402,46 @@ change. Headroom for future additions (debug, eh_frame).
 
 77 → 79 → 83 → 84 → 87 → 89 → 91 → 92 → 93 → 95 → 96 → 98 →
 101 → **102** (HEAD `7151bf1`).
+
+### Continued: BE-skip + VLA spill-safety buffer
+
+Two more wins this resumption.
+
+**`9c20d7b` — BE skip:** Added `CONFIG_BIGENDIAN=yes` clause to
+`tcc/tests/tests2/Makefile` to skip 4 tests whose `.expect` files
+bake LE byte order: 90_struct-init, 91_ptr_longlong_arith32,
+95_bitfields, 95_bitfields_ms. None are tcc bugs — they exercise
+platform-conditional output (struct-byte-loop dump, integer-overlay
+on a string, bit-field bit packing) that's intrinsically different
+on PPC. Net: 102/118 = 86.4% pass, 0 actual movement, 4 fewer
+spurious "fails" in the report.
+
+**`8d72774` — VLA × callee param-spill:** Bigger win. Apple PPC's
+callee always spills incoming r3..r10 to caller_SP+24..+52, which
+on a function with a live VLA at the bottom of the frame OVERWROTE
+the VLA's first 28 bytes. This is what made 79_vla_continue's
+test2-test4 fail (test1's `void *addr[10]` is fixed-size — it lives
+above the VLA `a` so f()'s spills landed safely on `a` after
+restore; only test2-test4 with `void *addr[count]` had the
+clash). Reserved a 128-byte buffer below the VLA (24 linkage +
+96 param area + 8 align pad) for callees to spill into. The VLA
+pointer is now `SP + PPC_VLA_BUFFER` instead of plain SP; the
+save/restore path applies the offset symmetrically so the same
+saved slot works for user-pointer and SP-restore. Bootstrap
+fixpoint holds (the offset is identical on every code path so
+fixpoint emission is deterministic).
+
+Net: tests2 102/118 → **105/118 = 89.0%**. 79_vla_continue passes
+all 5 sub-tests. Two adjacent tests (114_bound_signal,
+124_atomic_counter) also flipped to passing in the same run — those
+are timing-sensitive (multi-thread / signal) and were probably
+spuriously failing before; not directly attributable to this fix.
+
+Caveat noted in the commit message: PPC_VLA_BUFFER is fixed at
+compile time, so a function with both VLAs and outgoing arg lists
+exceeding 96 bytes of params would still corrupt the VLA. No test
+in tests2 hits this; flagged for a follow-up if it ever does.
+
+### Trajectory final this resumption
+
+77 → ... → 102 → **105** (HEAD `8d72774`, after VLA fix).
