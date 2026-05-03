@@ -19,7 +19,7 @@ set -e
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
 
-VERSION="${VERSION:-v0.2.5-g3}"
+VERSION="${VERSION:-v0.2.6-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -76,10 +76,19 @@ What's new (cumulative since v0.1.0-g3):
     return-swap; absolute-address load/store; computed goto;
     void* deref; VT_BOOL handling.
   * Tiger realpath workaround in normalized_PATHCMP.
-  * tests2 baseline at this release: 101 / 122 (82.8%).
   * Long-frame prolog/epilog (>32KB stack frames work).
   * Long-offset local load/store/address-of.
   * VLAs (variable-length arrays) supported via gen_vla_alloc.
+  * Constructor / destructor support: __attribute__((constructor))
+    and __attribute__((destructor)) emit __mod_init_func and
+    __mod_term_func sections that dyld walks at startup / exit.
+  * VLA + function-call interaction is now safe: each VLA reserves
+    a 128-byte buffer below its data so callee param-spills don't
+    corrupt the array.
+  * tests2 baseline at this release: 105 / 118 (89.0%) — note total
+    count is 118 not 122 because four LE-byte-order-specific tests
+    (90_struct-init, 91_ptr_longlong_arith32, 95_bitfields,
+    95_bitfields_ms) are now properly skipped on big-endian.
 
 Install:
   sudo mkdir -p $PREFIX
