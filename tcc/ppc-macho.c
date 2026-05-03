@@ -1611,7 +1611,11 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     int sect_const = 0, sect_stub = 0, sect_nlptr = 0;
     int n_text_sects, n_data_sects, total_msects;
 
-    struct exe_sect sects[8];   /* generous; we never use more than 4 */
+    /* Maximum used so far is 9 with all data sections present:
+     * text + rodata + stub + data + init_array + fini_array
+     *      + nlptr + dyld + bss. Keep some headroom for future
+     *      additions (debug, eh_frame, ...). */
+    struct exe_sect sects[16];
     int nsec = 0;
     int sect_idx_text = -1, sect_idx_rodata = -1, sect_idx_data = -1;
     int sect_idx_stub = -1, sect_idx_nlptr = -1, sect_idx_dyld = -1;
