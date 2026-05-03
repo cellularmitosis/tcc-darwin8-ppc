@@ -4463,6 +4463,31 @@ static void struct_layout(CType *type, AttributeDef *ad)
         bit_size = BIT_SIZE(f->type.t);
         if (bit_size == 0)
             continue;
+#if defined(TCC_TARGET_PPC) && !defined(TCC_TARGET_PPC64)
+        /* On 32-bit big-endian PowerPC, tcc's LSB-first bit_pos numbering
+         * is consistent with byte-by-byte writes (used by static initializers
+         * in tccgen.c::init_putv and by store_packed_bf), but it produces a
+         * different memory layout than the wide-container interpretation
+         * used by the SHL+SHR extraction path on a BE-loaded int / long long.
+         *
+         * The two paths agree on LE because the byte order matches the bit
+         * numbering. On BE they don't: a static initializer's `s = {0x333}`
+         * for `unsigned x : 12` writes byte0=0x33, byte1[0..3]=0x3 — but a
+         * BE int load reads those as the high bits 24..27 of the 32-bit
+         * value, while bit_pos=0..11 picks the LOW 12 bits of the loaded
+         * int. The two regions don't even overlap. (See test
+         * 96_nodata_wanted test_data_suppression_off, and the simpler
+         * `struct { unsigned x:12; unsigned y:20; }` repro.)
+         *
+         * Force every bitfield to use the byte-wise load_packed_bf /
+         * store_packed_bf paths, which are consistent with the static
+         * initializer's byte-wise writes. The cost is ~2-4 byte loads and
+         * shifts per access vs a single int load + 2 shifts; correctness
+         * trumps that on a tiny-codegen project.
+         */
+        f->auxtype = VT_STRUCT;
+        continue;
+#endif
         bit_pos = BIT_POS(f->type.t);
         size = type_size(&f->type, &align);
 
