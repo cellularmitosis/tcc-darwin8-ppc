@@ -19,8 +19,13 @@ if [ ! -x "$TCCDIR/tcc" ]; then
     exit 1
 fi
 
-echo "==> Running tests2 (NORUN=true; force -o exe path)..."
-/opt/make-4.3/bin/make -C "$TCCDIR/tests/tests2" NORUN=true -k > "$LOG" 2>&1 || true
+if [ "${RUN:-0}" = "1" ]; then
+    echo "==> Running tests2 (NORUN=false; uses -run for tests that don't override)..."
+    /opt/make-4.3/bin/make -C "$TCCDIR/tests/tests2" -k > "$LOG" 2>&1 || true
+else
+    echo "==> Running tests2 (NORUN=true; force -o exe path)..."
+    /opt/make-4.3/bin/make -C "$TCCDIR/tests/tests2" NORUN=true -k > "$LOG" 2>&1 || true
+fi
 
 # Count pass/fail using python (Tiger has python 2).
 python <<PYEOF

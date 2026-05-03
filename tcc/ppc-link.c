@@ -98,15 +98,99 @@ ST_FUNC int gotplt_entry_type(int reloc_type)
 }
 
 #ifdef NEED_BUILD_GOT
+/* Forward decl: defined below the relocate() block. */
+static void ppc_link_write32be(unsigned char *p, uint32_t v);
+
+/* Each PLT entry is 16 bytes (4 PPC instructions):
+ *
+ *   lis   r12, ha(target)
+ *   ori   r12, r12, lo(target)
+ *   mtctr r12
+ *   bctr
+ *
+ * The lis/ori immediates start as zeros (with `got_offset` stashed
+ * in the first 4 bytes) and are patched in by relocate_plt once the
+ * symbol's runtime address is known. PLT0 is a 16-byte zero
+ * placeholder -- we don't do lazy resolution in JIT mode (all
+ * symbols are eagerly resolved via dlsym before the patches
+ * happen), so PLT0 is unused but present so PLT entry indexing
+ * matches the convention build_got_entries expects (PLT entries at
+ * offsets 16, 32, 48, ...). */
 ST_FUNC unsigned create_plt_entry(TCCState *s1, unsigned got_offset, struct sym_attr *attr)
 {
-    tcc_error_noabort("ppc-link: create_plt_entry not implemented");
-    return 0;
+    Section *plt = s1->plt;
+    unsigned plt_offset;
+    unsigned char *p;
+
+    /* PLT0: empty placeholder. */
+    if (plt->data_offset == 0) {
+        p = section_ptr_add(plt, 16);
+        memset(p, 0, 16);
+    }
+
+    plt_offset = plt->data_offset;
+    p = section_ptr_add(plt, 16);
+    /* Stash got_offset in the first 4 bytes (BE) so relocate_plt
+     * can recover the GOT slot for this entry. The whole 16 bytes
+     * gets overwritten with the real instruction sequence then. */
+    ppc_link_write32be(p, got_offset);
+    memset(p + 4, 0, 12);
+    (void)attr;
+    return plt_offset;
 }
 
+/* relocate_plt: for each PLT entry, decode its got_offset from the
+ * placeholder, find the corresponding symbol (via the GOT
+ * relocations -- they're keyed by got_offset), and patch the
+ * 4-instruction stub. We don't read from s1->got->data because
+ * relocate_sections (which fills the GOT) runs AFTER us. We look
+ * up sym->st_value directly, which relocate_syms set just before
+ * we ran (via dlsym for SHN_UNDEF / via section base for defined). */
 ST_FUNC void relocate_plt(TCCState *s1)
 {
-    /* Nothing for now. Real implementation lands with codegen. */
+    unsigned char *p, *p_end;
+
+    if (!s1->plt || s1->plt->data_offset == 0 || !s1->got || !s1->got->reloc)
+        return;
+
+    p = s1->plt->data + 16;        /* skip PLT0 */
+    p_end = s1->plt->data + s1->plt->data_offset;
+
+    while (p < p_end) {
+        uint32_t got_offset =
+            ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+            ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+        ElfW_Rel *rel;
+        int sym_index = -1;
+        uint32_t addr;
+        uint32_t hi, lo;
+
+        /* Find the GOT relocation whose r_offset matches our
+         * got_offset; that gives us the symbol. */
+        for_each_elem(s1->got->reloc, 0, rel, ElfW_Rel) {
+            if ((uint32_t)rel->r_offset == got_offset) {
+                sym_index = ELFW(R_SYM)(rel->r_info);
+                break;
+            }
+        }
+        if (sym_index < 0) {
+            tcc_error_noabort(
+                "ppc-link: PLT entry @ 0x%lx has got_offset 0x%x but "
+                "no matching .got.rel entry found",
+                (unsigned long)(s1->plt->sh_addr + (p - s1->plt->data)),
+                (unsigned)got_offset);
+            return;
+        }
+
+        addr = (uint32_t)((ElfW(Sym) *)s1->symtab->data)[sym_index].st_value;
+        hi = ((addr + 0x8000) >> 16) & 0xffff;
+        lo = addr & 0xffff;
+        ppc_link_write32be(p,    0x3d800000u | hi);     /* lis  r12, ha */
+        ppc_link_write32be(p+4,  0x618c0000u | lo);     /* ori  r12,r12,lo */
+        ppc_link_write32be(p+8,  0x7d8903a6u);           /* mtctr r12 */
+        ppc_link_write32be(p+12, 0x4e800420u);           /* bctr */
+        p += 16;
+    }
 }
 #endif
 #endif
@@ -180,6 +264,15 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
         ppc_link_write32be(ptr, (orig & ~0xffff) | lo);
         return;
     }
+
+    case R_PPC_JMP_SLOT:
+    case R_PPC_GLOB_DAT:
+        /* Both kinds reduce to "store the resolved address into the
+         * GOT slot". Used by the JIT path: GOT entries hold target
+         * addresses for the PLT stubs to load. Big-endian write so
+         * generated PPC code's `lwz` reads the right value. */
+        ppc_link_write32be(ptr, (uint32_t)val);
+        return;
 
     case R_PPC_HA16_PIC:
     case R_PPC_LO16_PIC:

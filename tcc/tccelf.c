@@ -1077,17 +1077,47 @@ ST_FUNC void relocate_syms(TCCState *s1, Section *symtab, int do_resolve)
             /* Use ld.so to resolve symbol for us (for tcc -run) */
             if (do_resolve) {
 #if defined TCC_IS_NATIVE && !defined TCC_TARGET_PE
-                /* dlsym() needs the undecorated name.  */
+                /* dlsym() needs the undecorated name.  But on Mach-O some
+                 * symbols (e.g. dyld_stub_binding_helper) are *already*
+                 * stored without the leading underscore in our symtab --
+                 * stripping naively would mangle them, so fall back to
+                 * the original name if the stripped lookup misses. */
                 const char *name_ud = &name[s1->leading_underscore];
                 void *addr = NULL;
-                if (!s1->nostdlib)
+                if (!s1->nostdlib) {
                     addr = dlsym(RTLD_DEFAULT, name_ud);
+                    if (addr == NULL && name_ud != name)
+                        addr = dlsym(RTLD_DEFAULT, name);
+                }
 		if (addr == NULL) {
 		    int i;
-		    for (i = 0; i < s1->nb_loaded_dlls; i++)
-                        if ((addr = dlsym(s1->loaded_dlls[i]->handle, name_ud)))
-			    break;
+		    for (i = 0; i < s1->nb_loaded_dlls; i++) {
+                        addr = dlsym(s1->loaded_dlls[i]->handle, name_ud);
+                        if (addr == NULL && name_ud != name)
+                            addr = dlsym(s1->loaded_dlls[i]->handle, name);
+                        if (addr) break;
+                    }
 		}
+#if defined TCC_TARGET_MACHO && defined TCC_TARGET_PPC
+                /* Mach-O lazy-stub artifact: any function in libtcc1.a
+                 * compiled by us that calls a libSystem export (e.g.
+                 * __eprintf calls fprintf/abort) emits Apple's lazy-
+                 * binding scaffolding -- a __picsymbolstub1 entry plus a
+                 * __la_symbol_ptr slot, with the slot relocated against
+                 * `dyld_stub_binding_helper`. dyld would normally fix
+                 * the slot at first call; in -run mode there is no
+                 * dyld, so we leave the slot pointing at a tcc-internal
+                 * stub that aborts loudly. Programs that never trip the
+                 * lazy stub (the common case for simple -run programs:
+                 * the user-facing printf is resolved via dlsym directly
+                 * through a real PLT entry) work fine; programs that do
+                 * (e.g. assert() failures) get a clean abort with the
+                 * helper-name in the error rather than a SEGV. */
+                if (addr == NULL && !strcmp(name, "dyld_stub_binding_helper")) {
+                    extern void tcc_dyld_stub_binding_helper_unsupported(void);
+                    addr = (void*)tcc_dyld_stub_binding_helper_unsupported;
+                }
+#endif
                 if (addr) {
                     sym->st_value = (addr_t) addr;
 #ifdef DEBUG_RELOC

@@ -83,6 +83,27 @@ static int protect_pages(void *ptr, unsigned long length, int mode);
 static int tcc_relocate_ex(TCCState *s1, void *ptr, unsigned ptr_diff);
 static void st_link(TCCState *s1);
 static void st_unlink(TCCState *s1);
+
+#if defined TCC_TARGET_MACHO && defined TCC_TARGET_PPC
+/* See comment in tccelf.c::relocate_syms. Used as the pointer value
+ * that tcc -run installs in __la_symbol_ptr slots whose relocation
+ * targets `dyld_stub_binding_helper` (a libSystem-internal symbol
+ * dlsym can't see). The slot is only consulted when its lazy stub
+ * fires; for the common -run cases (simple programs that don't trip
+ * libtcc1's __eprintf path) this is dead code. If it does fire, the
+ * stub aborts with a clean message rather than SEGV-ing. */
+LIBTCCAPI void tcc_dyld_stub_binding_helper_unsupported(void)
+{
+    static const char msg[] =
+        "tcc -run: dyld_stub_binding_helper invoked, but tcc -run does "
+        "not implement Mach-O lazy binding. This usually means a "
+        "libtcc1.a helper (e.g. __eprintf for an assert()) was called "
+        "and tried to bind one of its imports (fprintf, abort, ...) "
+        "lazily. Compile with `-o exe` instead, or avoid the helper.\n";
+    write(2, msg, sizeof msg - 1);
+    _exit(127);
+}
+#endif
 #ifdef CONFIG_TCC_BACKTRACE
 static int _tcc_backtrace(rt_frame *f, const char *fmt, va_list ap);
 #endif
