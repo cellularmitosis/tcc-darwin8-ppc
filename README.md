@@ -5,21 +5,22 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.8-g3 SHIPPED.** TCC has never had a PowerPC backend
+**Status: v0.2.9-g3 SHIPPED.** TCC has never had a PowerPC backend
 in any release. As of session [027](docs/sessions/027-self-link/README.md),
 the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
 links `tcc-self`, which compiles AND links `tcc-self2`, which
 produces a `.o` byte-identical to what `tcc-self3` produces — the
 canonical self-host fixpoint, on a 22-year-old G3 / G4. The
-[v0.2.8-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.8-g3)
-patch release ([038](docs/sessions/038-real-ppc-atomics-2026-05-02/README.md))
-adds **real multi-threaded atomics** via pthread_mutex
-serialization, pushing tests2 to **105 / 118 (89.0%)** under the
-default `-o exe` path. The previous release ([v0.2.7-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.7-g3))
-made **`tcc -run` work on PPC for the first time** — proper
-lis/ori/mtctr/bctr branch islands that JIT-resolve every libc call
-through dlsym. A ~150 KB `/opt`-installable tarball is built
-end-to-end by `scripts/build-release-tarball.sh`.
+[v0.2.9-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.9-g3)
+patch release ([039](docs/sessions/039-unsupervised-cleanup-2026-05-03/README.md))
+makes 1-, 2-, and 4-byte atomics **lock-free via lwarx/stwcx** in
+a new `tcc/lib/atomic-ppc.S` — `124_atomic_counter` drops from
+6m23s under v0.2.8's pthread_mutex implementation to **2.4s**
+(137× speedup). Plus `104_inline` now passes via an
+`N_WEAK_REF`-emission fix in the Mach-O EXE writer. tests2 holds
+at **106 / 118 (89.8%)** under the default `-o exe` path. A
+~150 KB `/opt`-installable tarball is built end-to-end by
+`scripts/build-release-tarball.sh`.
 
 ## Status
 
@@ -65,6 +66,7 @@ end-to-end by `scripts/build-release-tarball.sh`.
 | ✅ | **`v0.2.6-g3` patch release** ([035](docs/sessions/035-unsupervised-2026-05-02/README.md)) — **constructor / destructor support** (full EXE side: `__mod_init_func` + `__mod_term_func` emission, with a `sects[8]→[16]` overflow fix that was hanging tcc on `108_constructor`), **VLA × callee param-spill safety buffer** (fixes `79_vla_continue`), and BE-aware skips for 4 inherently-LE tests. tests2 jumps to **105 / 118 (89%)** |
 | ✅ | **`v0.2.7-g3` patch release** ([037](docs/sessions/037-tcc-run-on-ppc-2026-05-02/README.md)) — **`tcc -run` works on PPC for the first time**: `create_plt_entry` / `relocate_plt` generate lis/ori/mtctr/bctr branch islands, R_PPC_JMP_SLOT / R_PPC_GLOB_DAT relocs write resolved addresses big-endian into the GOT, and a tcc-internal stub catches libtcc1.a's lazy-binding scaffolding when it would otherwise SEGV. Critical bug found and fixed during implementation: the lis+ori sequence must use `@hi`, not `@ha`, since `ori` is zero-extending. tests2 holds at 104 / 118 under `-o exe`; new `RUN=1` mode lands at 102 / 118 (86.4%) |
 | ✅ | **`v0.2.8-g3` patch release** ([038](docs/sessions/038-real-ppc-atomics-2026-05-02/README.md)) — **real atomics**: `__atomic_*` and `atomic_flag_*` helpers in libtcc1.a are now serialized through a single `pthread_mutex_t` (vs the prior single-threaded stubs that raced). 124_atomic_counter (16 threads × 65535 ops) now passes. Slow under contention (a future lwarx/stwcx implementation gated on tcc inline-asm support is the natural follow-up); correct for C11 atomics compliance. tests2 jumps to **105 / 118 (89%)** |
+| ✅ | **`v0.2.9-g3` patch release** ([039](docs/sessions/039-unsupervised-cleanup-2026-05-03/README.md)) — **lock-free atomics for 1-, 2-, and 4-byte widths via lwarx/stwcx** in a new `tcc/lib/atomic-ppc.S` (compiled by gcc-4.0 via per-file Makefile rule, since tcc PPC has no inline asm). 124_atomic_counter drops 6m23s → **2.4s** (137× speedup). Plus `104_inline` win via `N_WEAK_REF` emission for STB_WEAK undefs in Mach-O nlist; ppc-macho-stubs.c (dead since session 009) deleted; UNDEF nlist entries deduped. tests2 jumps to **106 / 118 (89.8%)** |
 
 [Roadmap](docs/roadmap.md) • [Sessions](docs/sessions/) • [Demos](demos/README.md)
 
