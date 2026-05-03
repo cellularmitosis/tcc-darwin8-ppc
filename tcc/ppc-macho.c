@@ -44,6 +44,7 @@
  * can recover the per-function PIC anchor associated with each
  * R_PPC_HA16_PIC / R_PPC_LO16_PIC reloc emitted by ppc-gen.c. */
 ST_FUNC int  ppc_pic_pairs_lookup(int reloc_off);
+ST_FUNC void ppc_pic_pair_record(int reloc_off, int anchor_off);
 ST_FUNC void ppc_pic_pairs_reset(void);
 
 /* ====================================================================
@@ -3750,8 +3751,132 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
         w0 = mach_get32(r);
         w1 = mach_get32(r + 4);
         scattered = (w0 & R_SCATTERED) != 0;
-        if (scattered)
+        if (scattered) {
+            /* Scattered HA16/LO16 SECTDIFF: a PIC pair (addis/lwz)
+             * targeting a __nl_symbol_ptr slot. Only meaningful for
+             * Mach-O output types (OBJ/EXE) where R_PPC_HA16_PIC /
+             * LO16_PIC has a defined translation in ppc-macho.c.
+             * For -run (TCC_OUTPUT_MEMORY) we'd need to rewrite the
+             * lwz to addi and emit ADDR16_HA/LO instead — not yet
+             * supported. Skip in that mode (preserving the old
+             * pre-fix behavior for in-memory loads of libtcc1.a). */
+            if (s1->output_type != TCC_OUTPUT_OBJ
+             && s1->output_type != TCC_OUTPUT_EXE) {
+                /* Skip the SECTDIFF reloc itself AND its trailing
+                 * PAIR. */
+                if (k + 1 < sec->nreloc) {
+                    const unsigned char *rn = ctx->file + sec->reloff + (k + 1) * 8;
+                    uint32_t nw0 = mach_get32(rn);
+                    if ((nw0 & R_SCATTERED)
+                     && ((nw0 >> 24) & 0xf) == PPC_RELOC_PAIR)
+                        k++;
+                }
+                continue;
+            }
+            /* Format:
+             *   word0: scattered bit | pcrel | length | type | r_address(24)
+             *   word1: r_value (absolute target VA in the source obj)
+             * Each HA16_SECTDIFF / LO16_SECTDIFF is followed by a
+             * PAIR scattered reloc carrying the anchor VA in r_value.
+             *
+             * We translate by: find which section the target VA lies
+             * in, resolve via the indirect symtab to the underlying
+             * extern symbol, then emit R_PPC_HA16_PIC / R_PPC_LO16_PIC
+             * — our linker code paths recompute everything from there.
+             *
+             * Other scattered types (PPC_RELOC_SECTDIFF, LOCAL_SECTDIFF,
+             * etc.) are ignored — they don't appear in our object
+             * outputs. */
+            int sc_type   = (w0 >> 24) & 0xf;
+            uint32_t sc_addr  = w0 & 0xffffff;
+            uint32_t sc_value = w1;
+            uint32_t pair_value = 0;
+            int have_pair = 0;
+            int j;
+            int und_sym = -1;
+            int target_sect_idx;
+
+            if (sc_type != PPC_RELOC_HA16_SECTDIFF
+             && sc_type != PPC_RELOC_LO16_SECTDIFF)
+                goto skip_pair_after;
+
+            /* Peek the PAIR scattered reloc: its r_value is the
+             * anchor VA in the source object's __text. We need it
+             * to record the per-reloc anchor for our linker code
+             * (otherwise relocate-time errors with "no PIC anchor
+             * recorded for reloc at ..."). */
+            if (k + 1 < sec->nreloc) {
+                const unsigned char *rp = ctx->file + sec->reloff + (k + 1) * 8;
+                uint32_t pw0 = mach_get32(rp);
+                uint32_t pw1 = mach_get32(rp + 4);
+                if ((pw0 & R_SCATTERED)
+                 && ((pw0 >> 24) & 0xf) == PPC_RELOC_PAIR) {
+                    pair_value = pw1;
+                    have_pair = 1;
+                }
+            }
+
+            /* Find the (discarded) section that contains sc_value. */
+            target_sect_idx = -1;
+            for (j = 0; j < ctx->nsec; j++) {
+                const struct mach_section *t = &ctx->sects[j];
+                if (sc_value >= t->addr
+                 && sc_value <  t->addr + t->size) {
+                    target_sect_idx = j;
+                    break;
+                }
+            }
+            if (target_sect_idx < 0)
+                goto skip_pair_after;
+            /* Only resolve if the target section was discarded
+             * (stub / la_ptr / nl_symbol_ptr). For other targets
+             * we'd need a different handling, but in practice our
+             * own .o emissions only point at __nl_symbol_ptr. */
+            if (ctx->sec_to_tcc[target_sect_idx])
+                goto skip_pair_after;
+            und_sym = macho_resolve_stub_slot(ctx, target_sect_idx,
+                                               sc_value);
+            if (und_sym < 0)
+                goto skip_pair_after;
+
+            new_sym = ctx->sym_old_to_new[und_sym];
+            if (new_sym == 0) {
+                new_sym = macho_translate_sym(s1, ctx, und_sym);
+                ctx->sym_old_to_new[und_sym] = new_sym;
+            }
+            if (new_sym == 0)
+                goto skip_pair_after;
+
+            elf_type = (sc_type == PPC_RELOC_HA16_SECTDIFF)
+                       ? R_PPC_HA16_PIC : R_PPC_LO16_PIC;
+            put_elf_reloc(s1->symtab, s, sec_off + sc_addr,
+                          elf_type, new_sym);
+            /* Record the anchor offset (in the merged tcc section)
+             * for this reloc. The PAIR's r_value is the anchor VA
+             * in the source object's __text (sec->addr base);
+             * translate to merged offset. */
+            if (have_pair) {
+                uint32_t anchor_in_merged =
+                    sec_off + (pair_value - sec->addr);
+                ppc_pic_pair_record((int)(sec_off + sc_addr),
+                                    (int)anchor_in_merged);
+            }
+
+skip_pair_after:
+            /* The PAIR scattered reloc that follows carries the
+             * anchor VA — skip it always (whether or not we used
+             * it above). */
+            if (k + 1 < sec->nreloc) {
+                const unsigned char *rn = ctx->file + sec->reloff + (k + 1) * 8;
+                uint32_t nw0 = mach_get32(rn);
+                if (nw0 & R_SCATTERED) {
+                    int nt = (nw0 >> 24) & 0xf;
+                    if (nt == PPC_RELOC_PAIR)
+                        k++;
+                }
+            }
             continue;
+        }
         r_address = w0;
         r_symnum  = (w1 >> 8) & 0x00ffffff;
         r_pcrel   = (w1 >> 7) & 0x1;

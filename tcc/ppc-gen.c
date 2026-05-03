@@ -659,6 +659,16 @@ ST_FUNC void load(int r, SValue *sv)
         case VT_FUNC:
             o(0x80000000 | (gpr << 21) | (base_gpr << 16));
             return;
+        case VT_STRUCT:
+            /* "Loading" a struct lvalue whose address sits in a
+             * register means producing that address — struct values
+             * flow through tcc as pointers (gfunc_call/vstore etc.
+             * read the bytes from the address). Just `mr r, base`,
+             * skipping the no-op when r already is base. Mirrors the
+             * VT_LOCAL+VT_LVAL+VT_STRUCT case above. */
+            if (gpr != base_gpr)
+                o(0x7c000378 | (base_gpr << 21) | (gpr << 16) | (base_gpr << 11));
+            return;
         default:
             tcc_error("ppc-gen: deref of basic type 0x%x not yet supported", bt);
         }
@@ -1841,7 +1851,7 @@ ST_FUNC int ppc_pic_pairs_lookup(int reloc_off)
     return -1;
 }
 
-static void ppc_pic_pair_record(int reloc_off, int anchor_off)
+ST_FUNC void ppc_pic_pair_record(int reloc_off, int anchor_off)
 {
     if (ppc_pic_pairs_n >= ppc_pic_pairs_cap) {
         ppc_pic_pairs_cap = ppc_pic_pairs_cap ? ppc_pic_pairs_cap * 2 : 64;
