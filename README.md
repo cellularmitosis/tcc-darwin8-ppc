@@ -5,26 +5,24 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.13-g3 SHIPPED.** TCC has never had a PowerPC
-backend in any release. As of session [027](docs/sessions/027-self-link/README.md),
-the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
-links `tcc-self`, which compiles AND links `tcc-self2`, which
-produces a `.o` byte-identical to what `tcc-self3` produces — the
-canonical self-host fixpoint, on a 22-year-old G3 / G4. tests2
-sits at **110 / 111 (99.1%)** under the default `-o exe` path —
-one bitfield codegen bug remains (96).
-[v0.2.13-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.13-g3)
-fixes a long-standing BE-only tcc bug where every parameter-scope
-enum constant collapsed to value 1 (sym_scope writes were
-clobbering the low half of enum_val in the Sym union). Also adds
-`scripts/bench.sh` — a compile-time benchmark of lua 5.4.7 with
-tcc / gcc -O0 / gcc -Os. On a 900 MHz iBook G3 (PowerPC 750):
-**tcc 2s, gcc -O0 17s, gcc -Os 41s** for 33 .c files. Lua 5.4.7 build also works
-end-to-end ([demo](demos/v0.2.12-lua.sh)). sqlite3 amalgamation
-builds and `./sqlite3 -version` works, but a deeper codegen bug
-under investigation still breaks `select 1+1`. A ~160 KB
-`/opt`-installable tarball is built end-to-end by
-`scripts/build-release-tarball.sh`.
+**Status: v0.2.14-g3 SHIPPED — tests2 at 111/111 (100.0%).** TCC
+has never had a PowerPC backend in any release. As of session
+[027](docs/sessions/027-self-link/README.md), the entire bootstrap
+chain runs without `gcc-4.0`: tcc compiles AND links `tcc-self`,
+which compiles AND links `tcc-self2`, which produces a `.o` byte-
+identical to what `tcc-self3` produces — the canonical self-host
+fixpoint, on a 22-year-old G3 / G4.
+[v0.2.14-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.14-g3)
+fixes the last failing test by funneling every bitfield access
+through tcc's byte-wise load/store paths on big-endian PPC32 — the
+wide-container shift+mask path is incoherent with the byte-wise
+static initializer on BE. Lua 5.4.7 builds and runs end-to-end
+([demo](demos/v0.2.12-lua.sh)); `scripts/bench.sh` reports **tcc
+2s, gcc -O0 17s, gcc -Os 41s** for the lua 33-file build on a
+900 MHz iBook G3. sqlite3 amalgamation builds and `./sqlite3
+-version` works; `select 1+1` still hits a deeper codegen bug
+under investigation. A ~160 KB `/opt`-installable tarball is
+built end-to-end by `scripts/build-release-tarball.sh`.
 
 ## Status
 

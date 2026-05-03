@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.13-g3}"
+VERSION="${VERSION:-v0.2.14-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -159,6 +159,16 @@ What's new (cumulative since v0.1.0-g3):
     discards the first run, reports steady-state seconds. Initial
     numbers on a 900 MHz iBook G3 (PowerPC 750):
     tcc 2s, gcc-O0 17s, gcc-Os 41s.
+
+  * v0.2.14: BE bitfield read-back bug. The static initializer
+    writes bitfields byte-by-byte (LSB-first) but the runtime
+    load goes through the wide-container path (LSB-first within a
+    BE-loaded int) — same bit numbering, different memory bits.
+    On LE these agree because byte order matches bit numbering;
+    on BE they don't. Fix forces every bitfield to use the byte-
+    wise load_packed_bf / store_packed_bf paths on PPC32. Cost:
+    ~2-4 byte loads per access vs 1 int load + shifts. tests2
+    climbs to **111/111 (100.0%)** — first time at full pass.
 
 Install:
   sudo mkdir -p $PREFIX
