@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.7-g3}"
+VERSION="${VERSION:-v0.2.8-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -93,10 +93,16 @@ What's new (cumulative since v0.1.0-g3):
     branch islands (lis/ori/mtctr/bctr) that JIT-resolve every libc
     call through dlsym. Simple programs (printf hi-world, struct
     tests, etc.) now run end-to-end via "tcc -run".
-  * tests2 baseline at this release: 104 / 118 (88.1%) under the
-    default -o exe path, 102 / 118 (86.4%) under tcc -run (set
-    RUN=1 in scripts/run-tests2.sh). Total count is 118 not 122
-    because four LE-byte-order-specific tests (90_struct-init,
+  * Real atomics: __atomic_* helpers in libtcc1.a are now
+    pthread_mutex-serialized (vs the prior single-threaded stubs).
+    Multi-threaded programs that race on atomics now produce
+    correct results -- 124_atomic_counter (16 threads x 65535 ops)
+    passes. Performance is poor under contention; a future
+    lwarx/stwcx implementation gated on tcc inline-asm support
+    is the natural follow-up.
+  * tests2 baseline at this release: 105 / 118 (89.0%) under the
+    default -o exe path. Total count is 118 not 122 because four
+    LE-byte-order-specific tests (90_struct-init,
     91_ptr_longlong_arith32, 95_bitfields, 95_bitfields_ms) are
     properly skipped on big-endian.
 
