@@ -2235,7 +2235,14 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                     ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
                     const char *name = (char *)s1->symtab->link->data + esym->st_name;
                     uint32_t strx = (uint32_t)strtab.len;
+                    /* High byte: library ordinal 1 (libSystem). Low
+                     * byte: N_WEAK_REF (0x40) for weak undefs so dyld
+                     * leaves the address 0 if unresolved instead of
+                     * aborting -- 104_inline relies on this to detect
+                     * which inline functions got externally emitted. */
                     uint16_t n_desc = (1u << 8);
+                    if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
+                        n_desc |= 0x40u;
                     obuf_put(&strtab, name, strlen(name) + 1);
                     elfsym_to_undef[e] = n_localsym + n_extdefsym + n_undefsym;
                     put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
@@ -2253,6 +2260,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                     const char *name = (char *)s1->symtab->link->data + esym->st_name;
                     uint32_t strx = (uint32_t)strtab.len;
                     uint16_t n_desc = (1u << 8);
+                    if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
+                        n_desc |= 0x40u;
                     obuf_put(&strtab, name, strlen(name) + 1);
                     elfsym_to_undef[e] = n_localsym + n_extdefsym + n_undefsym;
                     put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
