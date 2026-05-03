@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.8-g3}"
+VERSION="${VERSION:-v0.2.9-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -93,18 +93,20 @@ What's new (cumulative since v0.1.0-g3):
     branch islands (lis/ori/mtctr/bctr) that JIT-resolve every libc
     call through dlsym. Simple programs (printf hi-world, struct
     tests, etc.) now run end-to-end via "tcc -run".
-  * Real atomics: __atomic_* helpers in libtcc1.a are now
-    pthread_mutex-serialized (vs the prior single-threaded stubs).
-    Multi-threaded programs that race on atomics now produce
-    correct results -- 124_atomic_counter (16 threads x 65535 ops)
-    passes. Performance is poor under contention; a future
-    lwarx/stwcx implementation gated on tcc inline-asm support
-    is the natural follow-up.
-  * tests2 baseline at this release: 105 / 118 (89.0%) under the
+  * Lock-free atomics for 1-, 2-, and 4-byte widths via lwarx/stwcx
+    (tcc/lib/atomic-ppc.S, compiled by gcc-4.0 via a per-file
+    Makefile rule). Byte and short use word-RMW with masking
+    since PPC32 has no lbarx/sbarx. 8-byte stays under
+    pthread_mutex (no ldarx/stdcx on PPC32). Real-world impact:
+    124_atomic_counter (16 threads x 65535 ops x 4 widths)
+    drops from ~6m23s to 2.4s -- 137x speedup.
+  * tests2 baseline at this release: 106 / 118 (89.8%) under the
     default -o exe path. Total count is 118 not 122 because four
     LE-byte-order-specific tests (90_struct-init,
     91_ptr_longlong_arith32, 95_bitfields, 95_bitfields_ms) are
-    properly skipped on big-endian.
+    properly skipped on big-endian. The +1 vs v0.2.8 is
+    104_inline (now passes via a Mach-O writer fix that emits
+    N_WEAK_REF for STB_WEAK undefs).
 
 Install:
   sudo mkdir -p $PREFIX
