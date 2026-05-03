@@ -47,8 +47,8 @@ specific tests are properly classified as skipped on big-endian.)
 | **#2** | **2-element HFA struct-by-value on GPR overflow** | 73_arm64 isolates this. Generic struct-by-value codegen issue when arguments span r3..r10 + stack. |
 | **#3** | **Mach-O `tcc -ar` driver** | Currently `XAR = $(AR)` for PPC because tcc's `-ar` is ELF-only. Eventual port lets libtcc1.a be built without external `ar`. |
 | **#4** | **Mach-O archive alacarte loader** | (Was old roadmap #7.) Parse `__.SYMDEF SORTED` and selectively pull members vs. current force-whole-archive. Would also unblock the libgcc.a whole-archive crash from 025. |
-| **#5** | **`ppc-macho-stubs.c` cleanup** | (Was old #8.) Was supposed to be deleted "when phase 3 lands." Phase 3 long since landed. Verify nothing references it and remove. |
-| **#6** | **De-duplicate UNDEF symbols** | (Was old #9.) Spotted in 026: tcc-linked binaries have duplicate UNDEF entries for `___keymgr_dwarf2_register_sections`, `_atexit`, `_exit` when both crt1.o and another input reference them. `macho_translate_sym` coalescing path needs work. |
+| ~~**#5**~~ | ~~`ppc-macho-stubs.c` cleanup~~ | ✅ Done in `00751c8`. Stubs file was dead since session 009 — `ppc-macho.c` had subsumed all its symbols. |
+| ~~**#6**~~ | ~~De-duplicate UNDEF symbols~~ | ✅ Done in `dc7a05d`. The dupe came from emitting one UNDEF nlist entry per stubs[] element AND another per nlptrs[] element when both lists referenced the same elfsym (e.g. `_atexit` referenced as both call target via REL24 and data pointer via ADDR32 from crt1.o's static-init machinery). Refactored to build an elfsym→nlist map so stub_sym_idx and data_sym_idx share UNDEF entries. |
 | **#7** | **Self-link diagnostics** | (Was old #10.) When the EXE writer fails the user gets `dyld` errors with no context. Better messages would shorten future 025-style debugging considerably. |
 
 ### Larger scope
