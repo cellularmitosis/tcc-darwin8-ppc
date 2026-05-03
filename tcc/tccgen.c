@@ -1985,32 +1985,48 @@ ST_FUNC int gv(int rc)
                      * docs/sessions/031-fixpoint-investigation/README.md */
                     vpush64(VT_INT | VT_UNSIGNED, (ll >> 32) & 0xFFFFFFFFu);
                 } else if (vtop->r & VT_LVAL) {
+#ifdef TCC_TARGET_PPC
+                    /* For VT_LLOCAL lvalues (typical for register-pointer
+                     * field accesses converted via save_reg_upstack), the
+                     * naive `incr_offset(+4); load; incr_offset(-4); load`
+                     * is broken: the first load() clobbers the address
+                     * register, so the -4 step operates on the loaded
+                     * value rather than the address. Snapshot the
+                     * VT_LLOCAL c.i so we can re-anchor vtop after the
+                     * LOW load and the HIGH load re-derives its address
+                     * via a fresh load-from-local. */
+                    int orig_v_loc_pre = vtop->r & VT_VALMASK;
+                    int orig_v_full_pre = vtop->r;
+                    int orig_c_i_pre = vtop->c.i;
+                    int orig_r2_pre = vtop->r2;
+#endif
                     /* We do not want to modifier the long long pointer here.
                        So we save any other instances down the stack */
                     save_reg_upstack(vtop->r, 1);
                     /* load from memory */
                     vtop->type.t = load_type;
 #ifdef TCC_TARGET_PPC
-                    /* Big-endian: HIGH at offset+0, LOW at offset+4. tcc
-                       convention is vtop->r = LOW, vtop->r2 = HIGH, so we
-                       load LOW first from offset+4, then HIGH from
-                       offset+0. After the first incr_offset+load, take a
-                       fast path when the lvalue is still LOCAL/CONST
-                       (just bump c.i back) to avoid emitting an extra
-                       runtime address computation that would consume a
-                       scratch register from the ABI slot range. The
-                       second incr_offset(-PTR_SIZE) is only needed for
-                       the register-resident pointer case. */
+                    /* LOW at offset+4 on BE. */
                     incr_offset(PTR_SIZE);
                     load(r, vtop);
                     vdup();
                     vtop[-1].r = r;
                     {
                         int v_loc = vtop->r & VT_VALMASK;
-                        if (v_loc == VT_LOCAL || v_loc == VT_CONST)
+                        if (v_loc == VT_LOCAL || v_loc == VT_CONST) {
                             vtop->c.i -= PTR_SIZE;
-                        else
+                        } else if (orig_v_loc_pre == VT_LLOCAL) {
+                            /* Re-anchor to the original VT_LLOCAL so
+                             * the HIGH load reloads the pointer fresh
+                             * from the saved local. The pointer was
+                             * spilled there by save_reg_upstack at
+                             * some earlier point. */
+                            vtop->r = orig_v_full_pre;
+                            vtop->c.i = orig_c_i_pre;
+                            vtop->r2 = orig_r2_pre;
+                        } else {
                             incr_offset(-PTR_SIZE);
+                        }
                     }
 #else
                     load(r, vtop);
@@ -3604,7 +3620,12 @@ ST_FUNC int type_size(CType *type, int *a)
         return LDOUBLE_SIZE;
     } else if (bt == VT_DOUBLE || bt == VT_LLONG) {
 #if (defined TCC_TARGET_I386 && !defined TCC_TARGET_PE) \
- || (defined TCC_TARGET_ARM && !defined TCC_ARM_EABI)
+ || (defined TCC_TARGET_ARM && !defined TCC_ARM_EABI) \
+ || (defined TCC_TARGET_PPC && !defined TCC_TARGET_PPC64)
+        /* Apple PPC32 ABI: double and long long are 4-byte aligned in
+         * structs (matches the original m68k Mac ABI; SysV/Linux PPC32
+         * uses 8-byte alignment, but every other Apple-on-PPC compiler
+         * uses 4 — and so does sqlite, lua, etc.) */
         *a = 4;
 #else
         *a = 8;
