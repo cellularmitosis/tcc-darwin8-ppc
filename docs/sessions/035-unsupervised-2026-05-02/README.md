@@ -445,3 +445,42 @@ in tests2 hits this; flagged for a follow-up if it ever does.
 ### Trajectory final this resumption
 
 77 → ... → 102 → **105** (HEAD `8d72774`, after VLA fix).
+
+### v0.2.6-g3 release
+
+Cut `v0.2.6-g3` ([github release](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.6-g3))
+bundling the four wins from this resumption:
+
+1. `7151bf1` — sects[8] overflow → sects[16]. Unblocks
+   108_constructor.
+2. `9c20d7b` — BE-aware test skips. 4 LE-specific tests now properly
+   classified as skipped instead of failing.
+3. `8d72774` — VLA × callee param-spill safety buffer. Unblocks
+   79_vla_continue's test2/3/4.
+4. (Plus the housekeeping README/script updates.)
+
+Tarball: `tcc-darwin8-ppc-v0.2.6-g3.tar.gz` (153 KB).
+tests2 baseline at v0.2.6-g3: **105 / 118 = 89.0%**, up from
+101 / 122 = 82.8% at v0.2.5-g3.
+
+### Remaining failures at v0.2.6-g3 (13 tests in 3 buckets)
+
+All remaining failures need substantial follow-up work:
+
+* **`-run` / `-dt` (6 tests):** 60_errors_and_warnings,
+  96_nodata_wanted, 104_inline, 117_builtins, 125_atomic_misc
+  (needs `-dt`), 128_run_atexit. Needs `create_plt_entry` in
+  `tcc/ppc-link.c` (currently a `tcc_error_noabort` stub) for the
+  JIT path. ~200-500 lines, see `tcc/i386-link.c::create_plt_entry`
+  for the pattern.
+* **`-bcheck` (5 tests):** 112_backtrace, 113_btdll, 115_bound_setjmp,
+  116_bound_setjmp2, 126_bound_global. Needs a real port of
+  `tcc/lib/bcheck.c` (hash-table region tracking, signal hooks).
+  Codegen instrumentation in `ppc-gen.c` is already partially
+  there (`func_bound_offset` / `func_bound_ind` are unused
+  statics). The no-op stubs in `tcc/lib/lib-ppc.c` need to be
+  replaced with the real symbols.
+* **Platform-mismatched (2 tests):** 70_floating_point_literals
+  (5-ULP error in upstream tcc's `parse_number` on PPC IEEE 754),
+  73_arm64 (HFA aggregates designed for AArch64; PPC ABI doesn't
+  have HFA semantics).
