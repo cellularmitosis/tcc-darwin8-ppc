@@ -53,6 +53,12 @@ ifeq ($(CONFIG_BIGENDIAN),yes)
  SKIP += 95_bitfields.test
  SKIP += 95_bitfields_ms.test
 endif
+ifeq ($(filter ppc,$(ARCH)),ppc)
+ # 128_run_atexit uses BSD/glibc on_exit(3) which is not declared by
+ # Tiger libSystem; the test fails to link. atexit alone would work,
+ # but the test exercises both. Skip rather than fork the test source.
+ SKIP += 128_run_atexit.test
+endif
 ifeq (-$(CONFIG_WIN32)-,-yes-)
  SKIP += 106_versym.test # No pthread support
  SKIP += 114_bound_signal.test # No pthread support
