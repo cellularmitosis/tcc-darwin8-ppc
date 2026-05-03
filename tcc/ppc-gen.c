@@ -2839,29 +2839,67 @@ ST_FUNC void ggoto(void)
  * VLAs declared inside a nested block can be undone when the block
  * exits.
  *
- * gen_vla_alloc: vtop holds the byte size. Compute SP -= aligned_size,
- * leave the resulting SP on vtop as the pointer to the allocated
- * space. (Caller will store it into a local.) */
+ * Apple PPC ABI complication: every callee unconditionally spills
+ * r3..r10 to caller_SP+24..+52 (the parameter save area). So the
+ * VLA's data MUST sit ABOVE that 32-byte spill zone, not at SP+0.
+ * Concretely, after a VLA alloc:
+ *
+ *   high addr
+ *     +-----------------+
+ *     | (existing frame)|
+ *     +-----------------+ pre-VLA SP
+ *     |   VLA data      |
+ *     +-----------------+ post-VLA "VLA pointer" = SP + PPC_VLA_BUFFER
+ *     | param save area | <- callees write here on r3..r10 spill
+ *     | linkage area    |
+ *     +-----------------+ post-VLA SP (r1)
+ *   low addr
+ *
+ * The VLA pointer (what the user reads back via the saved slot) is
+ * SP + PPC_VLA_BUFFER, not SP itself. gen_vla_sp_save / _restore
+ * apply the offset symmetrically so the same saved slot serves both
+ * (1) user-visible VLA address and (2) SP-restore-on-scope-exit.
+ *
+ * PPC_VLA_BUFFER is fixed at compile time, so any single function
+ * that has VLAs and also makes calls with > 24-arg outgoing param
+ * areas would corrupt the VLA. PPC_PARAM_AREA_MIN (96 bytes = 24
+ * slots) is the budget we promise; in practice no test in tests2
+ * exceeds this. */
+/* 24 (linkage) + 96 (PPC_PARAM_AREA_MIN) = 120 logically; round up to
+ * the next 16-byte multiple (128) so SP-relative offsets we apply via
+ * `addi` stay 16-aligned, and the VLA data above this buffer remains
+ * naturally 16-aligned for SIMD-style accesses. */
+#define PPC_VLA_BUFFER 128
+
 ST_FUNC void gen_vla_sp_save(int addr)
 {
-    /* stw r1, addr(r31)  OR long-form */
+    /* Save (r1 + PPC_VLA_BUFFER) to addr(r31). The +offset compensates
+     * for the callee-safe linkage + param area we keep BELOW the VLA;
+     * see comment above. */
+    /* addi r0, r1, PPC_VLA_BUFFER */
+    o(0x38000000 | (0 << 21) | (1 << 16) | (PPC_VLA_BUFFER & 0xffff));
+    /* stw r0, addr(r31)  OR long-form */
     if (ppc_off_fits_d(addr)) {
-        o(0x90000000 | (1 << 21) | (PPC_FP_REG << 16) | (addr & 0xffff));
+        o(0x90000000 | (0 << 21) | (PPC_FP_REG << 16) | (addr & 0xffff));
     } else {
         ppc_li32_r0(addr);
-        o(0x7c00012e | (1 << 21) | (PPC_FP_REG << 16) | (0 << 11));
+        o(0x7c00012e | (0 << 21) | (PPC_FP_REG << 16) | (0 << 11));
     }
 }
 
 ST_FUNC void gen_vla_sp_restore(int addr)
 {
-    /* lwz r1, addr(r31) */
+    /* Load saved value into r12 (scratch — r0 won't work as the addi
+     * source: PPC treats `addi rD, r0, imm` as rD = imm, ignoring r0's
+     * actual value), then SP = r12 - PPC_VLA_BUFFER. */
     if (ppc_off_fits_d(addr)) {
-        o(0x80000000 | (1 << 21) | (PPC_FP_REG << 16) | (addr & 0xffff));
+        o(0x80000000 | (12 << 21) | (PPC_FP_REG << 16) | (addr & 0xffff));
     } else {
         ppc_li32_r0(addr);
-        o(0x7c00002e | (1 << 21) | (PPC_FP_REG << 16) | (0 << 11));
+        o(0x7c00002e | (12 << 21) | (PPC_FP_REG << 16) | (0 << 11));
     }
+    /* addi r1, r12, -PPC_VLA_BUFFER */
+    o(0x38000000 | (1 << 21) | (12 << 16) | ((-PPC_VLA_BUFFER) & 0xffff));
 }
 
 ST_FUNC void gen_vla_alloc(CType *type, int align)
@@ -2870,18 +2908,19 @@ ST_FUNC void gen_vla_alloc(CType *type, int align)
     /* Materialize size into a GPR. */
     gv(RC_INT);
     size_gpr = TREG_TO_GPR(vtop->r & VT_VALMASK);
-    /* Round size up to 16-byte boundary so the new SP stays
-     * 16-aligned (Apple PPC ABI).
-     *   addi r12, size, 15
-     *   rlwinm r12, r12, 0, 0, 27   (clear low 4 bits)
-     */
-    o(0x38000000 | (12 << 21) | (size_gpr << 16) | 0x000f);
+    /* Compute aligned_size + PPC_VLA_BUFFER:
+     *   addi   r12, size, 15 + PPC_VLA_BUFFER
+     *   rlwinm r12, r12, 0, 0, 27
+     * The +15 rounds the user's size up to the next 16-byte multiple;
+     * the +PPC_VLA_BUFFER reserves the linkage + param area below the
+     * VLA's data so callees don't stomp on it. PPC_VLA_BUFFER is
+     * already a multiple of 16, so the rlwinm-mask still yields a
+     * 16-aligned subtrahend. */
+    o(0x38000000 | (12 << 21) | (size_gpr << 16)
+                 | ((15 + PPC_VLA_BUFFER) & 0xffff));
     o(0x54000000 | (12 << 21) | (12 << 16) | (0 << 11) | (0 << 6) | (27 << 1));
-    /* Subtract from r1: subf r1, r12, r1 (RT = RB - RA → r1 = r1 - r12). */
+    /* Subtract from r1: subf r1, r12, r1 (= r1 = r1 - r12). */
     o(0x7c000050 | (1 << 21) | (12 << 16) | (1 << 11));
-    /* Result address is implicit through SP. tcc's frontend reads
-     * the pointer back via the gen_vla_sp_save / gen_vla_sp_restore
-     * mechanism; we just pop the size off vtop. */
     vpop();
     (void)align; (void)type;
 }
