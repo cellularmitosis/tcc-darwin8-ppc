@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.12-g3}"
+VERSION="${VERSION:-v0.2.13-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -141,6 +141,23 @@ What's new (cumulative since v0.1.0-g3):
     library). sqlite3 amalgamation builds cleanly and \`./sqlite3
     -version\` / \`.help\` work; \`select 1+1\` still hits a
     separate codegen bug under investigation.
+
+  * v0.2.13: BE enum-constant value clobber. tcc's sym_link wrote
+    local_scope into s->sym_scope on every identifier link, but
+    sym_scope shares storage with the low half of enum_val in the
+    Sym union. On big-endian PPC, that erased the visible value:
+    every parameter-scope enum constant came back as 1. Fix is a
+    one-line guard in sym_link to skip the write for IS_ENUM_VAL
+    syms (canonical scope already lives on the enum tag, per
+    sym_scope_ex's existing read-side handling).
+    tests2 now 110/111 (99.1%); 60_errors_and_warnings passes
+    with this fix + a per-test pin to -run on PPC (mirrors 125,
+    needed because -dt only expands per-test_X discrimination in
+    -run / preprocess output_types).
+    Also adds scripts/bench.sh — a compile-time benchmark that
+    builds lua 5.4.7 (33 .c files) with tcc / gcc -O0 / gcc -Os,
+    discards the first run, reports steady-state seconds. Initial
+    numbers on a 1.33 GHz iBook G4: tcc 2s, gcc-O0 17s, gcc-Os 41s.
 
 Install:
   sudo mkdir -p $PREFIX
