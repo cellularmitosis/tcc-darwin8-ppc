@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.26-g3}"
+VERSION="${VERSION:-v0.2.27-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -343,7 +343,7 @@ What's new (cumulative since v0.1.0-g3):
     a DLLReference. The exe/dylib writer emits one LC_LOAD_DYLIB
     per loaded dll (libSystem first, extras after). With extra
     dylibs loaded we switch to flat namespace (clear MH_TWOLEVEL)
-    so dyld searches all loaded dylibs at runtime — avoids
+    so dyld searches all loaded dylibs at runtime -- avoids
     per-symbol two-level ordinal tracking.
 
     Closes upstream \`dlltest\` (multi-session deferred): tcc
@@ -351,6 +351,28 @@ What's new (cumulative since v0.1.0-g3):
     against that dylib, and tcc2 -run prints "Hello World"
     through the round trip. Verified with Tiger's bundled
     /usr/lib/libz.1.dylib (zlibVersion, adler32 work at runtime).
+
+  * v0.2.27: long-deferred JIT heisenbug fixed (5+ sessions).
+    When tcc compiles itself, the inline-asm \`__clear_cache\`
+    in ppc-macho.c falls through to a no-op stub (we have no
+    PPC inline-asm parser). \`tccrun.c::protect_pages\` calls
+    \`__clear_cache\` after JIT codegen, but the stub did
+    nothing -- so JIT page reuse across iterations (same
+    address each time) saw stale icache. Failure modes:
+    SIGILL / SIGBUS / SIGSEGV / silent-wrong-result, all
+    layout-sensitive. The comment in the no-op stub had
+    actually acknowledged this and was the trail to the fix.
+
+    Fix: delegate to libSystem's \`sys_icache_invalidate\`,
+    which performs dcbst/sync/icbi/sync/isync internally.
+    One-line change.
+
+    Test impact: tests2 still 111/111 and bootstrap fixpoint
+    still holds. test3 now runs to completion (was SEGV at
+    line ~770/4500 of tcctest); abitest-tcc passes 20 of
+    ~24 sub-tests deterministically (was variable 5--19);
+    dlltest is now stable across the full upstream
+    \`make -k test\` run.
 
 Install:
   sudo mkdir -p $PREFIX

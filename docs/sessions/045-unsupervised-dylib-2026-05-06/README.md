@@ -112,6 +112,62 @@ dyld: Symbol not found: _zlibVersion
 ```
 because the exe never emitted `LC_LOAD_DYLIB libz.1.dylib`.
 
+### v0.2.27-g3 — JIT heisenbug fixed (5+ sessions deferred)
+
+The long-deferred JIT heisenbug — `tcc_relocate` + repeated
+`tcc_new`/`tcc_delete` cycles producing SIGILL / SIGBUS /
+SIGSEGV / silent-wrong-result at random iterations — turned out
+to be a one-line bug.
+
+**Root cause:** In `tcc/ppc-macho.c::__clear_cache`, the gcc
+build path uses real PPC `__asm__ volatile("dcbst.../icbi...")`.
+The TCC build path (`__TINYC__` set, since tcc has no PPC
+inline-asm parser yet) fell through to a no-op stub. The
+comment had even acknowledged this:
+
+> When tcc compiles itself: tcc has no PPC inline-asm parser
+> yet (ppc-asm.c deferred). Stub it so the bootstrap completes;
+> the resulting tcc-self can produce object files but its own
+> -run mode would skip cache flushing.
+
+So `protect_pages(..., 0/3)` in `tccrun.c` called `__clear_cache`,
+the stub did nothing, and JIT page reuse across iterations
+(same address each time, e.g. 0xa7000) saw stale instructions
+from icache. The signature was layout-sensitive: simple
+`int f(int)` rarely tripped (instructions might fit in already-
+flushed cache lines), but `two_float f(two_float)` (~40
+instructions, multiple cache lines) hit it consistently.
+
+**Verification path:**
+1. Reproduced 30-iteration loop crashes with `tcc`-compiled
+   harness (random SIGILL/SIGBUS/SIGSEGV).
+2. Recompiled the SAME harness with `gcc-4.0`. 10/10 runs at
+   30/30 iterations succeeded — proving the bug was on the
+   compiler side, not in the JIT'd code.
+
+**Fix:** delegate to `sys_icache_invalidate(start, length)`
+which is exported by Tiger libSystem and performs the
+dcbst/sync/icbi/sync/isync dance internally. One-line patch.
+
+**Test impact:**
+* `tests2`: still 111/111. Bootstrap fixpoint still holds.
+* `abitest-tcc`: was failing variably at iteration 5–19 of
+  ~24 sub-tests. Now passes 20 sub-tests deterministically;
+  fails at `many_struct_test_3` — a separate, reproducible
+  bug we can now actually chase.
+* `test3`: was SEGV at line ~770/4500 of tcctest. Now runs to
+  completion; only fails on the known content diffs (`_Bool`
+  size, promote-char/short-funcret UB).
+* `libtest_mt`: makes substantial progress (gets through fib);
+  still fails later.
+* `dlltest`: now stable across the full upstream test run
+  (was sometimes failing under `make -k test` due to earlier
+  JIT failures cascading).
+
+**Demo:**
+[`v0.2.27-jit-heisenbug.sh`](../../../demos/v0.2.27-jit-heisenbug.sh)
+loops the original `two_float` repro 30× and confirms 30/30 OK.
+
 ### Out of scope this session (deferred to follow-ups)
 
 1. **Local relocation entries for dylib sliding** — currently
