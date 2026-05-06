@@ -1714,6 +1714,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     /* Total cmd-size of all per-non-libSystem-dll LC_LOAD_DYLIB
      * entries (computed from s1->loaded_dlls). */
     uint32_t extra_dylib_cmds_size = 0;
+    int n_extra_dylibs = 0;
 
     /* Symtab counts. */
     int n_localsym = 0, n_extdefsym = 0, n_undefsym = 0;
@@ -1826,15 +1827,27 @@ static int macho_output_exe(TCCState *s1, const char *filename)
      * (the implicit dependency) plus one LC_LOAD_DYLIB per
      * additional loaded_dll. If any additional dlls are present,
      * we use FLAT namespace (no MH_TWOLEVEL) so dyld searches all
-     * loaded dylibs without needing per-symbol ordinal tracking. */
+     * loaded dylibs without needing per-symbol ordinal tracking.
+     *
+     * Dedupe libSystem: it's auto-emitted as the implicit
+     * dependency. -lpthread / -ldl / -lm all resolve to
+     * libSystem.B.dylib via install-name re-exports on Tiger;
+     * skipping prevents emitting two LC_LOAD_DYLIB entries for
+     * it. */
     {
         int di;
         extra_dylib_cmds_size = 0;
+        n_extra_dylibs = 0;
         for (di = 0; di < s1->nb_loaded_dlls; di++) {
             const char *name = s1->loaded_dlls[di]->name;
-            uint32_t nlen = (uint32_t)strlen(name) + 1;
-            uint32_t aligned = (nlen + 3u) & ~3u;
+            uint32_t nlen;
+            uint32_t aligned;
+            if (!strcmp(name, "/usr/lib/libSystem.B.dylib"))
+                continue;
+            nlen = (uint32_t)strlen(name) + 1;
+            aligned = (nlen + 3u) & ~3u;
             extra_dylib_cmds_size += 24 + aligned;
+            n_extra_dylibs++;
         }
     }
 
@@ -1852,7 +1865,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         ncmds += 3;  /* LC_LOAD_DYLINKER, LC_LOAD_DYLIB libSystem, LC_DYSYMTAB */
         total_cmds_size += dyld_cmd_size + dylib_cmd_size
                          + dysymtab_cmd_size;
-        ncmds += s1->nb_loaded_dlls;
+        ncmds += n_extra_dylibs;
         total_cmds_size += extra_dylib_cmds_size;
     }
     hdr_and_lc_size = 28 + total_cmds_size;
@@ -2312,7 +2325,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         int *elfsym_to_undef = NULL;
         /* Default ordinal: 1 (libSystem) under two-level; 0
          * (DYNAMIC_LOOKUP) under flat. */
-        uint16_t default_ord = (s1->nb_loaded_dlls == 0) ? (1u << 8) : 0;
+        uint16_t default_ord = (n_extra_dylibs == 0) ? (1u << 8) : 0;
         if (nstubs > 0 || n_nlptrs > 0) {
             elfsym_to_undef = tcc_malloc(nsyms * sizeof(int));
             for (i = 0; i < nsyms; i++) elfsym_to_undef[i] = -1;
@@ -2406,7 +2419,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         uint32_t flags = MH_NOUNDEFS;
         if (nstubs > 0 || n_nlptrs > 0) {
             flags |= MH_DYLDLINK;
-            if (s1->nb_loaded_dlls == 0)
+            if (n_extra_dylibs == 0)
                 flags |= MH_TWOLEVEL;
         }
         put32be(&out, flags);
@@ -2629,10 +2642,12 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         int di;
         for (di = 0; di < s1->nb_loaded_dlls; di++) {
             const char *name = s1->loaded_dlls[di]->name;
-            uint32_t nlen = (uint32_t)strlen(name) + 1;
-            uint32_t aligned = (nlen + 3u) & ~3u;
-            uint32_t cmdsz = 24 + aligned;
-            uint32_t k;
+            uint32_t nlen, aligned, cmdsz, k;
+            if (!strcmp(name, "/usr/lib/libSystem.B.dylib"))
+                continue;
+            nlen = (uint32_t)strlen(name) + 1;
+            aligned = (nlen + 3u) & ~3u;
+            cmdsz = 24 + aligned;
             put32be(&out, LC_LOAD_DYLIB);
             put32be(&out, cmdsz);
             put32be(&out, 24);
@@ -2913,6 +2928,7 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     uint32_t syslib_cmd_size   = 24 + syslib_path_aligned;
     uint32_t dyld_cmd_size     = 12 + dyld_path_aligned;
     uint32_t extra_dylib_cmds_size = 0;
+    int n_extra_dylibs = 0;
 
     /* Symtab counts. */
     int n_localsym = 0, n_extdefsym = 0, n_undefsym = 0;
@@ -3019,17 +3035,25 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     }
     /* Per-loaded-dll LC_LOAD_DYLIB sizes for any non-libSystem
      * dependencies. Always emit when present (a dylib may depend on
-     * other dylibs even with no externs, though that's unusual). */
+     * other dylibs even with no externs, though that's unusual).
+     * libSystem is auto-added as the implicit dependency; -lpthread
+     * /-ldl/-lm all install-name to libSystem on Tiger, so we
+     * dedupe to avoid emitting it twice. */
     {
         int di;
         extra_dylib_cmds_size = 0;
+        n_extra_dylibs = 0;
         for (di = 0; di < s1->nb_loaded_dlls; di++) {
             const char *name = s1->loaded_dlls[di]->name;
-            uint32_t nlen = (uint32_t)strlen(name) + 1;
-            uint32_t aligned = (nlen + 3u) & ~3u;
+            uint32_t nlen, aligned;
+            if (!strcmp(name, "/usr/lib/libSystem.B.dylib"))
+                continue;
+            nlen = (uint32_t)strlen(name) + 1;
+            aligned = (nlen + 3u) & ~3u;
             extra_dylib_cmds_size += 24 + aligned;
+            n_extra_dylibs++;
         }
-        ncmds += s1->nb_loaded_dlls;
+        ncmds += n_extra_dylibs;
         total_cmds_size += extra_dylib_cmds_size;
     }
     hdr_and_lc_size = 28 + total_cmds_size;
@@ -3400,7 +3424,7 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
         int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
         int *elfsym_to_undef = NULL;
         /* Two-level when only libSystem; flat when extra dlls loaded. */
-        uint16_t default_ord = (s1->nb_loaded_dlls == 0) ? (1u << 8) : 0;
+        uint16_t default_ord = (n_extra_dylibs == 0) ? (1u << 8) : 0;
         if (nstubs > 0 || n_nlptrs > 0) {
             elfsym_to_undef = tcc_malloc(nsyms * sizeof(int));
             for (i = 0; i < nsyms; i++) elfsym_to_undef[i] = -1;
@@ -3483,7 +3507,7 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
      * exist (rare). */
     {
         uint32_t flags = MH_DYLDLINK;
-        if (s1->nb_loaded_dlls == 0)
+        if (n_extra_dylibs == 0)
             flags |= MH_TWOLEVEL;
         if (!(nstubs > 0 || n_nlptrs > 0))
             flags |= MH_NOUNDEFS;
@@ -3693,10 +3717,12 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
         int di;
         for (di = 0; di < s1->nb_loaded_dlls; di++) {
             const char *name = s1->loaded_dlls[di]->name;
-            uint32_t nlen = (uint32_t)strlen(name) + 1;
-            uint32_t aligned = (nlen + 3u) & ~3u;
-            uint32_t cmdsz = 24 + aligned;
-            uint32_t k;
+            uint32_t nlen, aligned, cmdsz, k;
+            if (!strcmp(name, "/usr/lib/libSystem.B.dylib"))
+                continue;
+            nlen = (uint32_t)strlen(name) + 1;
+            aligned = (nlen + 3u) & ~3u;
+            cmdsz = 24 + aligned;
             put32be(&out, LC_LOAD_DYLIB);
             put32be(&out, cmdsz);
             put32be(&out, 24);
