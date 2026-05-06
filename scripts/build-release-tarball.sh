@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.18-g3}"
+VERSION="${VERSION:-v0.2.19-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -238,6 +238,29 @@ What's new (cumulative since v0.1.0-g3):
     after lua and zlib). tcctest's diff vs reference shrinks
     from 255 to 122 lines (the remaining diffs are all known
     long-double-128 / _Bool-size / static-init-addend issues).
+
+  * v0.2.19: Three more codegen fixes:
+    - FP comparison >= and <= now correctly return false for NaN
+      operands (per IEEE 754). Old code tested "branch when LT
+      bit clear", which fires for NaN since NaN sets only the
+      FU/SO bit. Fixed via cror to merge FU into LT/GT before bc.
+    - Pointer-to-wider-int cast now follows the destination's
+      signedness (matches gcc on Apple PPC). Previously always
+      sign-extended; (unsigned long long)(char*)0xFFFFFFBE came
+      out as 0xFFFFFFFFFFFFFFBE instead of the expected
+      0x00000000FFFFFFBE.
+    - Long long arg straddling the r10/stack boundary (gslot=7,
+      HIGH in r10 LOW on stack) now writes BOTH halves correctly.
+      Old code's gv(RC_R(gslot)) loaded only one half into r10.
+
+    Plus tcctest.c's LONG_DOUBLE = double on Apple PPC (we use
+    8-byte double for long double; matching gcc's reference
+    output requires both compilers do the same). tcctest's diff
+    vs reference shrinks from 122 to 44 lines. Remaining diffs
+    are known: aligntest3/4 alignof=4 vs gcc's 8 (Apple PPC ABI
+    convention from session 041); _Bool size 1 vs gcc-4.0 quirk
+    of 4; relocation_test &arr[N] addend (deferred); promote
+    char/short funcret undefined-behavior corner.
 
 Install:
   sudo mkdir -p $PREFIX
