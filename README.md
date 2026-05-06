@@ -5,7 +5,7 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.19-g3 SHIPPED — tests2 at 111/111 (100.0%); sqlite,
+**Status: v0.2.20-g3 SHIPPED — tests2 at 111/111 (100.0%); sqlite,
 zlib, lua, and bzip2 all work; full upstream `tcctest.c` (4500-line
 stress test) runs to completion (1020 lines vs 1012 reference, 44
 lines of remaining diffs all known structural).** TCC has never had a
@@ -15,11 +15,13 @@ the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
 links `tcc-self`, which compiles AND links `tcc-self2`, which
 produces a `.o` byte-identical to what `tcc-self3` produces — the
 canonical self-host fixpoint, on a 22-year-old G3 / G4.
-[v0.2.19-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.19-g3)
-fixes three more codegen issues found by chasing the upstream tcctest
-diff: NaN-aware FP `>=`/`<=`, pointer-to-int cast following
-destination signedness, and long-long arg straddling the r10/stack
-ABI boundary. [v0.2.17-g3](docs/sessions/043-unsupervised-2026-05-05/README.md)
+[v0.2.20-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.20-g3)
+extends FP arg passing to the full Apple PPC32 ABI range of 13 FPRs
+(was 8). Functions like `printf("%f %f %f %f %f %f %f %f %f %f", …)`
+that need a 9th+ FP arg in an FPR now compile correctly (used to
+fail with "parameters exceed 8 FPR slots"). Plus libgcc helper
+stubs (`__gcc_q*`, `__cmpdi2`) so tcc-built programs that link
+gcc-built objects don't hit "Symbol not found" at startup. [v0.2.17-g3](docs/sessions/043-unsupervised-2026-05-05/README.md)
 made `alloca()` actually work (epilog used `addi r1, r1, frame_size`
 which can't recover from alloca having moved sp + safety-zone padding
 in the new [`alloca-ppc.S`](tcc/lib/alloca-ppc.S)). Lua 5.4.7 builds

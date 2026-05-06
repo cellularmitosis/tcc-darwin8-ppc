@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.19-g3}"
+VERSION="${VERSION:-v0.2.20-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -261,6 +261,21 @@ What's new (cumulative since v0.1.0-g3):
     convention from session 041); _Bool size 1 vs gcc-4.0 quirk
     of 4; relocation_test &arr[N] addend (deferred); promote
     char/short funcret undefined-behavior corner.
+
+  * v0.2.20: Apple PPC32 ABI 13-FPR support (NB_REGS 18 → 23,
+    f1..f13 instead of f1..f8). Old code capped FP arg passing
+    at 8 FPRs, the SysV/Linux PPC convention. Apple PPC actually
+    uses f1..f13 (the AIX/PowerOpen variant). Functions with
+    more than 8 FP args used to fail with "ppc-gen: parameters
+    exceed 8 FPR slots". After this, abitest::ret_8plus2double
+    passes (had been failing since v0.2.0).
+
+    Also new __gcc_qadd / qsub / qmul / qdiv / __cmpdi2 /
+    __ucmpdi2 stubs in lib-ppc.c so binaries that link
+    gcc-4.0-built objects (e.g. libtcc.a built during the
+    build-tiger bootstrap step) can find these libgcc helpers
+    that Tiger libSystem doesn't ship. Falls back to plain
+    double arithmetic for the IBM double-double helpers.
 
 Install:
   sudo mkdir -p $PREFIX
