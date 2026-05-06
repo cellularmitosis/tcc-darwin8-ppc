@@ -386,7 +386,13 @@ extern int   strncmp(const char *, const char *, unsigned long);
 extern char *strcat(char *, const char *);
 extern char *strncat(char *, const char *, unsigned long);
 extern char *strchr(const char *, int);
+extern char *strrchr(const char *, int);
+extern char *strstr(const char *, const char *);
 extern char *strdup(const char *);
+extern void *malloc(unsigned long);
+extern void *calloc(unsigned long, unsigned long);
+extern void *realloc(void *, unsigned long);
+extern void  free(void *);
 
 void *__bound_memcpy(void *d, const void *s, unsigned long n) { return memcpy(d,s,n); }
 int   __bound_memcmp(const void *a, const void *b, unsigned long n) { return memcmp(a,b,n); }
@@ -400,7 +406,34 @@ int   __bound_strncmp(const char *a, const char *b, unsigned long n) { return st
 char *__bound_strcat(char *d, const char *s) { return strcat(d,s); }
 char *__bound_strncat(char *d, const char *s, unsigned long n) { return strncat(d,s,n); }
 char *__bound_strchr(const char *s, int c) { return strchr(s,c); }
+char *__bound_strrchr(const char *s, int c) { return strrchr(s,c); }
+char *__bound_strstr(const char *h, const char *n) { return strstr(h,n); }
 char *__bound_strdup(const char *s) { return strdup(s); }
+
+/* Heap helpers: just pass through. With a real bcheck.c port these
+ * would track regions; for now make sure tcc-built programs that
+ * link with -b can still call malloc/free/realloc/etc. */
+void *__bound_malloc(unsigned long n)              { return malloc(n); }
+void *__bound_calloc(unsigned long n, unsigned long s) { return calloc(n,s); }
+void *__bound_realloc(void *p, unsigned long n)    { return realloc(p,n); }
+void  __bound_free(void *p)                        { free(p); }
+void *__bound_memalign(unsigned long a, unsigned long n) {
+    /* Tiger libc has no memalign(3); valloc(n) returns page-aligned
+     * memory which dominates any normal alignment request. Bounds
+     * checking is no-op anyway, so the over-aligned return is fine. */
+    extern void *valloc(unsigned long);
+    (void)a;
+    return valloc(n);
+}
+
+/* Bounds-internal hooks. With a real bcheck.c port these would
+ * acquire a global lock and walk allocations; here they're no-ops
+ * so any code linked with -b doesn't fail to resolve them. */
+void __bound_check(const void *p, unsigned long n) { (void)p; (void)n; }
+void __bound_checking_lock(void)                    {}
+void __bound_checking_unlock(void)                  {}
+void __bound_exit_dll(void)                         {}
+void __bound_long_jump(void *env, int val)          { (void)env; (void)val; }
 
 /* ---------------------------------------------------------------------------
  * Atomic helper functions — split between lock-free and mutex paths.
