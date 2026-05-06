@@ -1317,6 +1317,15 @@ static void rt_getcontext(ucontext_t *uc, rt_frame *rc)
 #elif defined(__riscv)
     rc->ip = uc->uc_mcontext.__gregs[REG_PC];
     rc->fp = uc->uc_mcontext.__gregs[REG_S0];
+#elif (defined(__ppc__) || defined(__powerpc__)) && defined(__APPLE__)
+    /* Apple PPC (Tiger 10.4): ucontext_t -> uc_mcontext -> ss has
+     * the ppc_thread_state. SRR0 is the saved PC; r1 is the SP.
+     * Frame pointer = SP for our frame walker (back chain at 0(SP),
+     * saved LR at 8(SP) = caller-set LR slot). On Leopard+ (POSIX
+     * struct names) the field would be __ss.__srr0 / __ss.__r1; on
+     * Tiger the names lack the leading underscores. */
+    rc->ip = uc->uc_mcontext->ss.srr0;
+    rc->fp = uc->uc_mcontext->ss.r1;
 #endif
 }
 
@@ -1514,6 +1523,31 @@ static int rt_get_caller_pc(addr_t *paddr, rt_frame *rc, int level)
             fp = ((addr_t *)fp)[-2];
         }
         *paddr = ((addr_t *)fp)[-1];
+    }
+    return 0;
+}
+
+#elif defined(__ppc__) || defined(__powerpc__)
+/* Apple PPC ABI back-chain walk:
+ *   0(SP)  = caller's SP (back chain)
+ *   8(SP)  = saved LR slot (set by caller's `bl`, kept until return)
+ * For level=1, the value at our SP+8 is already our caller's PC
+ * (the address after the `bl` that called us) — no walk needed.
+ * For level>=2, walk back-chain (level-1) times then read [2]. */
+static int rt_get_caller_pc(addr_t *paddr, rt_frame *rc, int level)
+{
+    if (level == 0) {
+        *paddr = rc->ip;
+    } else {
+        addr_t fp = rc->fp;
+        while (1) {
+            if (fp < 0x1000)
+                return -1;
+            if (0 == --level)
+                break;
+            fp = ((addr_t *)fp)[0];
+        }
+        *paddr = ((addr_t *)fp)[2];
     }
     return 0;
 }

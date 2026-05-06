@@ -1403,8 +1403,21 @@ ST_FUNC void gfunc_call(int nb_args)
 
     /* Spill any vstack values living in caller-saved regs that the
      * call would clobber. tcc walks the vstack and uses our
-     * reg_classes[] mask to decide what can stay. */
-    save_regs(nb_args + 1);
+     * reg_classes[] mask to decide what can stay.
+     *
+     * Use nb_args (not nb_args+1): the entry at vtop-nb_args is the
+     * function pointer / call target. If that's an LVAL whose address
+     * lives in a volatile GPR (e.g. r4), arg processing below would
+     * clobber it before we ever gv() it for the indirect call. Save
+     * range must include the func-ptr slot. (Matches x86_64-gen.c;
+     * arm/i386/arm64/riscv64 use nb_args+1 but those don't materialize
+     * the func ptr from an LVAL post-arg-setup the same way.)
+     *
+     * many_struct_test_3 in upstream abitest reproduces this — it
+     * uses (*(s2->f2 = &f) + 0)(v,v,v,v,v,v,1.0), whose evaluation
+     * leaves &f in a volatile reg that the arg-pass-2 code then
+     * overwrites with v.a. */
+    save_regs(nb_args);
 
     /* First pass: assign GPR / FPR arg slots in source order.
      * Apple PPC ABI: each FP arg consumes one FPR (f1..f13) AND
