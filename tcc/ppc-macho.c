@@ -1540,6 +1540,19 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
                  | ((uint32_t)sect_data[reloc_off+2] <<  8)
                  |  (uint32_t)sect_data[reloc_off+3];
             if (type == R_PPC_ADDR32) {
+                /* TODO: addend handling for `&arr[N]` style static
+                 * inits. Two attempts (preserve in-place;
+                 * section_base + in_place) both broke bootstrap
+                 * because the in-place value's contents differ
+                 * between the in-memory single-TU path (init_putv
+                 * writes user-addend only) and the .o roundtrip path
+                 * (Mach-O .o emit folds sym->st_value into the
+                 * in-place value somewhere). Need to align the two
+                 * paths before re-attempting. For now we keep the
+                 * original "ignore addend" behavior, accepting that
+                 * `int *p = &arr[N]` (N != 0) resolves to &arr+0.
+                 * Affects `relocation_test` in tcctest.c and a few
+                 * static-init array-of-pointers patterns. */
                 inst = target_addr;
             } else if (type == R_PPC_ADDR16_HA) {
                 imm = ((target_addr + 0x8000) >> 16) & 0xffff;
