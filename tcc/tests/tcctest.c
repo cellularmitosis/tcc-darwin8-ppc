@@ -3993,7 +3993,11 @@ void builtin_test(void)
     }
 }
 
-#if defined _WIN32 || (defined __APPLE__ && GCC_MAJOR >= 15)
+#if defined _WIN32 || (defined __APPLE__ && (GCC_MAJOR >= 15 || defined __ppc__ || defined __ppc64__))
+/* On Apple PPC (Tiger 10.4 / Leopard PPC), dyld cannot resolve
+   undefined-weak symbols at flat-namespace load time -- the binary
+   exits with "Symbol not found: _weak_v1" before main() runs.
+   The functionality only landed in 10.5+ for x86. Skip on PPC. */
 void weak_test(void) {}
 #else
 extern int __attribute__((weak)) weak_f1(void);
