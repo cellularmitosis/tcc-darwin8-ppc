@@ -1712,6 +1712,9 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     uint32_t dyld_path_aligned  = (sizeof(dyld_path)  + 3u) & ~3u;
     uint32_t dylib_cmd_size = 24 + dylib_path_aligned;
     uint32_t dyld_cmd_size  = 12 + dyld_path_aligned;
+    /* Total cmd-size of all per-non-libSystem-dll LC_LOAD_DYLIB
+     * entries (computed from s1->loaded_dlls). */
+    uint32_t extra_dylib_cmds_size = 0;
 
     /* Symtab counts. */
     int n_localsym = 0, n_extdefsym = 0, n_undefsym = 0;
@@ -1819,6 +1822,23 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     if (n_data_sects > 0)
         data_seg_cmd_size = 56 + 68u * n_data_sects;
 
+    /* Per-loaded-dll LC_LOAD_DYLIB sizes. Each dll's name string is
+     * variable length, so we precompute. We always emit libSystem
+     * (the implicit dependency) plus one LC_LOAD_DYLIB per
+     * additional loaded_dll. If any additional dlls are present,
+     * we use FLAT namespace (no MH_TWOLEVEL) so dyld searches all
+     * loaded dylibs without needing per-symbol ordinal tracking. */
+    {
+        int di;
+        extra_dylib_cmds_size = 0;
+        for (di = 0; di < s1->nb_loaded_dlls; di++) {
+            const char *name = s1->loaded_dlls[di]->name;
+            uint32_t nlen = (uint32_t)strlen(name) + 1;
+            uint32_t aligned = (nlen + 3u) & ~3u;
+            extra_dylib_cmds_size += 24 + aligned;
+        }
+    }
+
     ncmds = 4;  /* PAGEZERO, TEXT, LINKEDIT, UNIXTHREAD */
     total_cmds_size = pagezero_cmd_size + text_seg_cmd_size
                     + linkedit_cmd_size + symtab_cmd_size
@@ -1830,9 +1850,11 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     /* LC_SYMTAB is included in total_cmds_size above and ncmds+1 below. */
     ncmds++;
     if (nstubs > 0 || n_nlptrs > 0) {
-        ncmds += 3;  /* LC_LOAD_DYLINKER, LC_LOAD_DYLIB, LC_DYSYMTAB */
+        ncmds += 3;  /* LC_LOAD_DYLINKER, LC_LOAD_DYLIB libSystem, LC_DYSYMTAB */
         total_cmds_size += dyld_cmd_size + dylib_cmd_size
                          + dysymtab_cmd_size;
+        ncmds += s1->nb_loaded_dlls;
+        total_cmds_size += extra_dylib_cmds_size;
     }
     hdr_and_lc_size = 28 + total_cmds_size;
 
@@ -2283,10 +2305,15 @@ static int macho_output_exe(TCCState *s1, const char *filename)
      * n_desc carries the two-level namespace library ordinal in its
      * high byte; ord 1 = first LC_LOAD_DYLIB (libSystem in our case).
      * Without this dyld looks for the symbol in our own executable
-     * and fails. */
+     * and fails. When extra dylibs are loaded we emit flat namespace
+     * (no MH_TWOLEVEL) — the ordinal is then ignored, but we set it
+     * to 0 (DYNAMIC_LOOKUP) for cleanliness. */
     {
         int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
         int *elfsym_to_undef = NULL;
+        /* Default ordinal: 1 (libSystem) under two-level; 0
+         * (DYNAMIC_LOOKUP) under flat. */
+        uint16_t default_ord = (s1->nb_loaded_dlls == 0) ? (1u << 8) : 0;
         if (nstubs > 0 || n_nlptrs > 0) {
             elfsym_to_undef = tcc_malloc(nsyms * sizeof(int));
             for (i = 0; i < nsyms; i++) elfsym_to_undef[i] = -1;
@@ -2299,12 +2326,12 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                     ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
                     const char *name = (char *)s1->symtab->link->data + esym->st_name;
                     uint32_t strx = (uint32_t)strtab.len;
-                    /* High byte: library ordinal 1 (libSystem). Low
-                     * byte: N_WEAK_REF (0x40) for weak undefs so dyld
-                     * leaves the address 0 if unresolved instead of
-                     * aborting -- 104_inline relies on this to detect
-                     * which inline functions got externally emitted. */
-                    uint16_t n_desc = (1u << 8);
+                    /* Low byte: N_WEAK_REF (0x40) for weak undefs so
+                     * dyld leaves the address 0 if unresolved instead
+                     * of aborting -- 104_inline relies on this to
+                     * detect which inline functions got externally
+                     * emitted. */
+                    uint16_t n_desc = default_ord;
                     if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
                         n_desc |= 0x40u;
                     obuf_put(&strtab, name, strlen(name) + 1);
@@ -2323,7 +2350,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                     ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
                     const char *name = (char *)s1->symtab->link->data + esym->st_name;
                     uint32_t strx = (uint32_t)strtab.len;
-                    uint16_t n_desc = (1u << 8);
+                    uint16_t n_desc = default_ord;
                     if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
                         n_desc |= 0x40u;
                     obuf_put(&strtab, name, strlen(name) + 1);
@@ -2373,9 +2400,18 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     put32be(&out, MH_EXECUTE);
     put32be(&out, ncmds);
     put32be(&out, total_cmds_size);
-    put32be(&out, (nstubs > 0 || n_nlptrs > 0)
-                  ? (MH_NOUNDEFS | MH_DYLDLINK | MH_TWOLEVEL)
-                  : MH_NOUNDEFS);
+    /* When extra (non-libSystem) dylibs are loaded, switch to FLAT
+     * namespace (clear MH_TWOLEVEL) so dyld searches all loaded
+     * dylibs without needing per-symbol two-level ordinals. */
+    {
+        uint32_t flags = MH_NOUNDEFS;
+        if (nstubs > 0 || n_nlptrs > 0) {
+            flags |= MH_DYLDLINK;
+            if (s1->nb_loaded_dlls == 0)
+                flags |= MH_TWOLEVEL;
+        }
+        put32be(&out, flags);
+    }
 
     /* ---- LC_SEGMENT __PAGEZERO. ---- */
     put32be(&out, LC_SEGMENT);
@@ -2585,6 +2621,29 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         obuf_put(&out, dylib_path, sizeof(dylib_path));
         for (k = sizeof(dylib_path); k < dylib_path_aligned; k++)
             put8(&out, 0);
+    }
+
+    /* ---- LC_LOAD_DYLIB for each extra (non-libSystem) loaded dll.
+     * libSystem already emitted above; these come after. dyld
+     * searches them in load order under flat namespace. */
+    if (nstubs > 0 || n_nlptrs > 0) {
+        int di;
+        for (di = 0; di < s1->nb_loaded_dlls; di++) {
+            const char *name = s1->loaded_dlls[di]->name;
+            uint32_t nlen = (uint32_t)strlen(name) + 1;
+            uint32_t aligned = (nlen + 3u) & ~3u;
+            uint32_t cmdsz = 24 + aligned;
+            uint32_t k;
+            put32be(&out, LC_LOAD_DYLIB);
+            put32be(&out, cmdsz);
+            put32be(&out, 24);
+            put32be(&out, 0);
+            put32be(&out, 0x00010000);
+            put32be(&out, 0x00010000);
+            obuf_put(&out, name, nlen);
+            for (k = nlen; k < aligned; k++)
+                put8(&out, 0);
+        }
     }
 
     /* ---- LC_SYMTAB. ---- */
@@ -2854,6 +2913,7 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     uint32_t id_dylib_cmd_size = 24 + id_dylib_path_aligned;
     uint32_t syslib_cmd_size   = 24 + syslib_path_aligned;
     uint32_t dyld_cmd_size     = 12 + dyld_path_aligned;
+    uint32_t extra_dylib_cmds_size = 0;
 
     /* Symtab counts. */
     int n_localsym = 0, n_extdefsym = 0, n_undefsym = 0;
@@ -2957,6 +3017,21 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     if (nstubs > 0 || n_nlptrs > 0) {
         ncmds += 1;     /* LC_LOAD_DYLIB libSystem (only when needed) */
         total_cmds_size += syslib_cmd_size;
+    }
+    /* Per-loaded-dll LC_LOAD_DYLIB sizes for any non-libSystem
+     * dependencies. Always emit when present (a dylib may depend on
+     * other dylibs even with no externs, though that's unusual). */
+    {
+        int di;
+        extra_dylib_cmds_size = 0;
+        for (di = 0; di < s1->nb_loaded_dlls; di++) {
+            const char *name = s1->loaded_dlls[di]->name;
+            uint32_t nlen = (uint32_t)strlen(name) + 1;
+            uint32_t aligned = (nlen + 3u) & ~3u;
+            extra_dylib_cmds_size += 24 + aligned;
+        }
+        ncmds += s1->nb_loaded_dlls;
+        total_cmds_size += extra_dylib_cmds_size;
     }
     hdr_and_lc_size = 28 + total_cmds_size;
 
@@ -3325,6 +3400,8 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     {
         int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
         int *elfsym_to_undef = NULL;
+        /* Two-level when only libSystem; flat when extra dlls loaded. */
+        uint16_t default_ord = (s1->nb_loaded_dlls == 0) ? (1u << 8) : 0;
         if (nstubs > 0 || n_nlptrs > 0) {
             elfsym_to_undef = tcc_malloc(nsyms * sizeof(int));
             for (i = 0; i < nsyms; i++) elfsym_to_undef[i] = -1;
@@ -3337,8 +3414,7 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
                     ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
                     const char *name = (char *)s1->symtab->link->data + esym->st_name;
                     uint32_t strx = (uint32_t)strtab.len;
-                    /* High byte: library ordinal 1 (libSystem). */
-                    uint16_t n_desc = (1u << 8);
+                    uint16_t n_desc = default_ord;
                     if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
                         n_desc |= 0x40u;
                     obuf_put(&strtab, name, strlen(name) + 1);
@@ -3357,7 +3433,7 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
                     ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
                     const char *name = (char *)s1->symtab->link->data + esym->st_name;
                     uint32_t strx = (uint32_t)strtab.len;
-                    uint16_t n_desc = (1u << 8);
+                    uint16_t n_desc = default_ord;
                     if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
                         n_desc |= 0x40u;
                     obuf_put(&strtab, name, strlen(name) + 1);
@@ -3402,12 +3478,18 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     put32be(&out, MH_DYLIB);
     put32be(&out, ncmds);
     put32be(&out, total_cmds_size);
-    /* Dylibs are always dyld-linked and use the two-level namespace.
-     * MH_NOUNDEFS only when no extern refs (rare in practice but
-     * cheap to set). */
-    put32be(&out, (nstubs > 0 || n_nlptrs > 0)
-                  ? (MH_DYLDLINK | MH_TWOLEVEL)
-                  : (MH_DYLDLINK | MH_TWOLEVEL | MH_NOUNDEFS));
+    /* Dylibs are always dyld-linked. Two-level namespace when only
+     * libSystem is in play; switch to flat (no MH_TWOLEVEL) when
+     * extra dylibs are loaded. MH_NOUNDEFS only when no extern refs
+     * exist (rare). */
+    {
+        uint32_t flags = MH_DYLDLINK;
+        if (s1->nb_loaded_dlls == 0)
+            flags |= MH_TWOLEVEL;
+        if (!(nstubs > 0 || n_nlptrs > 0))
+            flags |= MH_NOUNDEFS;
+        put32be(&out, flags);
+    }
 
     /* ---- LC_SEGMENT __TEXT. ---- */
     put32be(&out, LC_SEGMENT);
@@ -3605,6 +3687,27 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
         obuf_put(&out, syslib_path, sizeof(syslib_path));
         for (k = sizeof(syslib_path); k < syslib_path_aligned; k++)
             put8(&out, 0);
+    }
+
+    /* ---- LC_LOAD_DYLIB for each extra dependency dll. ---- */
+    {
+        int di;
+        for (di = 0; di < s1->nb_loaded_dlls; di++) {
+            const char *name = s1->loaded_dlls[di]->name;
+            uint32_t nlen = (uint32_t)strlen(name) + 1;
+            uint32_t aligned = (nlen + 3u) & ~3u;
+            uint32_t cmdsz = 24 + aligned;
+            uint32_t k;
+            put32be(&out, LC_LOAD_DYLIB);
+            put32be(&out, cmdsz);
+            put32be(&out, 24);
+            put32be(&out, 0);
+            put32be(&out, 0x00010000);
+            put32be(&out, 0x00010000);
+            obuf_put(&out, name, nlen);
+            for (k = nlen; k < aligned; k++)
+                put8(&out, 0);
+        }
     }
 
     /* ---- LC_SYMTAB. ---- */
@@ -5360,32 +5463,224 @@ ST_FUNC void tcc_add_macos_sdkpath(TCCState *s)
     tcc_add_library_path(s, "/usr/lib");
 }
 
+/* Parse a Mach-O dylib at link time: read its LC_SYMTAB, register
+ * each defined-external symbol as UNDEF in our own symtab, capture
+ * its install name (LC_ID_DYLIB) so the eventual LC_LOAD_DYLIB
+ * points at the right path, and add it via tcc_add_dllref so the
+ * exe/dylib writer can emit one LC_LOAD_DYLIB per loaded dll.
+ *
+ * libSystem is special-cased by the writer (always emitted as the
+ * implicit ordinal-1 dependency); calling this on libSystem.B.dylib
+ * is harmless — set_elf_sym ignores re-adds of unchanged UNDEFs.
+ *
+ * Multi-dylib programs use FLAT namespace (no MH_TWOLEVEL): dyld
+ * searches all loaded dylibs in load order at runtime. This avoids
+ * the per-symbol ordinal tracking that strict two-level requires
+ * and is well-supported on Tiger. */
 ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
 {
-    /* For Tiger PPC, all the common shared libraries (libm, libpthread,
-     * libc, libdl) are re-exports of libSystem.B.dylib. Their symbols
-     * are reachable via the libSystem LC_LOAD_DYLIB we already emit,
-     * so we don't need to do any actual symbol-table parsing of the
-     * .dylib here — dyld will resolve them at runtime through
-     * libSystem's flat-namespace export table.
-     *
-     * Just record the dll reference (so duplicates are tracked) and
-     * return success. Symbols referenced in user code that are present
-     * in libSystem will Just Work; symbols that aren't will surface as
-     * dyld-load-time "Symbol not found" errors, which is the same
-     * failure mode you get with any unresolved extern. No-op this is
-     * safe because:
-     *   * we don't yet emit per-dylib LC_LOAD_DYLIB entries,
-     *   * libSystem covers libm/libpthread/libc/libdl on Tiger,
-     *   * tcc-built programs that need anything outside libSystem
-     *     (uncommon on Tiger) can still fail loudly at runtime.
-     *
-     * If we ever support emitting multiple LC_LOAD_DYLIB or want to
-     * resolve symbols at link time (instead of letting dyld discover
-     * them), this is where to actually parse the dylib's LC_SYMTAB.
-     * For now: do nothing. */
-    (void)s1; (void)fd; (void)filename; (void)lev;
-    return 0;
+    unsigned char *file = NULL;
+    off_t fsize;
+    off_t file_offset = 0;
+    int ret = -1;
+    uint32_t i;
+    uint32_t magic, ncmds, sizeofcmds, cmd_off;
+    uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
+    int found_symtab = 0;
+    char *id_dylib_name = NULL;   /* path string from LC_ID_DYLIB, malloc'd */
+
+    lseek(fd, 0, SEEK_END);
+    fsize = lseek(fd, 0, SEEK_CUR);
+    lseek(fd, 0, SEEK_SET);
+    if (fsize < 28) {
+        tcc_error_noabort("macho: dylib too small (%lld bytes): %s",
+                          (long long)fsize, filename);
+        return -1;
+    }
+
+    /* Fat-binary handling: locate the PPC32 slice. */
+    {
+        unsigned char hdr[8];
+        uint32_t fat_magic;
+        if (full_read(fd, hdr, 8) == 8) {
+            fat_magic = ((uint32_t)hdr[0]<<24)|((uint32_t)hdr[1]<<16)
+                      | ((uint32_t)hdr[2]<<8) |((uint32_t)hdr[3]);
+            if (fat_magic == 0xcafebabe) {
+                uint32_t nfat = ((uint32_t)hdr[4]<<24)|((uint32_t)hdr[5]<<16)
+                              | ((uint32_t)hdr[6]<<8) |((uint32_t)hdr[7]);
+                uint32_t j;
+                uint32_t ppc_off = 0, ppc_size = 0;
+                unsigned char fa[20];
+                if (nfat > 32) nfat = 32;
+                for (j = 0; j < nfat; j++) {
+                    uint32_t cputype, off2, sz2;
+                    if (lseek(fd, 8 + (off_t)j * 20, SEEK_SET) < 0) break;
+                    if (full_read(fd, fa, 20) != 20) break;
+                    cputype = ((uint32_t)fa[0]<<24)|((uint32_t)fa[1]<<16)
+                            | ((uint32_t)fa[2]<<8) |((uint32_t)fa[3]);
+                    off2 = ((uint32_t)fa[8]<<24)|((uint32_t)fa[9]<<16)
+                         | ((uint32_t)fa[10]<<8)|((uint32_t)fa[11]);
+                    sz2 = ((uint32_t)fa[12]<<24)|((uint32_t)fa[13]<<16)
+                        | ((uint32_t)fa[14]<<8)|((uint32_t)fa[15]);
+                    if (cputype == 18 /* CPU_TYPE_POWERPC */) {
+                        ppc_off = off2;
+                        ppc_size = sz2;
+                        break;
+                    }
+                }
+                if (!ppc_size) {
+                    tcc_error_noabort("macho: dylib has no ppc slice: %s",
+                                      filename);
+                    return -1;
+                }
+                file_offset = ppc_off;
+                fsize = (off_t)file_offset + ppc_size;
+            }
+        }
+        lseek(fd, file_offset, SEEK_SET);
+    }
+
+    file = tcc_malloc(fsize - file_offset);
+    if (full_read(fd, file, fsize - file_offset)
+            != (ssize_t)(fsize - file_offset)) {
+        tcc_error_noabort("macho: short read on dylib %s", filename);
+        goto cleanup;
+    }
+
+    if (fsize - file_offset < 28) {
+        tcc_error_noabort("macho: dylib slice too small: %s", filename);
+        goto cleanup;
+    }
+
+    magic = mach_get32(file);
+    if (magic != MH_MAGIC) {
+        tcc_error_noabort("macho: not a PPC Mach-O dylib (magic=0x%x): %s",
+                          magic, filename);
+        goto cleanup;
+    }
+
+    {
+        uint32_t filetype = mach_get32(file + 12);
+        if (filetype != MH_DYLIB) {
+            tcc_error_noabort("macho: file is not a dylib (filetype=%u): %s",
+                              filetype, filename);
+            goto cleanup;
+        }
+    }
+
+    ncmds      = mach_get32(file + 16);
+    sizeofcmds = mach_get32(file + 20);
+    if (28 + sizeofcmds > (uint32_t)(fsize - file_offset)) {
+        tcc_error_noabort("macho: load commands exceed file: %s", filename);
+        goto cleanup;
+    }
+
+    /* Walk load commands. We care about LC_SYMTAB (for the symbols)
+     * and LC_ID_DYLIB (for the install name we record). */
+    cmd_off = 28;
+    for (i = 0; i < ncmds; i++) {
+        uint32_t cmd, cmdsize;
+        if (cmd_off + 8 > 28 + sizeofcmds) break;
+        cmd     = mach_get32(file + cmd_off);
+        cmdsize = mach_get32(file + cmd_off + 4);
+        if (cmdsize < 8 || cmd_off + cmdsize > 28 + sizeofcmds) break;
+        if (cmd == LC_SYMTAB && cmd_off + 24 <= 28 + sizeofcmds) {
+            symoff  = mach_get32(file + cmd_off + 8);
+            nsyms   = mach_get32(file + cmd_off + 12);
+            stroff  = mach_get32(file + cmd_off + 16);
+            strsize = mach_get32(file + cmd_off + 20);
+            found_symtab = 1;
+        } else if (cmd == LC_ID_DYLIB && cmdsize >= 24 && !id_dylib_name) {
+            uint32_t name_off = mach_get32(file + cmd_off + 8);
+            if (name_off < cmdsize) {
+                const char *p = (const char *)(file + cmd_off + name_off);
+                /* Tiger libSystem doesn't ship strnlen (10.7+); inline. */
+                size_t lim = cmdsize - name_off, n = 0;
+                while (n < lim && p[n]) n++;
+                id_dylib_name = tcc_malloc(n + 1);
+                memcpy(id_dylib_name, p, n);
+                id_dylib_name[n] = 0;
+            }
+        }
+        cmd_off += cmdsize;
+    }
+
+    if (!found_symtab) {
+        tcc_error_noabort("macho: dylib has no LC_SYMTAB: %s", filename);
+        goto cleanup;
+    }
+
+    if (symoff + nsyms * 12 > (uint32_t)(fsize - file_offset)
+        || stroff + strsize > (uint32_t)(fsize - file_offset)) {
+        tcc_error_noabort("macho: dylib symtab/strtab out of range: %s",
+                          filename);
+        goto cleanup;
+    }
+
+    /* Register the dylib in loaded_dlls, keyed by install name (or
+     * filename if LC_ID_DYLIB was missing). The writer emits one
+     * LC_LOAD_DYLIB per registered dll. */
+    {
+        const char *soname = id_dylib_name ? id_dylib_name : filename;
+        DLLReference *dllref = tcc_add_dllref(s1, soname, lev);
+        (void)dllref;
+    }
+
+    /* Walk the symbol table, registering each defined-external symbol
+     * as UNDEF in our own symtab. Future references in user code
+     * resolve to this UNDEF, which the exe writer then turns into a
+     * stub or __nl_symbol_ptr slot. dyld binds it at load time
+     * (flat namespace: searches all loaded LC_LOAD_DYLIBs). */
+    {
+        const unsigned char *nl_base = file + symoff;
+        const char *strtab_base = (const char *)(file + stroff);
+        uint32_t k;
+        int n_added = 0;
+
+        for (k = 0; k < nsyms; k++) {
+            const unsigned char *nl = nl_base + k * 12;
+            uint32_t n_strx = mach_get32(nl);
+            unsigned char n_type = nl[4];
+            const char *sym_name;
+            /* Defined-external = (n_type & N_EXT) && (n_type & N_TYPE) == N_SECT */
+            if (!(n_type & N_EXT) || (n_type & N_TYPE) != N_SECT) continue;
+            /* Skip stab debug entries. */
+            if (n_type & N_STAB) continue;
+            if (n_strx >= strsize) continue;
+            sym_name = strtab_base + n_strx;
+            if (!*sym_name) continue;
+            /* Mach-O symbol names have a leading underscore that ELF
+             * names don't. Strip it before registering — tcc's symtab
+             * uses bare C names internally; the leading underscore
+             * gets re-added at output emission via leading_underscore
+             * (already accounted for in collect_extern_stubs etc.). */
+            if (sym_name[0] == '_')
+                sym_name++;
+            if (!*sym_name) continue;
+            /* Skip the special Mach-O image-base anchors that real
+             * tcc-built EXEs/dylibs synthesize themselves; if they're
+             * mentioned by a dylib, they don't apply across images. */
+            if (!strcmp(sym_name, "_mh_dylib_header")
+             || !strcmp(sym_name, "_mh_execute_header")
+             || !strcmp(sym_name, "_mh_bundle_header"))
+                continue;
+            set_elf_sym(s1->symtab, 0, 0,
+                        ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE),
+                        0, SHN_UNDEF, sym_name);
+            n_added++;
+        }
+
+        if (s1->verbose)
+            printf("-> %s (dylib, %d symbols registered)\n",
+                   filename, n_added);
+    }
+
+    ret = 0;
+
+cleanup:
+    tcc_free(file);
+    tcc_free(id_dylib_name);
+    return ret;
 }
 
 ST_FUNC int macho_load_tbd(TCCState *s1, int fd, const char *filename, int lev)
