@@ -269,6 +269,11 @@ static char *default_outputfile(TCCState *s, const char *first_file)
         strcpy(ext, ".exe");
     else
 #endif
+#if defined TCC_TARGET_MACHO
+    if (s->output_type == TCC_OUTPUT_DLL)
+        strcpy(ext, ".dylib");
+    else
+#endif
     if ((s->just_deps || s->output_type == TCC_OUTPUT_OBJ) && !s->option_r && *ext)
         strcpy(ext, ".o");
     else

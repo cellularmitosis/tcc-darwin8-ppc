@@ -69,12 +69,14 @@ ST_FUNC void ppc_pic_pairs_reset(void);
 #define LC_SYMTAB               0x2
 #define LC_DYSYMTAB             0xb
 #define LC_LOAD_DYLIB           0xc
+#define LC_ID_DYLIB             0xd
 #define LC_LOAD_DYLINKER        0xe
 #define LC_UNIXTHREAD           0x5
 #define LC_TWOLEVEL_HINTS       0x16
 
 /* MH_EXECUTE filetype + flags. */
 #define MH_EXECUTE              2
+#define MH_DYLIB                6   /* dynamic shared library */
 #define MH_NOUNDEFS             0x1
 #define MH_DYLDLINK             0x4
 #define MH_BINDATLOAD           0x8
@@ -2763,6 +2765,981 @@ cleanup:
 }
 
 
+/* ====================================================================
+ * MH_DYLIB writer
+ * --------------------------------------------------------------------
+ * Mirrors macho_output_exe with these dylib-specific differences:
+ *   * filetype MH_DYLIB; flags MH_DYLDLINK | MH_TWOLEVEL (no MH_NOUNDEFS,
+ *     dylibs typically have undefined refs to libSystem)
+ *   * No __PAGEZERO segment (the host process owns page 0, not the dylib)
+ *   * No LC_UNIXTHREAD (dylibs are not entry points)
+ *   * No crt-shim, no _main lookup, no auto-injected __tcc_start_main
+ *   * LC_ID_DYLIB describes this dylib's install name / version
+ *   * __mh_dylib_header (not __mh_execute_header) at __TEXT base
+ *   * PIC stubs (32 bytes / 8 instructions) instead of absolute stubs
+ *
+ * Default __TEXT vmaddr is high (0x40000000) so dyld can usually load
+ * us at the preferred address. Not yet emitting local relocations, so
+ * if dyld slides the dylib, absolute references in __data with
+ * pointer initializers will be wrong. Function calls go through PIC
+ * stubs and __nl_symbol_ptr (filled by dyld), so they are unaffected.
+ * ================================================================== */
+#define DYLIB_TEXT_VMADDR_BASE  0x40000000
+
+static int macho_output_dylib(TCCState *s1, const char *filename)
+{
+    obuf out;
+    obuf nlist, strtab, indirect;
+    Section *text = NULL, *rodata = NULL, *data = NULL, *bss = NULL;
+    Section *init_array = NULL;
+    Section *fini_array = NULL;
+    int i, ret = -1;
+    FILE *fp = NULL;
+    int fd;
+
+    struct extern_stub *stubs = NULL;
+    int *stub_for_elfsym = NULL;
+    int nstubs = 0;
+    unsigned char *stub_data = NULL;
+    unsigned char *nl_ptr_data = NULL;
+
+    enum { DYLIB_SECT_TEXT = 1 };
+    int n_text_sects, n_data_sects, total_msects;
+
+#define DYLIB_MAX_SECTS 16
+    struct exe_sect sects[DYLIB_MAX_SECTS];
+    int nsec = 0;
+    int sect_idx_text = -1, sect_idx_rodata = -1, sect_idx_data = -1;
+    int sect_idx_stub = -1, sect_idx_nlptr = -1, sect_idx_dyld = -1;
+    int sect_idx_bss = -1;
+    int sect_idx_init_array = -1;
+    int sect_idx_fini_array = -1;
+    unsigned char *init_array_data = NULL;
+    unsigned char *fini_array_data = NULL;
+
+    struct extern_nlptr *nlptrs = NULL;
+    int *nl_for_elfsym = NULL;
+    int n_nlptrs = 0;
+    int *data_sym_idx = NULL;
+
+    /* Layout. */
+    uint32_t text_seg_vmaddr = DYLIB_TEXT_VMADDR_BASE;
+    uint32_t text_sect_vmaddr;
+    uint32_t hdr_and_lc_size, ncmds, total_cmds_size;
+    uint32_t text_data_size;
+    uint32_t cur_va, cur_off;
+    uint32_t text_seg_filesize, text_seg_vmsize;
+    uint32_t data_seg_vmaddr = 0, data_seg_file_off = 0;
+    uint32_t data_seg_filesize = 0, data_seg_vmsize = 0;
+    uint32_t linkedit_vmaddr, linkedit_file_off, linkedit_filesize;
+    uint32_t indirect_file_off = 0, sym_file_off, str_file_off;
+
+    /* LC sizes. */
+    uint32_t text_seg_cmd_size, data_seg_cmd_size = 0;
+    uint32_t linkedit_cmd_size = 56;
+    uint32_t symtab_cmd_size = 24;
+    uint32_t dysymtab_cmd_size = 80;
+    /* Install-name path for LC_ID_DYLIB: prefer s1->soname, else use
+     * the output filename (its basename converted to /usr/local/lib
+     * convention is more invasive; keep it simple — use the path the
+     * user gave us, which is what `gcc -dynamiclib -install_name X`
+     * would do on Tiger). */
+    const char *id_dylib_path = s1->soname ? s1->soname : filename;
+    static const char syslib_path[] = "/usr/lib/libSystem.B.dylib";
+    static const char dyld_path[]   = "/usr/lib/dyld";
+    uint32_t id_dylib_path_len = (uint32_t)strlen(id_dylib_path) + 1;
+    uint32_t id_dylib_path_aligned = (id_dylib_path_len + 3u) & ~3u;
+    uint32_t syslib_path_aligned = (sizeof(syslib_path) + 3u) & ~3u;
+    uint32_t dyld_path_aligned   = (sizeof(dyld_path)   + 3u) & ~3u;
+    uint32_t id_dylib_cmd_size = 24 + id_dylib_path_aligned;
+    uint32_t syslib_cmd_size   = 24 + syslib_path_aligned;
+    uint32_t dyld_cmd_size     = 12 + dyld_path_aligned;
+
+    /* Symtab counts. */
+    int n_localsym = 0, n_extdefsym = 0, n_undefsym = 0;
+    int *stub_sym_idx = NULL;
+
+    unsigned char *text_data = NULL, *rodata_data = NULL, *data_data = NULL;
+
+    memset(&out,      0, sizeof(out));
+    memset(&nlist,    0, sizeof(nlist));
+    memset(&strtab,   0, sizeof(strtab));
+    memset(&indirect, 0, sizeof(indirect));
+    memset(sects,     0, sizeof(sects));
+
+    /* ---- Find sections. ---- */
+    for (i = 1; i < s1->nb_sections; i++) {
+        Section *s = s1->sections[i];
+        if (!s) continue;
+        if (s->sh_type == SHT_PROGBITS && (s->sh_flags & SHF_EXECINSTR)
+            && !strcmp(s->name, ".text"))
+            text = s;
+        else if (s->sh_type == SHT_PROGBITS && s->data_offset > 0
+            && (!strcmp(s->name, ".rodata") || !strcmp(s->name, ".data.ro")))
+            rodata = s;
+        else if (s->sh_type == SHT_PROGBITS && s->data_offset > 0
+            && !strcmp(s->name, ".data"))
+            data = s;
+        else if (s->sh_type == SHT_NOBITS && s->data_offset > 0
+            && !strcmp(s->name, ".bss"))
+            bss = s;
+        else if (s->sh_type == SHT_INIT_ARRAY && s->data_offset > 0
+            && !strcmp(s->name, ".init_array"))
+            init_array = s;
+        else if (s->sh_type == SHT_FINI_ARRAY && s->data_offset > 0
+            && !strcmp(s->name, ".fini_array"))
+            fini_array = s;
+    }
+    if (!text || text->data_offset == 0) {
+        tcc_error_noabort("ppc-macho: empty or missing .text section");
+        return -1;
+    }
+
+    /* `__mh_dylib_header` is the dylib equivalent of __mh_execute_header.
+     * dyld sets it up automatically; user code may need it as N_SECT
+     * (anchored to __TEXT base) for runtime introspection. Following
+     * gcc's convention, register at __TEXT base as N_ABS — keeps the
+     * common "where is my image header" pattern working. */
+    set_elf_sym(s1->symtab, text_seg_vmaddr, 0,
+                ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0,
+                SHN_ABS, "__mh_dylib_header");
+
+    /* ---- Collect external function calls and data refs. ---- */
+    nstubs = collect_extern_stubs(s1, &stubs, &stub_for_elfsym);
+    n_nlptrs = collect_extern_nlptrs(s1, &nlptrs, &nl_for_elfsym);
+
+    /* ---- Plan section layout. ---- */
+    n_text_sects = 1;       /* __text */
+    if (rodata)
+        n_text_sects++;     /* __const */
+    if (nstubs > 0)
+        n_text_sects++;     /* __picsymbolstub1 */
+    n_data_sects = 0;
+    if (data)
+        n_data_sects++;
+    if (init_array)
+        n_data_sects++;
+    if (fini_array)
+        n_data_sects++;
+    if (nstubs > 0 || n_nlptrs > 0)
+        n_data_sects++;     /* __nl_symbol_ptr */
+    if (nstubs > 0 || n_nlptrs > 0)
+        n_data_sects++;     /* __dyld */
+    if (bss)
+        n_data_sects++;
+
+    total_msects = n_text_sects + n_data_sects;
+    if (total_msects > DYLIB_MAX_SECTS) {
+        tcc_error_noabort("ppc-macho: dylib section count %d exceeds "
+                          "the compiled-in limit %d",
+                          total_msects, DYLIB_MAX_SECTS);
+        return -1;
+    }
+
+    /* ---- LC sizes -> hdr_and_lc_size. ---- */
+    text_seg_cmd_size = 56 + 68u * n_text_sects;
+    if (n_data_sects > 0)
+        data_seg_cmd_size = 56 + 68u * n_data_sects;
+
+    /* Always emit: __TEXT, __LINKEDIT, LC_ID_DYLIB, LC_SYMTAB,
+     * LC_DYSYMTAB, LC_LOAD_DYLINKER. dyld requires LC_DYSYMTAB for
+     * all dylibs (even with all-zero counts) — without it, dyld's
+     * doBindExternalRelocations walks uninitialized state and faults
+     * with KERN_PROTECTION_FAILURE during dlopen. */
+    ncmds = 6;
+    total_cmds_size = text_seg_cmd_size + linkedit_cmd_size
+                    + id_dylib_cmd_size + symtab_cmd_size
+                    + dysymtab_cmd_size + dyld_cmd_size;
+    if (n_data_sects > 0) {
+        ncmds++;
+        total_cmds_size += data_seg_cmd_size;
+    }
+    if (nstubs > 0 || n_nlptrs > 0) {
+        ncmds += 1;     /* LC_LOAD_DYLIB libSystem (only when needed) */
+        total_cmds_size += syslib_cmd_size;
+    }
+    hdr_and_lc_size = 28 + total_cmds_size;
+
+    /* ---- Layout sections within __TEXT. ---- */
+    text_sect_vmaddr = text_seg_vmaddr + hdr_and_lc_size;
+    /* No crt-shim padding (executable-only). 4-byte align next section. */
+    text_data_size = (text->data_offset + 3u) & ~3u;
+    cur_va = text_sect_vmaddr + text_data_size;
+    cur_off = hdr_and_lc_size + text_data_size;
+
+    sect_idx_text = nsec;
+    sects[nsec].elf = text;
+    sects[nsec].vmaddr = text_sect_vmaddr;
+    sects[nsec].size = text_data_size;
+    sects[nsec].file_off = hdr_and_lc_size;
+    sects[nsec].is_zerofill = 0;
+    nsec++;
+
+    if (rodata) {
+        cur_va = (cur_va + 3u) & ~3u;
+        cur_off = (cur_off + 3u) & ~3u;
+        sect_idx_rodata = nsec;
+        sects[nsec].elf = rodata;
+        sects[nsec].vmaddr = cur_va;
+        sects[nsec].size = rodata->data_offset;
+        sects[nsec].file_off = cur_off;
+        sects[nsec].is_zerofill = 0;
+        nsec++;
+        cur_va += rodata->data_offset;
+        cur_off += rodata->data_offset;
+    }
+
+    if (nstubs > 0) {
+        /* PIC stubs are 32 bytes each (8 instructions). Align to 32. */
+        cur_va  = (cur_va  + 31u) & ~31u;
+        cur_off = (cur_off + 31u) & ~31u;
+        sect_idx_stub = nsec;
+        sects[nsec].elf = NULL;
+        sects[nsec].vmaddr = cur_va;
+        sects[nsec].size = nstubs * 32u;
+        sects[nsec].file_off = cur_off;
+        sects[nsec].is_zerofill = 0;
+        nsec++;
+        cur_va  += nstubs * 32u;
+        cur_off += nstubs * 32u;
+    }
+
+    text_seg_filesize = (cur_off + EXE_PAGE_SIZE - 1u) & ~(uint32_t)(EXE_PAGE_SIZE - 1);
+    text_seg_vmsize   = text_seg_filesize;
+
+    /* ---- Layout __DATA. ---- */
+    if (n_data_sects > 0) {
+        uint32_t total_nlptr_size = (nstubs + n_nlptrs) * 4u;
+        uint32_t data_cur, data_end;
+        data_seg_vmaddr   = text_seg_vmaddr + text_seg_filesize;
+        data_seg_file_off = text_seg_filesize;
+        data_cur = 0;
+
+        if (data) {
+            sect_idx_data = nsec;
+            sects[nsec].elf = data;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = data->data_offset;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += data->data_offset;
+            data_cur = (data_cur + 3u) & ~3u;
+        }
+
+        if (init_array) {
+            sect_idx_init_array = nsec;
+            sects[nsec].elf = init_array;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = init_array->data_offset;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += init_array->data_offset;
+            data_cur = (data_cur + 3u) & ~3u;
+        }
+
+        if (fini_array) {
+            sect_idx_fini_array = nsec;
+            sects[nsec].elf = fini_array;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = fini_array->data_offset;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += fini_array->data_offset;
+            data_cur = (data_cur + 3u) & ~3u;
+        }
+
+        if (nstubs > 0 || n_nlptrs > 0) {
+            sect_idx_nlptr = nsec;
+            sects[nsec].elf = NULL;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = total_nlptr_size;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += total_nlptr_size;
+        }
+
+        if (nstubs > 0 || n_nlptrs > 0) {
+            data_cur = (data_cur + 3u) & ~3u;
+            sect_idx_dyld = nsec;
+            sects[nsec].elf = NULL;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = 8;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += 8;
+        }
+
+        data_end = data_cur;
+        data_seg_filesize = (data_end + EXE_PAGE_SIZE - 1u)
+                          & ~(uint32_t)(EXE_PAGE_SIZE - 1);
+        data_seg_vmsize = data_seg_filesize;
+
+        if (bss) {
+            uint32_t bss_vm_off = data_seg_filesize;
+            sect_idx_bss = nsec;
+            sects[nsec].elf = bss;
+            sects[nsec].vmaddr = data_seg_vmaddr + bss_vm_off;
+            sects[nsec].size = bss->data_offset;
+            sects[nsec].file_off = 0;
+            sects[nsec].is_zerofill = 1;
+            nsec++;
+            data_seg_vmsize = (bss_vm_off + bss->data_offset
+                               + EXE_PAGE_SIZE - 1u)
+                            & ~(uint32_t)(EXE_PAGE_SIZE - 1);
+        }
+    }
+
+    /* ---- Layout __LINKEDIT. ---- */
+    linkedit_file_off = text_seg_filesize + data_seg_filesize;
+    linkedit_vmaddr   = text_seg_vmaddr + text_seg_filesize + data_seg_vmsize;
+
+    /* Now we know the stub addresses; set them in `stubs[]`. */
+    if (nstubs > 0) {
+        for (i = 0; i < nstubs; i++) {
+            stubs[i].addr = sects[sect_idx_stub].vmaddr + i * 32u;
+            stubs[i].la_ptr_addr = sects[sect_idx_nlptr].vmaddr + i * 4u;
+        }
+    }
+    if (n_nlptrs > 0) {
+        for (i = 0; i < n_nlptrs; i++) {
+            nlptrs[i].slot_addr = sects[sect_idx_nlptr].vmaddr
+                                  + (nstubs + i) * 4u;
+        }
+    }
+
+    /* ---- Allocate writable copies of section data. ---- */
+    text_data = tcc_malloc(text->data_offset + 64);
+    memcpy(text_data, text->data, text->data_offset);
+    memset(text_data + text->data_offset, 0, 64);
+
+    if (rodata) {
+        rodata_data = tcc_malloc(rodata->data_offset);
+        memcpy(rodata_data, rodata->data, rodata->data_offset);
+    }
+    if (data) {
+        data_data = tcc_malloc(data->data_offset);
+        memcpy(data_data, data->data, data->data_offset);
+    }
+    if (init_array) {
+        init_array_data = tcc_malloc(init_array->data_offset);
+        memcpy(init_array_data, init_array->data, init_array->data_offset);
+    }
+    if (fini_array) {
+        fini_array_data = tcc_malloc(fini_array->data_offset);
+        memcpy(fini_array_data, fini_array->data, fini_array->data_offset);
+    }
+
+    /* ---- Resolve relocations. ---- */
+    {
+        struct exe_reloc_ctx ctx;
+        ctx.all_sects = sects;
+        ctx.nsec = nsec;
+        ctx.stubs = stubs;
+        ctx.nstubs = nstubs;
+        ctx.stub_for_elfsym = stub_for_elfsym;
+        ctx.nlptrs = nlptrs;
+        ctx.n_nlptrs = n_nlptrs;
+        ctx.nl_for_elfsym = nl_for_elfsym;
+        if (exe_resolve_section_relocs(s1, text, text_sect_vmaddr,
+                                        text_data, &ctx) < 0)
+            goto cleanup;
+        if (rodata && exe_resolve_section_relocs(s1, rodata,
+                                                  sects[sect_idx_rodata].vmaddr,
+                                                  rodata_data, &ctx) < 0)
+            goto cleanup;
+        if (data && exe_resolve_section_relocs(s1, data,
+                                                sects[sect_idx_data].vmaddr,
+                                                data_data, &ctx) < 0)
+            goto cleanup;
+        if (init_array && exe_resolve_section_relocs(s1, init_array,
+                                                sects[sect_idx_init_array].vmaddr,
+                                                init_array_data, &ctx) < 0)
+            goto cleanup;
+        if (fini_array && exe_resolve_section_relocs(s1, fini_array,
+                                                sects[sect_idx_fini_array].vmaddr,
+                                                fini_array_data, &ctx) < 0)
+            goto cleanup;
+    }
+
+    /* ---- Generate PIC stub bytes. Each stub is 8 instructions:
+     *
+     *   mflr    r0                 ; save caller's LR
+     *   bcl     20, 31, .L1        ; branch always, set LR=.L1
+     *   .L1:
+     *   mflr    r11                ; r11 = .L1 (this insn's address)
+     *   addis   r11, r11, ha(slot - .L1)
+     *   mtlr    r0                 ; restore caller's LR
+     *   lwz     r12, lo(slot - .L1)(r11)
+     *   mtctr   r12
+     *   bctr
+     *
+     * The (slot - .L1) displacement is a constant computable at link
+     * time; it is invariant under dyld's whole-image relocation.
+     * Hence the stub is fully PIC. */
+    if (nstubs > 0 || n_nlptrs > 0)
+        nl_ptr_data = tcc_mallocz((nstubs + n_nlptrs) * 4);
+    if (nstubs > 0) {
+        stub_data = tcc_mallocz(nstubs * 32);
+        for (i = 0; i < nstubs; i++) {
+            uint32_t stub_va = sects[sect_idx_stub].vmaddr + i * 32u;
+            uint32_t L1 = stub_va + 8;            /* address of mflr r11 */
+            uint32_t slot = stubs[i].la_ptr_addr;
+            int32_t  diff = (int32_t)(slot - L1);
+            uint16_t ha = (uint16_t)(((uint32_t)diff + 0x8000) >> 16);
+            uint16_t lo = (uint16_t)((uint32_t)diff & 0xffff);
+            uint32_t insns[8];
+            int j;
+            insns[0] = 0x7c0802a6u;               /* mflr r0 */
+            insns[1] = 0x429f0005u;               /* bcl 20,31,.L1 (=.+4) */
+            insns[2] = 0x7d6802a6u;               /* mflr r11 */
+            insns[3] = 0x3d6b0000u | ha;          /* addis r11,r11,ha */
+            insns[4] = 0x7c0803a6u;               /* mtlr r0 */
+            insns[5] = 0x818b0000u | lo;          /* lwz r12,lo(r11) */
+            insns[6] = 0x7d8903a6u;               /* mtctr r12 */
+            insns[7] = 0x4e800420u;               /* bctr */
+            for (j = 0; j < 8; j++) {
+                stub_data[i*32 + j*4 + 0] = (insns[j] >> 24) & 0xff;
+                stub_data[i*32 + j*4 + 1] = (insns[j] >> 16) & 0xff;
+                stub_data[i*32 + j*4 + 2] = (insns[j] >>  8) & 0xff;
+                stub_data[i*32 + j*4 + 3] =  insns[j]        & 0xff;
+            }
+        }
+    }
+
+    /* ---- Build symbol table. ---- */
+    obuf_put(&strtab, "", 1);
+
+    n_localsym = 0;
+
+    /* Externally-defined: enumerate all globally-visible symbols
+     * defined in our text/data/rodata sections so dyld can export
+     * them. Sort alphabetically (dyld binary-searches). */
+    {
+        const char **edn = NULL;
+        int *edt = NULL;
+        int *eds = NULL;
+        int *edd = NULL;
+        uint32_t *edv = NULL;
+        int n_ext = 0, cap_ext = 0;
+        int nsyms_e = s1->symtab->data_offset / sizeof(ElfW(Sym));
+        int si, ei, ej;
+
+        for (si = 1; si < nsyms_e; si++) {
+            ElfW(Sym) *esym = &((ElfW(Sym) *)s1->symtab->data)[si];
+            const char *name = (char *)s1->symtab->link->data + esym->st_name;
+            int stype = ELFW(ST_TYPE)(esym->st_info);
+            int sbind = ELFW(ST_BIND)(esym->st_info);
+            uint32_t n_value = 0;
+            int n_sect = NO_SECT;
+            int n_desc = 0;
+            if (esym->st_shndx == SHN_UNDEF) continue;
+            if (esym->st_shndx == SHN_COMMON) continue;
+            if (stype == STT_SECTION || stype == STT_FILE) continue;
+            if (!name || !name[0]) continue;
+            if (sbind != STB_GLOBAL) continue;
+            /* Skip private dyld helpers. */
+            if (!strcmp(name, "__dyld_func_lookup")
+             || !strcmp(name, "dyld_stub_binding_helper"))
+                continue;
+            if (text && esym->st_shndx == text->sh_num) {
+                n_sect = sect_idx_text + 1;
+                n_value = sects[sect_idx_text].vmaddr + esym->st_value;
+            } else if (rodata && esym->st_shndx == rodata->sh_num) {
+                n_sect = sect_idx_rodata + 1;
+                n_value = sects[sect_idx_rodata].vmaddr + esym->st_value;
+            } else if (data && esym->st_shndx == data->sh_num) {
+                n_sect = sect_idx_data + 1;
+                n_value = sects[sect_idx_data].vmaddr + esym->st_value;
+            } else {
+                continue;
+            }
+            if (n_ext >= cap_ext) {
+                cap_ext = cap_ext ? cap_ext * 2 : 32;
+                edn = tcc_realloc(edn, cap_ext * sizeof(*edn));
+                edt = tcc_realloc(edt, cap_ext * sizeof(*edt));
+                eds = tcc_realloc(eds, cap_ext * sizeof(*eds));
+                edd = tcc_realloc(edd, cap_ext * sizeof(*edd));
+                edv = tcc_realloc(edv, cap_ext * sizeof(*edv));
+            }
+            edn[n_ext] = name;
+            edt[n_ext] = N_SECT | N_EXT;
+            eds[n_ext] = n_sect;
+            edd[n_ext] = n_desc;
+            edv[n_ext] = n_value;
+            n_ext++;
+        }
+
+        /* __mh_dylib_header is always exported as N_ABS. */
+        if (n_ext >= cap_ext) {
+            cap_ext = cap_ext ? cap_ext * 2 : 32;
+            edn = tcc_realloc(edn, cap_ext * sizeof(*edn));
+            edt = tcc_realloc(edt, cap_ext * sizeof(*edt));
+            eds = tcc_realloc(eds, cap_ext * sizeof(*eds));
+            edd = tcc_realloc(edd, cap_ext * sizeof(*edd));
+            edv = tcc_realloc(edv, cap_ext * sizeof(*edv));
+        }
+        edn[n_ext] = "__mh_dylib_header";
+        edt[n_ext] = N_EXT | N_ABS;
+        eds[n_ext] = NO_SECT;
+        edd[n_ext] = REFERENCED_DYNAMICALLY;
+        edv[n_ext] = text_seg_vmaddr;
+        n_ext++;
+
+        /* Sort alphabetically. */
+        for (ei = 1; ei < n_ext; ei++) {
+            const char *tn = edn[ei];
+            int tt = edt[ei], ts = eds[ei], td = edd[ei];
+            uint32_t tv = edv[ei];
+            for (ej = ei; ej > 0 && strcmp(edn[ej-1], tn) > 0; ej--) {
+                edn[ej] = edn[ej-1];
+                edt[ej] = edt[ej-1];
+                eds[ej] = eds[ej-1];
+                edd[ej] = edd[ej-1];
+                edv[ej] = edv[ej-1];
+            }
+            edn[ej] = tn;
+            edt[ej] = tt;
+            eds[ej] = ts;
+            edd[ej] = td;
+            edv[ej] = tv;
+        }
+
+        for (ei = 0; ei < n_ext; ei++) {
+            uint32_t strx = (uint32_t)strtab.len;
+            obuf_put(&strtab, edn[ei], strlen(edn[ei]) + 1);
+            put_nlist(&nlist, strx,
+                      edt[ei], eds[ei], edd[ei], edv[ei]);
+            n_extdefsym++;
+        }
+        tcc_free(edn); tcc_free(edt); tcc_free(eds);
+        tcc_free(edd); tcc_free(edv);
+    }
+
+    /* Undefined externals: one entry per unique elfsym referenced from
+     * stubs[] or nlptrs[]. */
+    {
+        int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+        int *elfsym_to_undef = NULL;
+        if (nstubs > 0 || n_nlptrs > 0) {
+            elfsym_to_undef = tcc_malloc(nsyms * sizeof(int));
+            for (i = 0; i < nsyms; i++) elfsym_to_undef[i] = -1;
+        }
+        if (nstubs > 0) {
+            stub_sym_idx = tcc_mallocz(nstubs * sizeof(int));
+            for (i = 0; i < nstubs; i++) {
+                int e = stubs[i].elfsym_idx;
+                if (elfsym_to_undef[e] < 0) {
+                    ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
+                    const char *name = (char *)s1->symtab->link->data + esym->st_name;
+                    uint32_t strx = (uint32_t)strtab.len;
+                    /* High byte: library ordinal 1 (libSystem). */
+                    uint16_t n_desc = (1u << 8);
+                    if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
+                        n_desc |= 0x40u;
+                    obuf_put(&strtab, name, strlen(name) + 1);
+                    elfsym_to_undef[e] = n_localsym + n_extdefsym + n_undefsym;
+                    put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
+                    n_undefsym++;
+                }
+                stub_sym_idx[i] = elfsym_to_undef[e];
+            }
+        }
+        if (n_nlptrs > 0) {
+            data_sym_idx = tcc_mallocz(n_nlptrs * sizeof(int));
+            for (i = 0; i < n_nlptrs; i++) {
+                int e = nlptrs[i].elfsym_idx;
+                if (elfsym_to_undef[e] < 0) {
+                    ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
+                    const char *name = (char *)s1->symtab->link->data + esym->st_name;
+                    uint32_t strx = (uint32_t)strtab.len;
+                    uint16_t n_desc = (1u << 8);
+                    if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
+                        n_desc |= 0x40u;
+                    obuf_put(&strtab, name, strlen(name) + 1);
+                    elfsym_to_undef[e] = n_localsym + n_extdefsym + n_undefsym;
+                    put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
+                    n_undefsym++;
+                }
+                data_sym_idx[i] = elfsym_to_undef[e];
+            }
+        }
+        tcc_free(elfsym_to_undef);
+    }
+
+    /* ---- Indirect symbol table: function-stub slots first, data second. */
+    if (nstubs > 0) {
+        for (i = 0; i < nstubs; i++)
+            put32be(&indirect, stub_sym_idx[i]);
+    }
+    if (n_nlptrs > 0) {
+        for (i = 0; i < n_nlptrs; i++)
+            put32be(&indirect, data_sym_idx[i]);
+    }
+
+    /* ---- Compute __LINKEDIT layout. ---- */
+    {
+        uint32_t loff = linkedit_file_off;
+        if (nstubs > 0 || n_nlptrs > 0) {
+            indirect_file_off = loff;
+            loff += (uint32_t)indirect.len;
+        }
+        sym_file_off = loff;
+        loff += (uint32_t)nlist.len;
+        str_file_off = loff;
+        loff += (uint32_t)strtab.len;
+        linkedit_filesize = loff - linkedit_file_off;
+    }
+
+    /* ---- Serialize: Mach header. ---- */
+    put32be(&out, MH_MAGIC);
+    put32be(&out, CPU_TYPE_POWERPC);
+    put32be(&out, CPU_SUBTYPE_POWERPC_ALL);
+    put32be(&out, MH_DYLIB);
+    put32be(&out, ncmds);
+    put32be(&out, total_cmds_size);
+    /* Dylibs are always dyld-linked and use the two-level namespace.
+     * MH_NOUNDEFS only when no extern refs (rare in practice but
+     * cheap to set). */
+    put32be(&out, (nstubs > 0 || n_nlptrs > 0)
+                  ? (MH_DYLDLINK | MH_TWOLEVEL)
+                  : (MH_DYLDLINK | MH_TWOLEVEL | MH_NOUNDEFS));
+
+    /* ---- LC_SEGMENT __TEXT. ---- */
+    put32be(&out, LC_SEGMENT);
+    put32be(&out, text_seg_cmd_size);
+    put_sectname(&out, "__TEXT");
+    put32be(&out, text_seg_vmaddr);
+    put32be(&out, text_seg_vmsize);
+    put32be(&out, 0);
+    put32be(&out, text_seg_filesize);
+    put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    put32be(&out, VM_PROT_READ | VM_PROT_EXECUTE);
+    put32be(&out, n_text_sects);
+    put32be(&out, 0);
+    /* __text section header. */
+    put_sectname(&out, "__text");
+    put_sectname(&out, "__TEXT");
+    put32be(&out, sects[sect_idx_text].vmaddr);
+    put32be(&out, sects[sect_idx_text].size);
+    put32be(&out, sects[sect_idx_text].file_off);
+    put32be(&out, 2);
+    put32be(&out, 0);
+    put32be(&out, 0);
+    put32be(&out, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS);
+    put32be(&out, 0);
+    put32be(&out, 0);
+    if (rodata) {
+        put_sectname(&out, "__const");
+        put_sectname(&out, "__TEXT");
+        put32be(&out, sects[sect_idx_rodata].vmaddr);
+        put32be(&out, sects[sect_idx_rodata].size);
+        put32be(&out, sects[sect_idx_rodata].file_off);
+        put32be(&out, 2);
+        put32be(&out, 0);
+        put32be(&out, 0);
+        put32be(&out, S_REGULAR);
+        put32be(&out, 0);
+        put32be(&out, 0);
+    }
+    if (nstubs > 0) {
+        put_sectname(&out, "__picsymbolstub1");
+        put_sectname(&out, "__TEXT");
+        put32be(&out, sects[sect_idx_stub].vmaddr);
+        put32be(&out, sects[sect_idx_stub].size);
+        put32be(&out, sects[sect_idx_stub].file_off);
+        put32be(&out, 5);                /* align 2^5 = 32 */
+        put32be(&out, 0);
+        put32be(&out, 0);
+        put32be(&out, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS
+                       | S_ATTR_SOME_INSTRUCTIONS);
+        put32be(&out, 0);
+        put32be(&out, 0);
+    }
+
+    /* ---- LC_SEGMENT __DATA. ---- */
+    if (n_data_sects > 0) {
+        put32be(&out, LC_SEGMENT);
+        put32be(&out, data_seg_cmd_size);
+        put_sectname(&out, "__DATA");
+        put32be(&out, data_seg_vmaddr);
+        put32be(&out, data_seg_vmsize);
+        put32be(&out, data_seg_file_off);
+        put32be(&out, data_seg_filesize);
+        put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+        put32be(&out, VM_PROT_READ | VM_PROT_WRITE);
+        put32be(&out, n_data_sects);
+        put32be(&out, 0);
+        if (data) {
+            put_sectname(&out, "__data");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_data].vmaddr);
+            put32be(&out, sects[sect_idx_data].size);
+            put32be(&out, sects[sect_idx_data].file_off);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, S_REGULAR);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+        if (init_array) {
+            put_sectname(&out, "__mod_init_func");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_init_array].vmaddr);
+            put32be(&out, sects[sect_idx_init_array].size);
+            put32be(&out, sects[sect_idx_init_array].file_off);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, 0x9);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+        if (fini_array) {
+            put_sectname(&out, "__mod_term_func");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_fini_array].vmaddr);
+            put32be(&out, sects[sect_idx_fini_array].size);
+            put32be(&out, sects[sect_idx_fini_array].file_off);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, 0xa);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+        if (nstubs > 0 || n_nlptrs > 0) {
+            put_sectname(&out, "__nl_symbol_ptr");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_nlptr].vmaddr);
+            put32be(&out, sects[sect_idx_nlptr].size);
+            put32be(&out, sects[sect_idx_nlptr].file_off);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, S_NON_LAZY_SYMBOL_POINTERS);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+        if (sect_idx_dyld >= 0) {
+            put_sectname(&out, "__dyld");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_dyld].vmaddr);
+            put32be(&out, sects[sect_idx_dyld].size);
+            put32be(&out, sects[sect_idx_dyld].file_off);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, S_REGULAR);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+        if (sect_idx_bss >= 0) {
+            put_sectname(&out, "__bss");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_bss].vmaddr);
+            put32be(&out, sects[sect_idx_bss].size);
+            put32be(&out, 0);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, S_ZEROFILL);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+    }
+
+    /* ---- LC_SEGMENT __LINKEDIT. ---- */
+    put32be(&out, LC_SEGMENT);
+    put32be(&out, linkedit_cmd_size);
+    put_sectname(&out, "__LINKEDIT");
+    put32be(&out, linkedit_vmaddr);
+    put32be(&out, (linkedit_filesize + EXE_PAGE_SIZE - 1u)
+                  & ~(uint32_t)(EXE_PAGE_SIZE - 1));
+    put32be(&out, linkedit_file_off);
+    put32be(&out, linkedit_filesize);
+    put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    put32be(&out, VM_PROT_READ);
+    put32be(&out, 0);
+    put32be(&out, 0);
+
+    /* ---- LC_ID_DYLIB. ---- */
+    {
+        uint32_t k;
+        put32be(&out, LC_ID_DYLIB);
+        put32be(&out, id_dylib_cmd_size);
+        put32be(&out, 24);                  /* name offset */
+        put32be(&out, 1);                   /* timestamp (anything > 0) */
+        put32be(&out, 0x00010000);          /* current_version 1.0.0 */
+        put32be(&out, 0x00010000);          /* compat_version  1.0.0 */
+        obuf_put(&out, id_dylib_path, id_dylib_path_len);
+        for (k = id_dylib_path_len; k < id_dylib_path_aligned; k++)
+            put8(&out, 0);
+    }
+
+    /* ---- LC_LOAD_DYLINKER (always emitted for dylibs). ---- */
+    {
+        uint32_t k;
+        put32be(&out, LC_LOAD_DYLINKER);
+        put32be(&out, dyld_cmd_size);
+        put32be(&out, 12);
+        obuf_put(&out, dyld_path, sizeof(dyld_path));
+        for (k = sizeof(dyld_path); k < dyld_path_aligned; k++)
+            put8(&out, 0);
+    }
+
+    /* ---- LC_LOAD_DYLIB libSystem (only when externs exist). ---- */
+    if (nstubs > 0 || n_nlptrs > 0) {
+        uint32_t k;
+        put32be(&out, LC_LOAD_DYLIB);
+        put32be(&out, syslib_cmd_size);
+        put32be(&out, 24);
+        put32be(&out, 0);
+        put32be(&out, 0x00580000);          /* libSystem 88.0.0 */
+        put32be(&out, 0x00010000);
+        obuf_put(&out, syslib_path, sizeof(syslib_path));
+        for (k = sizeof(syslib_path); k < syslib_path_aligned; k++)
+            put8(&out, 0);
+    }
+
+    /* ---- LC_SYMTAB. ---- */
+    put32be(&out, LC_SYMTAB);
+    put32be(&out, symtab_cmd_size);
+    put32be(&out, sym_file_off);
+    put32be(&out, n_localsym + n_extdefsym + n_undefsym);
+    put32be(&out, str_file_off);
+    put32be(&out, (uint32_t)strtab.len);
+
+    /* ---- LC_DYSYMTAB (always emitted for dylibs). ---- */
+    put32be(&out, LC_DYSYMTAB);
+    put32be(&out, dysymtab_cmd_size);
+    put32be(&out, 0);                              /* ilocalsym */
+    put32be(&out, n_localsym);                     /* nlocalsym */
+    put32be(&out, n_localsym);                     /* iextdefsym */
+    put32be(&out, n_extdefsym);                    /* nextdefsym */
+    put32be(&out, n_localsym + n_extdefsym);       /* iundefsym */
+    put32be(&out, n_undefsym);                     /* nundefsym */
+    put32be(&out, 0);                              /* tocoff */
+    put32be(&out, 0);                              /* ntoc */
+    put32be(&out, 0);                              /* modtaboff */
+    put32be(&out, 0);                              /* nmodtab */
+    put32be(&out, 0);                              /* extrefsymoff */
+    put32be(&out, 0);                              /* nextrefsyms */
+    put32be(&out, indirect_file_off);              /* indirectsymoff */
+    put32be(&out, nstubs + n_nlptrs);              /* nindirectsyms */
+    put32be(&out, 0);                              /* extreloff */
+    put32be(&out, 0);                              /* nextrel */
+    put32be(&out, 0);                              /* locreloff */
+    put32be(&out, 0);                              /* nlocrel */
+
+    /* ---- Pad to text data offset, then write text. ---- */
+    while (out.len < hdr_and_lc_size)
+        put8(&out, 0);
+    obuf_put(&out, text_data, text_data_size);
+
+    if (rodata) {
+        while (out.len < sects[sect_idx_rodata].file_off)
+            put8(&out, 0);
+        obuf_put(&out, rodata_data, sects[sect_idx_rodata].size);
+    }
+
+    if (nstubs > 0) {
+        while (out.len < sects[sect_idx_stub].file_off)
+            put8(&out, 0);
+        obuf_put(&out, stub_data, sects[sect_idx_stub].size);
+    }
+
+    if (n_data_sects > 0) {
+        while (out.len < data_seg_file_off)
+            put8(&out, 0);
+        if (data) {
+            while (out.len < sects[sect_idx_data].file_off)
+                put8(&out, 0);
+            obuf_put(&out, data_data, sects[sect_idx_data].size);
+        }
+        if (init_array) {
+            while (out.len < sects[sect_idx_init_array].file_off)
+                put8(&out, 0);
+            obuf_put(&out, init_array_data, sects[sect_idx_init_array].size);
+        }
+        if (fini_array) {
+            while (out.len < sects[sect_idx_fini_array].file_off)
+                put8(&out, 0);
+            obuf_put(&out, fini_array_data, sects[sect_idx_fini_array].size);
+        }
+        if (nstubs > 0 || n_nlptrs > 0) {
+            while (out.len < sects[sect_idx_nlptr].file_off)
+                put8(&out, 0);
+            obuf_put(&out, nl_ptr_data, sects[sect_idx_nlptr].size);
+        }
+        if (sect_idx_dyld >= 0) {
+            while (out.len < sects[sect_idx_dyld].file_off)
+                put8(&out, 0);
+            put32be(&out, 0x8fe01000u);
+            put32be(&out, 0x8fe01008u);
+        }
+    }
+
+    while (out.len < linkedit_file_off)
+        put8(&out, 0);
+    if (nstubs > 0) {
+        while (out.len < indirect_file_off)
+            put8(&out, 0);
+        obuf_put(&out, indirect.buf, indirect.len);
+    }
+    while (out.len < sym_file_off)
+        put8(&out, 0);
+    obuf_put(&out, nlist.buf, nlist.len);
+    while (out.len < str_file_off)
+        put8(&out, 0);
+    obuf_put(&out, strtab.buf, strtab.len);
+
+    unlink(filename);
+    fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0755);
+    if (fd < 0 || (fp = fdopen(fd, "wb")) == NULL) {
+        tcc_error_noabort("could not write '%s': %s", filename, strerror(errno));
+        if (fd >= 0) close(fd);
+        goto cleanup;
+    }
+    if (fwrite(out.buf, 1, out.len, fp) != out.len) {
+        tcc_error_noabort("short write to '%s'", filename);
+        goto cleanup;
+    }
+    fclose(fp); fp = NULL;
+    chmod(filename, 0755);
+    if (s1->verbose)
+        printf("<- %s (dylib %u bytes, %d stubs, %d nl_ptrs)\n",
+               filename, (unsigned)out.len, nstubs, n_nlptrs);
+    ret = 0;
+
+cleanup:
+    if (fp) fclose(fp);
+    tcc_free(out.buf);
+    tcc_free(nlist.buf);
+    tcc_free(strtab.buf);
+    tcc_free(indirect.buf);
+    tcc_free(text_data);
+    tcc_free(rodata_data);
+    tcc_free(data_data);
+    tcc_free(init_array_data);
+    tcc_free(fini_array_data);
+    tcc_free(stub_data);
+    tcc_free(nl_ptr_data);
+    tcc_free(stubs);
+    tcc_free(stub_for_elfsym);
+    tcc_free(stub_sym_idx);
+    tcc_free(nlptrs);
+    tcc_free(nl_for_elfsym);
+    tcc_free(data_sym_idx);
+    return ret;
+}
+
+
 ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
 {
     obuf out;
@@ -2808,9 +3785,12 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     /* ---- Step 0: dispatch by output type. ---- */
     if (s1->output_type == TCC_OUTPUT_EXE)
         return macho_output_exe(s1, filename);
+    if (s1->output_type == TCC_OUTPUT_DLL)
+        return macho_output_dylib(s1, filename);
     if (s1->output_type != TCC_OUTPUT_OBJ) {
-        tcc_error_noabort("ppc-macho: only -c (object) and -o exe "
-                          "(executable) outputs are implemented");
+        tcc_error_noabort("ppc-macho: only -c (object), -o exe "
+                          "(executable), and -shared (dylib) outputs "
+                          "are implemented");
         return -1;
     }
 

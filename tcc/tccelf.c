@@ -3170,6 +3170,21 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
     }
 
 #if defined TCC_TARGET_MACHO && defined TCC_TARGET_PPC
+    /* For -shared dylib output on PPC, auto-link libtcc1.a so user
+     * code that references libgcc helpers (long-long arithmetic, IEEE
+     * 754 conversions, etc.) picks them up automatically. We skip
+     * crt1.o, __tcc_start_main, NXArg* injection, and the keymgr
+     * stub — those are all entry-point-side machinery for
+     * executables. */
+    if (s->output_type == TCC_OUTPUT_DLL) {
+        char path[1024];
+        if (s->tcc_lib_path) {
+            snprintf(path, sizeof path, "%s/libtcc1.a", s->tcc_lib_path);
+            if (access(path, R_OK) == 0)
+                tcc_add_file(s, path);
+        }
+    }
+
     /* For executable output on PPC, auto-inject a small C function
      * `__tcc_start_main` that initializes libSystem state (sets
      * _NXArgc/_NXArgv/_environ) and calls main+_exit. Without it,
