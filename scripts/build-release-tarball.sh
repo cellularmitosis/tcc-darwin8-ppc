@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.25-g3}"
+VERSION="${VERSION:-v0.2.26-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -334,6 +334,23 @@ What's new (cumulative since v0.1.0-g3):
     via \`tcc -lfoo\` to resolve link-time references) is deferred
     to a follow-up release. Programs that only use libSystem
     symbols + dlopen Just Work today.
+
+  * v0.2.26: link-time dylib support. \`tcc -lz hello.c\` now
+    actually works at runtime. \`macho_load_dll()\` (was a no-op
+    stub) parses the dylib's Mach-O header, walks LC_SYMTAB to
+    register each defined-external symbol as UNDEF in our own
+    symtab, captures the install name from LC_ID_DYLIB, and adds
+    a DLLReference. The exe/dylib writer emits one LC_LOAD_DYLIB
+    per loaded dll (libSystem first, extras after). With extra
+    dylibs loaded we switch to flat namespace (clear MH_TWOLEVEL)
+    so dyld searches all loaded dylibs at runtime — avoids
+    per-symbol two-level ordinal tracking.
+
+    Closes upstream \`dlltest\` (multi-session deferred): tcc
+    compiles libtcc.c into libtcc2.dylib, links a tcc2 exe
+    against that dylib, and tcc2 -run prints "Hello World"
+    through the round trip. Verified with Tiger's bundled
+    /usr/lib/libz.1.dylib (zlibVersion, adler32 work at runtime).
 
 Install:
   sudo mkdir -p $PREFIX

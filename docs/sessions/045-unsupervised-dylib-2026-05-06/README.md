@@ -69,34 +69,68 @@ in `ImageLoaderMachO::doBindExternalRelocations()` during
 zero. Without `LC_DYSYMTAB` dyld walks uninitialized state when
 processing the dylib's external relocations.
 
-## Out of scope this session (deferred to follow-ups)
+### v0.2.26-g3 — link-time dylib support
 
-1. **Multi-dylib link-time support** — `tcc -lz file.c` still
-   produces a binary that fails at runtime with
-   `dyld: Symbol not found: _zlibVersion (Expected in: libSystem)`.
-   Reason: `macho_load_dll()` is a no-op (returns success without
-   reading the dylib), and the exe writer always emits exactly
-   one `LC_LOAD_DYLIB` (libSystem). Fix is straightforward but a
-   chunk of work: parse the dylib's `LC_SYMTAB`, register
-   exported syms as UNDEF in our own symtab, track which dylib
-   provides each, emit per-dylib `LC_LOAD_DYLIB` entries with
-   correct two-level ordinals (or switch to flat namespace).
-   Will land as v0.2.26.
+Landed in the same session as v0.2.25. `tcc -lz hello.c` now
+actually works at runtime:
 
-2. **Local relocation entries for sliding** — currently dylibs
-   work only when dyld loads them at the preferred vmaddr. If
-   dyld slides them, absolute references in `__data` (e.g.
-   `int *p = &arr[N]` static initializers) won't be patched.
-   Function calls survive (PIC stubs). For an MVP this is
-   acceptable; programs hit the slide path rarely with a high
+- `macho_load_dll()` (was a no-op stub) now parses the dylib's
+  Mach-O header (with fat-binary handling), walks `LC_SYMTAB`,
+  and registers each defined-external symbol as UNDEF in our own
+  symtab via `set_elf_sym(SHN_UNDEF)`. The Mach-O leading
+  underscore is stripped to match tcc's bare-C-name internal
+  convention. Captures the install name from `LC_ID_DYLIB` and
+  adds a `DLLReference` via `tcc_add_dllref()`.
+- Both `macho_output_exe` and `macho_output_dylib` now walk
+  `s1->loaded_dlls` and emit one `LC_LOAD_DYLIB` per loaded dll
+  (libSystem first when externs exist, extras after). Total
+  `cmdsize` and `ncmds` updated accordingly.
+- When extra (non-libSystem) dylibs are loaded, the writer
+  switches to **FLAT namespace** (clears `MH_TWOLEVEL`) so dyld
+  searches all loaded dylibs at runtime. This avoids the
+  per-symbol two-level-ordinal tracking that strict TWOLEVEL
+  would require — a side-table mapping each undef sym to its
+  source dll. UNDEF n_desc gets ordinal=0 (DYNAMIC_LOOKUP) under
+  flat; ordinal=1 (libSystem) under two-level (preserves
+  existing libSystem-only behavior).
+- **Closes upstream `dlltest`** (multi-session deferred).
+  tcc compiles libtcc.c into libtcc2.dylib, links a tcc2 exe
+  against that dylib (the libtcc.c symbols come from the
+  parsed `LC_SYMTAB`), and tcc2 -run prints "Hello World"
+  through the full round trip.
+- Demo: [`v0.2.26-link-dylib.sh`](../../../demos/v0.2.26-link-dylib.sh)
+  builds a tiny exe that calls into Tiger's bundled
+  `/usr/lib/libz.1.dylib` (`zlibVersion`, `adler32`) at link
+  time. `otool -L` shows the libz `LC_LOAD_DYLIB`. Runs at
+  runtime printing zlib 1.2.3.
+
+Pre-v0.2.26, that demo failed at runtime with:
+```
+dyld: Symbol not found: _zlibVersion
+  Referenced from: /tmp/testz
+  Expected in: /usr/lib/libSystem.B.dylib
+```
+because the exe never emitted `LC_LOAD_DYLIB libz.1.dylib`.
+
+### Out of scope this session (deferred to follow-ups)
+
+1. **Local relocation entries for dylib sliding** — currently
+   our dylibs work only when dyld loads them at the preferred
+   vmaddr. If dyld slides them, absolute references in `__data`
+   (e.g. `int *p = &arr[N]` static initializers) won't be
+   patched. Function calls survive (PIC stubs). For an MVP this
+   is acceptable; programs hit the slide path rarely with a high
    default vmaddr.
 
-3. **JIT heisenbug** (carried from session 044). Untouched this
+2. **JIT heisenbug** (carried from session 044). Untouched this
    session.
 
-4. **dlltest upstream stage** — needs the multi-dylib link-time
-   support above (loading libtcc.dylib as a link-time dependency
-   for tcc.c). Will follow naturally once v0.2.26 lands.
+3. **Two-level namespace with multi-dylib** — currently we
+   switch to flat namespace whenever extra dylibs are loaded.
+   That works but is slightly less efficient at dyld lookup
+   time and is more permissive (any dylib's symbol can shadow
+   another). Strict two-level requires per-symbol ordinal
+   tracking. Future polish.
 
 ## Subagent log
 
