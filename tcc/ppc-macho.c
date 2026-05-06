@@ -5721,13 +5721,23 @@ void __clear_cache(void *begin, void *end)
 }
 #else
 /* When tcc compiles itself: tcc has no PPC inline-asm parser yet
- * (ppc-asm.c deferred). Stub it so the bootstrap completes; the
- * resulting tcc-self can produce object files but its own -run
- * mode would skip cache flushing. To re-enable -run on tcc-self,
- * link the gcc-built __clear_cache as a separate object. */
+ * (ppc-asm.c deferred), so we can't emit dcbst/icbi/sync via
+ * __asm__ volatile. Tiger's libSystem ships `sys_icache_invalidate`
+ * as an exported symbol — it does the same dcbst/sync/icbi/sync/
+ * isync dance internally — so we delegate to it.
+ *
+ * Why this matters: until v0.2.26, this was a no-op stub. JIT
+ * code (`tcc -run`, `tcc_relocate` + `tcc_get_symbol` callers,
+ * libtest_mt, abitest-tcc, test3) ran with stale icache after
+ * the JIT page was reused across iterations. Failure modes:
+ * SIGILL / SIGBUS / SIGSEGV / silent-wrong-result, all
+ * layout-sensitive — the long-deferred "JIT heisenbug." With
+ * sys_icache_invalidate the icache is flushed correctly and
+ * the JIT loop reruns cleanly. */
+extern void sys_icache_invalidate(void *start, unsigned long length);
 void __clear_cache(void *begin, void *end)
 {
-    (void)begin; (void)end;
+    sys_icache_invalidate(begin, (char *)end - (char *)begin);
 }
 #endif
 #endif
