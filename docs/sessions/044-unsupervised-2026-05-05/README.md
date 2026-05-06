@@ -224,10 +224,124 @@ sqlite3 round trip against `/tmp/v0223-sqlite-demo.db` with
 DROP / CREATE / INSERT / SELECT / ORDER BY, prints rows ordered
 by age, exits 0.
 
+## Bug 3 / Improvement: tcc -ar Mach-O native (v0.2.24)
+
+The build pipeline was using `XAR = $(AR)` (system `/usr/bin/ar`)
+for PPC because the ELF-only `tcc_tool_ar()` couldn't read Mach-O
+.o files. This was a structural item from session 028's roadmap
+(#3 in the "structural items" table).
+
+### Delegated to a Sonnet subagent
+
+Spawned a `general-purpose` Sonnet subagent in the background
+with a self-contained brief: scope (Mach-O code path inside
+`tcc_tool_ar`), references (existing ELF code, the canonical
+parser in `ppc-macho.c::macho_load_object_file`), and a TESTING
+section template the agent should fill in (since it can't ssh to
+the PPC machine).
+
+The agent took ~10 minutes and returned with:
+
+* `tcc/tcctools.c`: 120 lines added inside the per-object loop,
+  gated on `defined(TCC_TARGET_MACHO)`. Handles fat (universal)
+  binary slice selection, LC_SYMTAB walk, 12-byte nlist iteration.
+  Selects defined-external symbols via the standard
+  `(n_type & N_EXT) && (n_type & N_TYPE) == N_SECT` check.
+  Symdef offsets written byte-by-byte (host-endian-independent
+  big-endian).
+* `tcc/lib/Makefile`: removed the `XAR = $(AR)` workaround.
+* TESTING block listing exact rsync + build + smoke commands.
+
+### Verification (mine)
+
+* `build-tiger.sh`: builds successfully, log shows
+  `../tcc -ar rcs ../libtcc1.a lib-ppc.o ...` (no `/usr/bin/ar`).
+* `file libtcc1.a`: "current ar archive".
+* `/usr/bin/ar t libtcc1.a`: lists all members correctly.
+* `nm libtcc1.a`: dumps symbols cleanly.
+* Bootstrap fixpoint: holds.
+* tests2: still 111/111.
+* All real-world demos (lua, bzip2, cJSON, sqlite): still pass.
+
+### Subagent verdict
+
+Worked on the first try with no iteration needed. The brief was
+detailed (~80 lines) but that paid off: the agent didn't have to
+re-research the existing code paths, found the right file
+references, and produced a coherent diff. Total token cost was
+minimal compared to me doing it.
+
 ## Subagent log
 
-(none in this session yet; both bug investigations were tightly
-coupled to single-file changes and reading sqlite3.c, neither of
-which fit a subagentable shape. Would have considered Sonnet for
-the marker-injection script if it had grown more elaborate; the
-~25-line Python was easier to do directly.)
+| When | Task | Model | Outcome |
+|---|---|---|---|
+| Bug 3 | Port `tcc -ar` symbol extraction from ELF to Mach-O | Sonnet (general-purpose) | First-try success. ~140 lines of C, well-scoped. Verified locally — bootstrap, tests2, all demos pass. |
+
+## tcc -ar Mach-O port (Tier B #7)
+
+### Problem
+
+`tcc/tcctools.c::tcc_tool_ar()` parsed ELF `.o` headers to build
+the `__.SYMDEF` symbol index. On Mach-O `.o` files it would
+reject the input with "Unsupported Elf Class" because `0xfeedface`
+is not a valid ELF class byte.
+
+Work-around in `tcc/lib/Makefile`: `XAR = $(AR)` for ppc targets.
+
+### Fix
+
+Added a `#if defined(TCC_TARGET_MACHO)` code path in
+`tcc_tool_ar()` that:
+
+1. Handles fat (0xcafebabe) binaries: scans `fat_arch` entries
+   for `CPU_TYPE_POWERPC` (18), adjusts `mb_off` to the PPC slice.
+2. Checks for `0xfeedface` (PPC32 BE Mach-O magic). Hard-errors
+   with a clear message on anything else.
+3. Walks load commands looking for `LC_SYMTAB` (cmd == 0x2) to
+   find `symoff / nsyms / stroff / strsize`.
+4. Iterates nlist entries (12 bytes each). Selects entries where
+   `(n_type & N_EXT) && (n_type & N_TYPE) == N_SECT` — i.e.
+   defined, externally visible symbols. Skips stabs, undefined
+   externs, and empty names.
+5. Writes the `/.SYMDEF` index using byte-by-byte `ar_put_be32`
+   so the big-endian integers are correct regardless of whether
+   `tcc -ar` is running on a LE (cross-build on uranium) or BE
+   (native Tiger PPC) host.
+
+The ELF path is unchanged (`#else` branch). Local helper macros
+`ar_get32be` and `ar_put_be32` are `#define`/`#undef`-ed within
+their scope; they don't pollute the global namespace and don't
+depend on the (static) `mach_get32` from ppc-macho.c.
+
+Removed the `XAR = $(AR)` override from `tcc/lib/Makefile` so
+`$(XTCC) -ar` is used for ppc-osx builds (native and cross).
+
+### Files changed
+
+- `tcc/tcctools.c` — Mach-O symbol extraction + BE symdef writing
+- `tcc/lib/Makefile` — remove `XAR = $(AR)` workaround
+
+### Judgment calls
+
+- **Fat binary handling**: included defensively. `tcc -c` never
+  emits fat binaries, but `crt1.o` from the SDK is fat. We select
+  the PPC slice. If no PPC slice is found, `mb_off` stays 0 and
+  the magic check fails with a clear error.
+- **Cross-compilation endianness**: the symdef header integer writes
+  are byte-by-byte (not `fwrite` of a host-endian int array) so
+  `ppc-osx-tcc -ar` running on uranium (LE) also produces a
+  correct BE symdef. The ELF path uses `le2belong` which is
+  incorrect on a BE host, but the ELF path is only compiled when
+  `TCC_TARGET_MACHO` is not defined.
+- **GNU ar `/` format vs BSD `__.SYMDEF SORTED`**: the archive
+  uses GNU ar format (first member named `/`), same as all other
+  tcc -ar targets. Tiger PPC's `ld` accepts GNU ar format; this
+  was not changed.
+- **`n_strx` offset 0**: nlist strtab index 0 is valid (a real
+  symbol could live at offset 0 in the strtab). We skip entries
+  where the name string is empty (`!*sym_name`), not where
+  `n_strx == 0`.
+
+### Testing needed on ibookg37
+
+See TESTING section below.
