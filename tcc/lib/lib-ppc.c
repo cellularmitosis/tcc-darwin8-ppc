@@ -157,6 +157,54 @@ long long __fixdfdi(double a)
 long long __fixsfdi(float a) { return __fixdfdi((double)a); }
 unsigned long long __fixunssfdi(float a) { return __fixunsdfdi((double)a); }
 
+/* IBM double-double helpers (__gcc_qadd / qsub / qmul / qdiv).
+ *
+ * Apple PPC's `long double` is 128-bit IBM double-double (a pair of
+ * doubles). gcc-4.0 on Tiger emits calls to these helpers for any
+ * `long double` arithmetic; they would normally come from libgcc.
+ *
+ * Tiger libc/libSystem doesn't ship the libgcc helpers, and our own
+ * tcc-PPC backend treats `long double` as plain 8-byte double
+ * (LDOUBLE_SIZE = 8). For programs we COMPILE with tcc, the helpers
+ * are never referenced. But programs we LINK that include
+ * gcc-4.0-built objects (e.g. libtcc.a built during the build-tiger
+ * bootstrap step) carry undefined references to these names.
+ *
+ * Provide weak-double-only implementations: we accept the high-word
+ * pair, do plain double arithmetic, and return (result, 0). This
+ * loses extended precision but keeps tcc-built programs that depend
+ * on libgcc-emitting third-party objects link-and-run.
+ *
+ * The IBM double-double calling convention on PPC32: each long
+ * double argument is a pair of doubles passed in two FPRs. Our C
+ * declaration uses double pairs by struct return -- we don't need
+ * to match the exact IBM ABI because gcc-4.0 emits inline reg-pair
+ * code that just sees the (hi, lo) FPR pair returned. */
+struct ppc_dd { double hi, lo; };
+struct ppc_dd __gcc_qadd(double xhi, double xlo, double yhi, double ylo) {
+    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi + yhi; r.lo = 0; return r;
+}
+struct ppc_dd __gcc_qsub(double xhi, double xlo, double yhi, double ylo) {
+    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi - yhi; r.lo = 0; return r;
+}
+struct ppc_dd __gcc_qmul(double xhi, double xlo, double yhi, double ylo) {
+    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi * yhi; r.lo = 0; return r;
+}
+struct ppc_dd __gcc_qdiv(double xhi, double xlo, double yhi, double ylo) {
+    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi / yhi; r.lo = 0; return r;
+}
+
+/* 64-bit comparison helpers also from libgcc. Same situation as
+ * __gcc_q*: gcc-4.0-built objects in libtcc.a reference these and
+ * Tiger libc doesn't ship them. Standard libgcc semantics: returns
+ * 0/1/2 = a<b / a==b / a>b. */
+int __cmpdi2(long long a, long long b) {
+    return (a < b) ? 0 : (a == b) ? 1 : 2;
+}
+int __ucmpdi2(unsigned long long a, unsigned long long b) {
+    return (a < b) ? 0 : (a == b) ? 1 : 2;
+}
+
 /* ---------------------------------------------------------------------------
  * 64-bit shift helpers
  *
