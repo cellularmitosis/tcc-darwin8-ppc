@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.20-g3}"
+VERSION="${VERSION:-v0.2.21-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -276,6 +276,19 @@ What's new (cumulative since v0.1.0-g3):
     build-tiger bootstrap step) can find these libgcc helpers
     that Tiger libSystem doesn't ship. Falls back to plain
     double arithmetic for the IBM double-double helpers.
+
+  * v0.2.21: __builtin_fabs / __builtin_fabsf / __builtin_inf /
+    __builtin_inff stubs. Tiger's <math.h> for PPC declares
+    fabs / inf etc. via macros that expand to these gcc-style
+    builtins; gcc inlines them but tcc emits regular function
+    calls. Without stubs, programs that include <math.h> and
+    use fabs/inf hit "Symbol not found" at startup.
+
+    Real-world impact: cJSON 1.7.18 builds + parses end-to-end
+    with tcc-darwin8-ppc (fourth real-world program after lua,
+    zlib, bzip2). cJSON exercises a different mix of paths than
+    the others: heavy linked-list traversal, strdup/free
+    patterns, recursive descent parsing.
 
 Install:
   sudo mkdir -p $PREFIX

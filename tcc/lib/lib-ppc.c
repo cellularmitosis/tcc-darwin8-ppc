@@ -157,6 +157,24 @@ long long __fixdfdi(double a)
 long long __fixsfdi(float a) { return __fixdfdi((double)a); }
 unsigned long long __fixunssfdi(float a) { return __fixunsdfdi((double)a); }
 
+/* gcc-style math builtins. Tiger's <math.h> for PPC declares
+ * functions via these (e.g. /usr/include/architecture/ppc/math.h
+ * uses __builtin_fabs / __builtin_inf inside macros). gcc treats
+ * them as compiler intrinsics and inlines; tcc emits regular
+ * function calls. Provide thin C wrappers. */
+double __builtin_fabs(double x) { return x < 0 ? -x : x; }
+float  __builtin_fabsf(float x) { return x < 0 ? -x : x; }
+double __builtin_inf(void) {
+    /* IEEE 754 +Inf is exponent=2047, mantissa=0, sign=0 */
+    union { double d; unsigned long long u; } u;
+    u.u = 0x7FF0000000000000ULL;
+    return u.d;
+}
+float __builtin_inff(void) {
+    union { float f; unsigned u; } u;
+    u.u = 0x7F800000u;
+    return u.f;
+}
 /* IBM double-double helpers (__gcc_qadd / qsub / qmul / qdiv).
  *
  * Apple PPC's `long double` is 128-bit IBM double-double (a pair of
