@@ -32,8 +32,11 @@
 #define XLONG_LONG_FORMAT "%Lx"
 #endif
 
-// MinGW has 80-bit rather than 64-bit long double which isn't compatible with TCC or MSVC
-#if defined(_WIN32) && defined(__GNUC__)
+// MinGW has 80-bit rather than 64-bit long double which isn't compatible with TCC or MSVC.
+// Apple PPC has 128-bit IBM double-double long double which our PPC tcc doesn't yet
+// implement (LDOUBLE_SIZE=8 in ppc-gen.c). Use plain double on both so that gcc-built
+// reference and tcc-built outputs match.
+#if (defined(_WIN32) && defined(__GNUC__)) || (defined(__APPLE__) && (defined(__ppc__) || defined(__ppc64__)))
 #define LONG_DOUBLE double
 #define LONG_DOUBLE_LITERAL(x) x
 #else

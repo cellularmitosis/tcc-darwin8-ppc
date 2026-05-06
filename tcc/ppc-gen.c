@@ -2619,11 +2619,19 @@ ST_FUNC void gen_opf(int op)
     }
 
     /* Comparison: fcmpu cr0, fA, fB then VT_CMP. The condition bit
-     * mapping in cr0 is the SAME as for the integer comparisons we
-     * already handle in gjmp_cond (LT=0, GT=1, EQ=2). For unordered
-     * (NaN) results bit 3 is set; we treat NaN like "not equal /
-     * unordered"; tcc's predicates work correctly under fcmpu's
-     * IEEE semantics for finite operands. */
+     * mapping in cr0: LT=0, GT=1, EQ=2, FU/SO=3 (set on unordered/NaN).
+     *
+     * IEEE semantics: any compare involving NaN returns false EXCEPT
+     * != (which is true). Most tcc predicates fall out of fcmpu
+     * naturally because they BC on a single bit (e.g. ==/EQ, </LT,
+     * !=/!EQ). But >= and <= are tested as "not LT" / "not GT" -- for
+     * NaN both LT and GT are 0, so the inverted test fires when it
+     * shouldn't. Pre-merge the FU bit into LT (for >=) or GT (for <=)
+     * via `cror` so the !LT / !GT test correctly returns false on
+     * unordered.
+     *
+     * cror crD, crA, crB encoding: opcode 19, XO 449.
+     *   0x4c000382 | (crD<<21) | (crA<<16) | (crB<<11) */
     if (op >= TOK_ULT && op <= TOK_GT) {
         gv2(RC_FLOAT, RC_FLOAT);
         a_slot = vtop[-1].r;
@@ -2632,6 +2640,10 @@ ST_FUNC void gen_opf(int op)
         fb = TREG_TO_FPR(b_slot);
         /* fcmpu cr0, fA, fB */
         o(0xfc000000 | (fa << 16) | (fb << 11));
+        if (op == TOK_GE || op == TOK_UGE)
+            o(0x4c000382 | (0 << 21) | (0 << 16) | (3 << 11));   /* cror cr0_LT, cr0_LT, cr0_FU */
+        else if (op == TOK_LE || op == TOK_ULE)
+            o(0x4c000382 | (1 << 21) | (1 << 16) | (3 << 11));   /* cror cr0_GT, cr0_GT, cr0_FU */
         vtop--;
         vset_VT_CMP(op);
         return;
