@@ -2176,51 +2176,38 @@ ST_FUNC void gfunc_epilog(void)
     }
 
     /* Epilogue:
-     *   lwz  r30, pic_save_off(r1)  ; restore PIC base reg
-     *   lwz  r31, fp_save_off(r1)
-     *   addi r1, r1, frame_size
-     *   lwz  r0, 8(r1)
+     *   lwz  r30, -8(r31)          ; restore PIC base reg via FP
+     *   lwz  r0,  -4(r31)          ; load saved r31 to r0 (defer)
+     *   lwz  r1,  0(r1)            ; restore SP via back chain
+     *   mr   r31, r0               ; install saved r31
+     *   lwz  r0,  8(r1)            ; saved LR (in caller's linkage)
      *   mtlr r0
      *   blr
      *
-     * Long-frame variants when the displacements / immediates won't
-     * fit in signed 16-bit (frame_size > 32768 or so). Unlike the
-     * prolog, the epilog isn't size-constrained — we just emit
-     * however many instructions are needed.
+     * Restoring saved registers via r31 (FP) instead of r1 (SP) means
+     * an `alloca()` call inside the function -- which moves r1 lower
+     * but leaves r31 untouched -- doesn't break the epilog. Likewise,
+     * restoring r1 from the back chain at [r1] (rather than `addi r1,
+     * r1, frame_size`) lands us at OLD_SP regardless of how much
+     * alloca grew the frame. The cost is one extra mr instruction
+     * (since we now stage the saved r31 through r0).
      */
-    /* lwz r30, pic_save_off(r1) */
-    if ((int16_t)pic_save_off == pic_save_off) {
-        o(0x80000000 | (PPC_PIC_BASE_REG << 21) | (1 << 16) | (pic_save_off & 0xffff));
-    } else {
-        int hi = ((unsigned)pic_save_off >> 16) & 0xffff;
-        int lo = (unsigned)pic_save_off & 0xffff;
-        o(0x3c000000 | (0 << 21) | hi);
-        o(0x60000000 | (0 << 21) | (0 << 16) | lo);
-        o(0x7c01002e | (PPC_PIC_BASE_REG << 21));      /* lwzx r30, r1, r0 */
-    }
-    /* lwz r31, fp_save_off(r1) */
-    if ((int16_t)fp_save_off == fp_save_off) {
-        o(0x80000000 | (PPC_FP_REG << 21) | (1 << 16) | (fp_save_off & 0xffff));
-    } else {
-        int hi = ((unsigned)fp_save_off >> 16) & 0xffff;
-        int lo = (unsigned)fp_save_off & 0xffff;
-        o(0x3c000000 | (0 << 21) | hi);
-        o(0x60000000 | (0 << 21) | (0 << 16) | lo);
-        o(0x7c01002e | (PPC_FP_REG << 21));            /* lwzx r31, r1, r0 */
-    }
-    /* addi r1, r1, frame_size */
-    if ((int16_t)frame_size == frame_size) {
-        o(0x38210000 | (frame_size & 0xffff));
-    } else {
-        int hi = ((unsigned)frame_size >> 16) & 0xffff;
-        int lo = (unsigned)frame_size & 0xffff;
-        o(0x3c000000 | (0 << 21) | hi);
-        o(0x60000000 | (0 << 21) | (0 << 16) | lo);
-        o(0x7c210214);                                 /* add r1, r1, r0 */
-    }
+    /* lwz r30, -8(r31) */
+    o(0x80000000 | (PPC_PIC_BASE_REG << 21) | (PPC_FP_REG << 16) | (((-8) & 0xffff)));
+    /* lwz r0, -4(r31) -- saved r31 value, will install after we
+     * restore r1 (we still need r31 valid for back-chain access? no,
+     * back chain is at [r1], not [r31]; but defer the r31 write so we
+     * don't lose addressability if any part of this sequence wants
+     * r31 again). */
+    o(0x80000000 | (0 << 21) | (PPC_FP_REG << 16) | (((-4) & 0xffff)));
+    /* lwz r1, 0(r1) -- restore SP from back chain */
+    o(0x80210000);
+    /* mr r31, r0 -- install saved r31 (or r31, r0, r0) */
+    o(0x7c000378 | (0 << 21) | (PPC_FP_REG << 16) | (0 << 11));
     o(0x80010008);
     o(0x7c0803a6);
     o(0x4e800020);
+    (void)pic_save_off; (void)fp_save_off; (void)frame_size;
 
     /* Backfill the reserved prologue. PPC_PROLOG_SIZE + 8 reserved
      * FP-spill slots = 13 + 8 = 21 instructions / 84 bytes. */
