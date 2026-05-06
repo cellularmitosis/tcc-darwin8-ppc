@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.27-g3}"
+VERSION="${VERSION:-v0.2.28-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -373,6 +373,28 @@ What's new (cumulative since v0.1.0-g3):
     ~24 sub-tests deterministically (was variable 5--19);
     dlltest is now stable across the full upstream
     \`make -k test\` run.
+
+  * v0.2.28: abitest-tcc 24/24 + Tiger PPC backtrace support.
+
+    (a) gfunc_call's save_regs(nb_args+1) skipped the func-ptr
+    slot. For indirect calls where the func pointer is an
+    LVAL with its address in a volatile GPR (e.g.
+    \`(*(s2->f2 = &f) + 0)(v,v,v,v,v,v,1.0)\` from upstream
+    many_struct_test_3), the arg-pass-2 code overwrote that
+    register with v.a before the call site could gv() it.
+    Switched to save_regs(nb_args), matching x86_64-gen.c.
+    many_struct_test_3 + stdarg_test + stdarg_many_test +
+    stdarg_struct_test + arg_align_test all flip from
+    crash/fail to pass; abitest-tcc is now 24/24.
+
+    (b) Implemented rt_get_caller_pc + rt_getcontext for
+    Apple PPC (Tiger 10.4 mcontext->ss.{srr0,r1}) in
+    tccrun.c. Backtraces from JIT-caught crashes now print
+    real addresses (was \`??\`). libtest_mt's "producing
+    some exceptions" stage passes -- the signal-handler
+    longjmp path needed working stack walk. test1b now
+    reports real "RUNTIME ERROR: invalid memory access"
+    with backtrace.
 
 Install:
   sudo mkdir -p $PREFIX

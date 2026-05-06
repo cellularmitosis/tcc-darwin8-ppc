@@ -168,6 +168,70 @@ dcbst/sync/icbi/sync/isync dance internally. One-line patch.
 [`v0.2.27-jit-heisenbug.sh`](../../../demos/v0.2.27-jit-heisenbug.sh)
 loops the original `two_float` repro 30× and confirms 30/30 OK.
 
+### v0.2.28-g3 — abitest-tcc 24/24 + Tiger PPC backtraces
+
+After the JIT heisenbug fix, abitest-tcc was deterministically
+failing at `many_struct_test_3` (was previously
+heisenbug-failing at random earlier points). The new failure
+exposed a separate bug, fixed in v0.2.28.
+
+**Bug 1: save_regs(nb_args + 1) skipped the func-ptr slot.**
+In `gfunc_call` (ppc-gen.c), `save_regs(nb_args + 1)` saves
+vstack entries up to `vtop - (nb_args + 1)` — but the function
+pointer / call target lives at `vtop - nb_args`. So the
+func-ptr slot was NOT included in the save range. For most
+calls that's fine (func ptr is a CONST symbolic, no register
+involved). But for indirect calls where the func ptr is an
+LVAL with its address in a volatile GPR — e.g.
+`(*(s2->f2 = &f) + 0)(v,v,v,v,v,v,1.0)` from upstream
+many_struct_test_3 — the arg-pass-2 code overwrote that GPR
+with v.a (=1) before the indirect-call site could `gv()` the
+function pointer. The result: `lwz r11, 0(r4)` with r4 = 1
+→ Bus error.
+
+Disassembled abitest-tcc to confirm: just before the crash,
+the test driver does `lwz r4, 0x0(r12)` (loading v.a=1 into
+r4), then `lwz r11, 0(r4)` (CRASH at addr 0x1).
+
+Fix: `save_regs(nb_args)` instead, matching x86_64-gen.c. The
+func-ptr slot is now included in the save range so its address
+register survives arg setup.
+
+Five tests flip from fail/crash to pass:
+many_struct_test_3, stdarg_test, stdarg_many_test,
+stdarg_struct_test, arg_align_test. **abitest-tcc is now
+clean at 24 / 24.**
+
+**Bug 2: PPC backtrace signal handling was a no-op.**
+`tccrun.c::rt_get_caller_pc` had no PPC case (just a
+`#warning add arch specific` no-op). And `rt_getcontext`
+didn't extract `ip`/`fp` from Tiger's `mcontext`. Result:
+when a JIT'd function crashed, the signal handler couldn't
+walk the stack to find the owning TCCState, so longjmp out
+through `tcc_setjmp`'s saved jmpbuf never fired —
+`libtest_mt`'s "producing some exceptions" stage failed.
+
+Implemented:
+- `rt_getcontext`: read PC from `uc->uc_mcontext->ss.srr0`,
+  SP from `ss.r1`. Tiger uses non-underscore field names
+  (`ss.r1` vs Leopard+'s POSIX `__ss.__r1`).
+- `rt_get_caller_pc`: PPC back-chain walk. `0(SP)` is the
+  back chain (caller's SP). `8(SP)` (= `((addr_t *)SP)[2]`)
+  is the saved LR slot, set by the caller's `bl` and held
+  through the function's lifetime. So at level=1 we read
+  `((addr_t *)rc->fp)[2]`; at level≥2 we walk back-chain
+  (level-1) times then read `[2]` of the resulting frame.
+
+After this, `libtest_mt "producing some exceptions"` passes
+(prints `89! 144! 233! ...`), `test1b` reports real
+`RUNTIME ERROR: invalid memory access` with backtrace
+addresses, and the signal-handler longjmp path is finally
+functional on PPC.
+
+**Demo:** [`v0.2.28-clean-abitest.sh`](../../../demos/v0.2.28-clean-abitest.sh)
+runs `abitest-tcc` and `abitest-cc` and shows the former is
+clean while the latter still has its known long-double diffs.
+
 ### Out of scope this session (deferred to follow-ups)
 
 1. **Local relocation entries for dylib sliding** — currently
