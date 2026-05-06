@@ -69,7 +69,7 @@ OBJ-i386-win32 = $(I386_O) chkstk.o $(WIN_O)
 OBJ-x86_64-win32 = $(X86_64_O) chkstk.o $(WIN_O)
 OBJ-arm64 = $(ARM64_O) $(LIN_O)
 OBJ-arm64-osx = $(ARM64_O) $(OSX_O)
-OBJ-ppc-osx = lib-ppc.o atomic-ppc.o alloca-ppc.o builtin.o $(OSX_O)
+OBJ-ppc-osx = lib-ppc.o atomic-ppc.o alloca-ppc.o builtin.o bcheck.o bt-log.o $(OSX_O)
 OBJ-arm = $(ARM_O) $(LIN_O)
 OBJ-arm-fpa = $(OBJ-arm)
 OBJ-arm-fpa-ld = $(OBJ-arm)
@@ -104,6 +104,16 @@ $(X)atomic-ppc.o : atomic-ppc.S
 	$S$(CC) -c $< -o $@
 $(X)alloca-ppc.o : alloca-ppc.S
 	$S$(CC) -c $< -o $@
+# bcheck.o / bt-log.o on PPC: install minimal stubs from
+# bcheck-ppc.c / bt-log-ppc.c rather than the upstream
+# lib/bcheck.c (a 2200-line bounds checker we haven't ported).
+# The actual __bound_* symbol stubs live in lib-ppc.c (and so in
+# libtcc1.a) -- bcheck.o just has to exist for `tcc -b -run` to
+# avoid "file 'bcheck.o' not found".
+$(TOP)/bcheck.o : bcheck-ppc.c $(TCC)
+	$S$(XCC) -c $< -o $@ $(XFLAGS)
+$(TOP)/bt-log.o : bt-log-ppc.c $(TCC)
+	$S$(XCC) -c $< -o $@ $(XFLAGS)
 endif
 
 $(TOP)/%.o : %.c $(TCC)
