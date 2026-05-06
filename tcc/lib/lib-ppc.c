@@ -152,6 +152,11 @@ long long __fixdfdi(double a)
     return (long long)__fixunsdfdi(a);
 }
 
+/* float -> long long / unsigned long long: widen to double then
+ * forward. Float fits exactly in double, so no precision loss. */
+long long __fixsfdi(float a) { return __fixdfdi((double)a); }
+unsigned long long __fixunssfdi(float a) { return __fixunsdfdi((double)a); }
+
 /* ---------------------------------------------------------------------------
  * 64-bit shift helpers
  *

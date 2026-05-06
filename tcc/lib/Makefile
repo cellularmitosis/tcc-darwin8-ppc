@@ -69,7 +69,7 @@ OBJ-i386-win32 = $(I386_O) chkstk.o $(WIN_O)
 OBJ-x86_64-win32 = $(X86_64_O) chkstk.o $(WIN_O)
 OBJ-arm64 = $(ARM64_O) $(LIN_O)
 OBJ-arm64-osx = $(ARM64_O) $(OSX_O)
-OBJ-ppc-osx = lib-ppc.o atomic-ppc.o $(OSX_O)
+OBJ-ppc-osx = lib-ppc.o atomic-ppc.o alloca-ppc.o builtin.o $(OSX_O)
 OBJ-arm = $(ARM_O) $(LIN_O)
 OBJ-arm-fpa = $(OBJ-arm)
 OBJ-arm-fpa-ld = $(OBJ-arm)
@@ -101,6 +101,8 @@ $(X)%.o : %.S $(TCC)
 # the same $(X)atomic-ppc.o name the OBJ-ppc-osx list expects.
 ifneq "$(filter ppc%,$T)" ""
 $(X)atomic-ppc.o : atomic-ppc.S
+	$S$(CC) -c $< -o $@
+$(X)alloca-ppc.o : alloca-ppc.S
 	$S$(CC) -c $< -o $@
 endif
 
