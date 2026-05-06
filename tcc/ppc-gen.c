@@ -1541,7 +1541,13 @@ ST_FUNC void gfunc_call(int nb_args)
                  * it into 24+gslot*4(r1). */
                 int fpr;
                 gv(RC_FLOAT);
-                fpr = TREG_TO_FPR(vtop->r) + 1;   /* PPC f1..f13 */
+                /* TREG_TO_FPR already returns the 1-indexed PPC FPR
+                 * number (f1..f8). Don't double-add. The previous
+                 * `+ 1` here meant we stored a DIFFERENT FPR than the
+                 * one gv loaded into, garbage'ing variadic args
+                 * past slot 8 (e.g. printf's 9th and 10th doubles
+                 * would print as huge numbers). */
+                fpr = TREG_TO_FPR(vtop->r);
                 if (bt == VT_FLOAT)
                     o(0xd0010000 | (fpr << 21) | ((24 + gslot * 4) & 0xffff));
                 else
