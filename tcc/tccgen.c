@@ -3487,6 +3487,15 @@ error:
             if (sbt_bt == VT_PTR) {
                 /* put integer type to allow logical operations below */
                 vtop->type.t = (PTR_SIZE == 8 ? VT_LLONG : VT_INT);
+                /* When extending a pointer to a wider int, follow
+                   the destination's signedness: sign-extend to a
+                   signed dst, zero-extend to an unsigned dst. This
+                   matches gcc on Apple PPC: (long long)p sign-
+                   extends, (unsigned long long)p zero-extends.
+                   Without this we always sign-extended, so e.g.
+                   (unsigned long long)(char*)0xFFFFFFBE came out as
+                   0xFFFFFFFFFFFFFFBE instead of 0xFFFFFFBE. */
+                sbt = (sbt & ~VT_UNSIGNED) | (dbt & VT_UNSIGNED);
             }
         }
 

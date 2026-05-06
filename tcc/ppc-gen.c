@@ -1695,6 +1695,34 @@ ST_FUNC void gfunc_call(int nb_args)
                             }
                         }
                     }
+                } else if (bt == VT_LLONG) {
+                    /* LL straddles last GPR and stack: HI in r3+gslot
+                     * (= r10 for gslot=7), LO at 24+(gslot+1)*4(r1).
+                     * Without this case the previous fallthrough did
+                     * gv(RC_R(gslot)) which loaded only ONE half (LO)
+                     * into r10 and left HI / stack-LO unwritten.
+                     * Surfaced by printf with 8 args including an LL
+                     * spanning the r10/stack boundary -- the printf
+                     * va_arg of the straddling LL read garbage. */
+                    int target_hi = gslot + 3;          /* r10 for gslot=7 */
+                    int stack_off_lo = 24 + (gslot + 1) * 4;
+                    int lo_reg, hi_reg;
+                    save_reg(target_hi - 3);
+                    gv(RC_INT);
+                    lo_reg = TREG_TO_GPR(vtop->r & VT_VALMASK);
+                    if (vtop->r2 < VT_CONST) {
+                        hi_reg = TREG_TO_GPR(vtop->r2);
+                        if (hi_reg != target_hi) {
+                            o(0x7c000378 | (hi_reg << 21)
+                                         | (target_hi << 16)
+                                         | (hi_reg << 11));   /* mr target_hi, hi_reg */
+                        }
+                        /* stw lo_reg, stack_off_lo(r1) */
+                        o(0x90000000 | (lo_reg << 21) | (1 << 16)
+                                     | (stack_off_lo & 0xffff));
+                    } else {
+                        tcc_error_noabort("ppc-gen: LL straddle without r2");
+                    }
                 } else {
                     gv(RC_R(gslot));
                 }
