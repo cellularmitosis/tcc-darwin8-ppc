@@ -32,29 +32,30 @@
  *   f14..f31 - non-volatile; not yet alloc'd in v1
  *
  * For now we expose 8 int regs (r3-r10) plus 2 scratch (r11, r12),
- * and 8 float regs (f1-f8). Total = 18.
+ * and 13 float regs (f1-f13 -- the full Apple PPC32 ABI variadic
+ * FP arg slot range). Total = 23.
  *
  * Future work: expose non-volatile registers for spill avoidance.
  */
-#define NB_REGS         18
+#define NB_REGS         23
 
 /* Map TCC's TREG_* slot to a PPC register number. */
 #define TREG_R(x)       (x)             /* x = 0..7  -> r3..r10  */
 #define TREG_R11        8               /* scratch */
 #define TREG_R12        9               /* scratch */
-#define TREG_F(x)       ((x) + 10)      /* x = 0..7  -> f1..f8   */
+#define TREG_F(x)       ((x) + 10)      /* x = 0..12 -> f1..f13  */
 
 /* Translate a TREG slot back to the actual PPC GPR number (3..12). */
 #define TREG_TO_GPR(t)  ((t) < 8 ? (t) + 3 : (t) == 8 ? 11 : 12)
-/* Translate a TREG slot back to the actual PPC FPR number (1..8). */
+/* Translate a TREG slot back to the actual PPC FPR number (1..13). */
 #define TREG_TO_FPR(t)  ((t) - 10 + 1)
 
 /* Register-class bitmasks. Bit 0 = generic int, bit 1 = generic float;
- * bits 2..11 are individual int regs, bits 12..19 individual floats. */
+ * bits 2..11 are individual int regs, bits 12..24 individual floats. */
 #define RC_INT          (1 << 0)
 #define RC_FLOAT        (1 << 1)
 #define RC_R(x)         (1 << (2 + (x)))        /* x = 0..9 */
-#define RC_F(x)         (1 << (12 + (x)))       /* x = 0..7 */
+#define RC_F(x)         (1 << (12 + (x)))       /* x = 0..12 */
 
 #define RC_R3           RC_R(0)
 #define RC_R4           RC_R(1)
@@ -123,7 +124,7 @@ ST_DATA const int reg_classes[NB_REGS] = {
     RC_INT | RC_R(8),
     /* 9: r12 (scratch) */
     RC_INT | RC_R(9),
-    /* 10..17: f1..f8 */
+    /* 10..22: f1..f13 */
     RC_FLOAT | RC_F(0),
     RC_FLOAT | RC_F(1),
     RC_FLOAT | RC_F(2),
@@ -132,6 +133,11 @@ ST_DATA const int reg_classes[NB_REGS] = {
     RC_FLOAT | RC_F(5),
     RC_FLOAT | RC_F(6),
     RC_FLOAT | RC_F(7),
+    RC_FLOAT | RC_F(8),
+    RC_FLOAT | RC_F(9),
+    RC_FLOAT | RC_F(10),
+    RC_FLOAT | RC_F(11),
+    RC_FLOAT | RC_F(12),
 };
 
 /* Bounds-check support is deferred. tccgen.c references
@@ -1534,19 +1540,15 @@ ST_FUNC void gfunc_call(int nb_args)
         } else if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
             int fslot = fpr_alloc[src_index];
             int gslot = gpr_alloc[src_index];  /* shadow slot, set in first pass */
-            if (fslot >= 8) {
-                /* Out of FPRs: pass via the GPR shadow slot only,
-                 * which lives on our outgoing parameter area. Force
-                 * the value into ANY FPR (gv(RC_FLOAT)), then store
-                 * it into 24+gslot*4(r1). */
+            if (fslot >= 13) {
+                /* Out of FPRs (Apple PPC has f1..f13): pass via the
+                 * GPR shadow slot only, which lives on our outgoing
+                 * parameter area. Force the value into ANY FPR
+                 * (gv(RC_FLOAT)), then store it into 24+gslot*4(r1). */
                 int fpr;
                 gv(RC_FLOAT);
                 /* TREG_TO_FPR already returns the 1-indexed PPC FPR
-                 * number (f1..f8). Don't double-add. The previous
-                 * `+ 1` here meant we stored a DIFFERENT FPR than the
-                 * one gv loaded into, garbage'ing variadic args
-                 * past slot 8 (e.g. printf's 9th and 10th doubles
-                 * would print as huge numbers). */
+                 * number (f1..f13). Don't double-add. */
                 fpr = TREG_TO_FPR(vtop->r);
                 if (bt == VT_FLOAT)
                     o(0xd0010000 | (fpr << 21) | ((24 + gslot * 4) & 0xffff));
@@ -1825,9 +1827,9 @@ ST_FUNC void gfunc_call(int nb_args)
 static int ppc_fp_param_count;
 /* Per-FP-param: offset (from FP / r31) at which to store the FPR.
  * Stored linearly in source order, indexed by FP-param ordinal. */
-static int ppc_fp_param_off[8];
+static int ppc_fp_param_off[13];
 /* Per-FP-param: 1 if double (8-byte stfd), 0 if float (4-byte stfs).  */
-static int ppc_fp_param_is_double[8];
+static int ppc_fp_param_is_double[13];
 
 /* ------------------------------------------------------------------ */
 /* PIC indirection bookkeeping                                        */
@@ -2047,9 +2049,9 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
      * actual mflr/stw/stwu/stw r31/addi r31 instructions are emitted
      * at gfunc_epilog time once we know the final frame size.
      *
-     * Plus reserve up to 8 extra slots (32 bytes) for FP-param spills
+     * Plus reserve up to 13 extra slots (52 bytes) for FP-param spills
      * (one stfs/stfd per FP param). Unused slots become nops. */
-    ind += PPC_PROLOG_SIZE + 8 * 4;
+    ind += PPC_PROLOG_SIZE + 13 * 4;
     func_sub_sp_offset = ind;
     /* loc=-4 reserves the FP-save slot at r31-4 (saved r31).
      * loc=-8 reserves the PIC-base-save slot at r31-8 (saved r30).
@@ -2138,8 +2140,8 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
          * is correct for both ranges; we just have to NOT
          * artificially cap at 8. */
         if (bt == VT_FLOAT) {
-            if (fpr_index >= 8)
-                tcc_error("ppc-gen: parameters exceed 8 FPR slots");
+            if (fpr_index >= 13)
+                tcc_error("ppc-gen: parameters exceed 13 FPR slots");
             param_offset = 24 + gpr_index * 4;
             ppc_fp_param_off[ppc_fp_param_count] = param_offset;
             ppc_fp_param_is_double[ppc_fp_param_count] = 0;
@@ -2148,8 +2150,8 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             gpr_index += 1;
             fpr_index += 1;
         } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
-            if (fpr_index >= 8)
-                tcc_error("ppc-gen: parameters exceed 8 FPR slots");
+            if (fpr_index >= 13)
+                tcc_error("ppc-gen: parameters exceed 13 FPR slots");
             param_offset = 24 + gpr_index * 4;
             ppc_fp_param_off[ppc_fp_param_count] = param_offset;
             ppc_fp_param_is_double[ppc_fp_param_count] = 1;
@@ -2243,10 +2245,10 @@ ST_FUNC void gfunc_epilog(void)
     o(0x4e800020);
     (void)pic_save_off; (void)fp_save_off; (void)frame_size;
 
-    /* Backfill the reserved prologue. PPC_PROLOG_SIZE + 8 reserved
-     * FP-spill slots = 13 + 8 = 21 instructions / 84 bytes. */
+    /* Backfill the reserved prologue. PPC_PROLOG_SIZE + 13 reserved
+     * FP-spill slots. */
     saved_ind = ind;
-    ind = func_sub_sp_offset - (PPC_PROLOG_SIZE + 8 * 4);
+    ind = func_sub_sp_offset - (PPC_PROLOG_SIZE + 13 * 4);
     /* mflr r0 */
     o(0x7c0802a6);
     /* stw r0, 8(r1) */
@@ -2274,7 +2276,7 @@ ST_FUNC void gfunc_epilog(void)
     {
         int f, k;
         for (f = 0; f < ppc_fp_param_count; f++) {
-            int fpr = f + 1;  /* f1..f8 */
+            int fpr = f + 1;  /* f1..f13 */
             int off = ppc_fp_param_off[f];
             if (ppc_fp_param_is_double[f]) {
                 /* stfd fS, off(r1) -- opcode 54 */
@@ -2285,7 +2287,7 @@ ST_FUNC void gfunc_epilog(void)
             }
         }
         /* Pad unused FP-spill slots with nops. */
-        for (k = ppc_fp_param_count; k < 8; k++)
+        for (k = ppc_fp_param_count; k < 13; k++)
             o(0x60000000);  /* nop */
     }
     /* Frame-allocation, save-area, and FP-pointer-setup instructions.
