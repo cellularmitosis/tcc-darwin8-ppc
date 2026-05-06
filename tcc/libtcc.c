@@ -996,6 +996,14 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
 #endif
     /* free loaded dlls array */
     dynarray_reset(&s1->loaded_dlls, &s1->nb_loaded_dlls);
+#if defined(TCC_TARGET_PPC) && !defined(TCC_TARGET_PPC64)
+    /* Release the global PIC pair side-table allocated by
+     * ppc_pic_pair_record(); see ppc-gen.c. */
+    {
+        extern void ppc_pic_pairs_free(void);
+        ppc_pic_pairs_free();
+    }
+#endif
     tcc_free(s1);
 #ifdef MEM_DEBUG
     tcc_memcheck(-1);

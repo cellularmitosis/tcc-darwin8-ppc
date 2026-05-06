@@ -1865,6 +1865,18 @@ ST_FUNC void ppc_pic_pairs_reset(void)
     ppc_pic_pairs_n = 0;
 }
 
+/* Release the side table itself; called once at tcc_delete() so the
+ * 512-byte initial allocation doesn't show up as a leak in MEM_DEBUG
+ * builds. ppc_pic_pairs_reset() above only resets the count so the
+ * buffer can be reused across TUs in the same TCCState. */
+ST_FUNC void ppc_pic_pairs_free(void)
+{
+    tcc_free(ppc_pic_pairs);
+    ppc_pic_pairs = NULL;
+    ppc_pic_pairs_cap = 0;
+    ppc_pic_pairs_n = 0;
+}
+
 ST_FUNC int ppc_pic_pairs_lookup(int reloc_off)
 {
     int i;
