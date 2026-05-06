@@ -36,6 +36,8 @@ Four patch releases shipped this session: **v0.2.25**, **v0.2.26**,
 | v0.2.27-g3 | `deb6a84`..`645ee5e` (2) | 111/111 | **JIT heisenbug fixed (5+ sessions deferred).** `__clear_cache` no-op stub when tcc compiles itself → JIT page reuse saw stale icache → SIGILL/SIGBUS/SIGSEGV at random iterations. Delegate to libSystem's `sys_icache_invalidate`. One-line. test3 runs to completion; abitest-tcc deterministic 20/24 (was variable 5–19); dlltest stable. |
 | v0.2.28-g3 | `d027c24`..`5fc7df2` (2) | 111/111 | **abitest-tcc 24/24 + Tiger PPC backtraces.** `save_regs(nb_args)` (vs `nb_args+1`) so func-ptr LVAL's volatile-GPR address survives arg setup. `rt_get_caller_pc` + `rt_getcontext` Tiger PPC (`mcontext->ss.{srr0,r1}`). many_struct_test_3 / stdarg_* / arg_align_test all flip from crash to pass. libtest_mt "producing some exceptions" passes. test1b reports proper RUNTIME ERROR. |
 | (cleanup) | `a218bbb` | 111/111 | Drop unused `sect_const`/`sect_stub`/`sect_nlptr` decls from `macho_output_exe`. |
+| (polish)  | `291343e` | 111/111 | New demo `v0.2.28-sqlite-dylib.sh` — builds the entire 250-kloc sqlite3 amalgamation as a `tcc -shared` dylib, then dlopens it and runs CREATE TABLE + INSERT. Real-world dylib stress test passes. |
+| (polish)  | `0ecc2bc` | 111/111 | Dedupe libSystem in `LC_LOAD_DYLIB` output. `-lpthread`/`-ldl`/`-lm` all install-name to libSystem on Tiger; dyld saw two entries before. Now one. |
 
 ## Real-world programs
 
