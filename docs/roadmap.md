@@ -24,6 +24,7 @@ have brought tests2 from 70 / 122 (57%) to **111 / 111 (100%)**:
 | [v0.2.14-g3](sessions/041-pickup-2026-05-03/README.md) | **111 / 111 (100%)** | BE bitfield read-back fix (force byte-wise loads on PPC32 BE) |
 | [v0.2.15-g3](sessions/041-pickup-2026-05-03/README.md) | 111 / 111 | Apple PPC ABI long-long alignment + LL field-load clobber. **sqlite3_open works.** |
 | [v0.2.16-g3](sessions/041-pickup-2026-05-03/README.md) | 111 / 111 | LL-arg shuffle clobber in gfunc_call. **sqlite SELECT works; zlib full test suite passes.** |
+| (post-v0.2.16, [session 042](sessions/042-upstream-tests-2026-05-05/README.md)) | 111 / 111 | First end-to-end upstream `tcc/tests/make test` run. 5 fixes: VT_STRUCT sym+off load, libtcc1.a missing helpers (`__builtin_*`, alloca, `__fixsfdi`), tcctest weak_test gating for Tiger dyld, ppc_pic_pairs leak, ship bcheck.o/bt-log.o stubs. tests2-dir under `-run` now 111/111 (was 108/111); memtest passes; test3 now actually runs (gets 770/4500 lines into tcctest before SEGV, was previously unable to even build the gcc reference). |
 
 (Total dropped 122 → 118 in v0.2.6 because four LE-byte-order-
 specific tests are properly classified as skipped on big-endian;
@@ -115,6 +116,17 @@ In rough order of cost vs. confidence:
 
 5. **Real-world program builds** (sqlite, lua). Smoke-tests the
    broader codegen surface that synthetic tests don't exercise.
+
+6. **Upstream `make -k test` in `tcc/tests/`** (since session 042).
+   Runs hello-exe / hello-run / libtest / libtest_mt / test3 /
+   abitest-cc / abitest-tcc / vla_test-run / tests2-dir / pp-dir /
+   memtest / dlltest / cross-test / btest / tccb. Currently the
+   five passing stages are version, hello-exe, hello-run, libtest,
+   vla_test-run, pp-dir (24/24), tests2-dir (111/111), memtest. The
+   rest fail on known-deferred items (long double 128-bit ABI,
+   13-FPR support, Mach-O dylib output, real bcheck port,
+   cross-target configure). See
+   [session 042 README](sessions/042-upstream-tests-2026-05-05/README.md).
 
 ## Risk register
 
