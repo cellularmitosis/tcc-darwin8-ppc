@@ -862,6 +862,15 @@ ST_FUNC void load(int r, SValue *sv)
                 o(0x80000000 | (gpr << 21) | (addr_gpr << 16)
                              | (extra_off & 0xffff));
                 return;
+            case VT_STRUCT:
+                /* "Load" of a struct value = compute its address.
+                 * addr_gpr already holds &sym after the addi at
+                 * line 826-829; add extra_off to reach the array
+                 * element / member. Mirrors the VT_STRUCT case in
+                 * the extra_off==0 path below. */
+                o(0x38000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                return;
             default:
                 tcc_error("ppc-gen: load via sym+off of bt 0x%x not yet supported", bt);
             }
