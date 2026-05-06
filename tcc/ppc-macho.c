@@ -504,10 +504,31 @@ static int collect_extern_stubs(TCCState *s1,
             int type = ELFW(R_TYPE)(rel->r_info);
             int symidx = ELFW(R_SYM)(rel->r_info);
             ElfW(Sym) *esym;
+            int needs_stub;
             if (symidx <= 0 || symidx >= nsyms) continue;
-            if (type != R_PPC_REL24) continue;
             esym = (ElfW(Sym) *)s1->symtab->data + symidx;
             if (esym->st_shndx != SHN_UNDEF) continue;
+            /* REL24 = function call → always needs a stub.
+             * ADDR32 to an extern function (e.g. `void *p = (void*)fcntl;`
+             * in static init) also needs a stub: at runtime we want `p`
+             * to be a callable pointer, but Tiger has no dyld
+             * bind-info for ADDR32 data slots — so we can't get the
+             * dyld-resolved function VA written into the slot. The
+             * stub provides callability: store the stub's address in
+             * the slot, and calling through it jumps via __nl_symbol_ptr
+             * (filled by dyld lazily) to the real function. ADDR32 to
+             * extern data still falls back to the slot-address path
+             * (the "wrong" semantics — but we have no general fix yet
+             * without dyld bind-info, which our exe writer doesn't
+             * emit). */
+            needs_stub = 0;
+            if (type == R_PPC_REL24) {
+                needs_stub = 1;
+            } else if (type == R_PPC_ADDR32
+                       && ELFW(ST_TYPE)(esym->st_info) == STT_FUNC) {
+                needs_stub = 1;
+            }
+            if (!needs_stub) continue;
             if (stub_for[symidx] >= 0) continue;
             if (nstubs >= capstubs) {
                 capstubs = capstubs ? capstubs * 2 : 8;
