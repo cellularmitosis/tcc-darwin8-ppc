@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.24-g3}"
+VERSION="${VERSION:-v0.2.25-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -289,6 +289,51 @@ What's new (cumulative since v0.1.0-g3):
     zlib, bzip2). cJSON exercises a different mix of paths than
     the others: heavy linked-list traversal, strdup/free
     patterns, recursive descent parsing.
+
+  * v0.2.22: \`int *p = &arr[N]\` (N != 0) static initializers
+    now actually point at \`&arr[N]\`. Pre-v0.2.22 they collapsed
+    to \`&arr[0]\` because \`R_PPC_ADDR32\` overwrote the in-place
+    value (which is the implicit ELF Rel addend) instead of
+    adding to it. Three fixes: ppc-link.c::relocate() switches to
+    add (matches i386's R_386_32); the Mach-O exe writer's resolver
+    mirrors that; the Mach-O .o loader zeros the in-place after the
+    addend is absorbed into a synthetic anchor sym. Drops
+    tcctest.c diff vs gcc reference 44 -> 33 lines.
+
+  * v0.2.23: full sqlite3 with on-disk database works end-to-end
+    -- fifth real-world program (after lua, zlib, bzip2, cJSON).
+    Static-init data slots like \`(sqlite3_syscall_ptr)fcntl\` used
+    to resolve to the \`__nl_symbol_ptr\` slot ADDRESS (4 bytes of
+    data, not callable code), so calling them faulted. Fix: in
+    \`collect_extern_stubs\`, also allocate a stub when an extern
+    STT_FUNC is data-referenced via \`R_PPC_ADDR32\` (was: only
+    \`R_PPC_REL24\` calls). The slot now holds a stub address;
+    calling the stub jumps via \`__nl_symbol_ptr\` (filled by dyld
+    lazily) to the real function.
+
+  * v0.2.24: \`tcc -ar\` is now native Mach-O on PPC (was: ELF
+    parser only, fell back to system /usr/bin/ar). New code path
+    inside \`tcc_tool_ar()\` handles fat (universal) binaries by
+    locating the PPC32 slice, parses the Mach-O header + LC_SYMTAB,
+    walks 12-byte nlist entries, and selects defined-external
+    symbols. Removes the \`XAR=\$(AR)\` workaround in tcc/lib/
+    Makefile so libtcc1.a builds via the in-tree tcc. tcc is now
+    fully self-sufficient on Tiger PPC -- no system ar needed.
+
+  * v0.2.25: \`tcc -shared\` produces a real Mach-O dylib on Tiger
+    PPC. dyld can load it via dlopen, dlsym finds exported
+    functions, function-call stubs survive dyld's slide. New
+    \`macho_output_dylib()\` in ppc-macho.c (~600 lines, mirrors
+    \`macho_output_exe\`): MH_DYLIB filetype; no __PAGEZERO /
+    LC_UNIXTHREAD / crt-shim; LC_ID_DYLIB for self-name; default
+    __TEXT vmaddr 0x40000000. Function stubs are PIC -- 8
+    instructions / 32 bytes per stub, with a (slot - .L1) SECTDIFF
+    anchor invariant under whole-image slide.
+
+    Multi-dylib link-time support (loading non-libSystem dylibs
+    via \`tcc -lfoo\` to resolve link-time references) is deferred
+    to a follow-up release. Programs that only use libSystem
+    symbols + dlopen Just Work today.
 
 Install:
   sudo mkdir -p $PREFIX
