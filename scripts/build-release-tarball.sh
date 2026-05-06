@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.17-g3}"
+VERSION="${VERSION:-v0.2.18-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -220,6 +220,24 @@ What's new (cumulative since v0.1.0-g3):
     \`stdarg_test\`). New \`__bound_*\` library stubs unblock
     \`-b\` compilation. Mach-O \`bcheck.o\` / \`bt-log.o\` shipped
     so \`tcc -b -run\` finds them.
+
+  * v0.2.18: Two more independent codegen fixes:
+    - Variadic FP arg past 8 FPRs was wrong: an off-by-one on
+      TREG_TO_FPR (which already returns 1-indexed) made us
+      stfd a different FPR than gv() loaded into. Surfaced by
+      printf with 8 ints + 10 doubles (manyarg_test) producing
+      huge garbage for the 9th and 10th doubles.
+    - Float negation (\`-x\` for double/float) used the generic
+      LE-only sign-flip (XOR 0x80 with byte at offset size-1).
+      On big-endian PPC the sign bit is at offset 0. Routed
+      TOK_NEG through gen_opf for PPC, which emits a real
+      \`fneg\` instruction.
+
+    Real-world impact: bzip2 1.0.8 now builds + round-trips
+    end-to-end with tcc-darwin8-ppc (third real-world program
+    after lua and zlib). tcctest's diff vs reference shrinks
+    from 255 to 122 lines (the remaining diffs are all known
+    long-double-128 / _Bool-size / static-init-addend issues).
 
 Install:
   sudo mkdir -p $PREFIX
