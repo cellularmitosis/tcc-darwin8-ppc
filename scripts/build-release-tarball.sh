@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.16-g3}"
+VERSION="${VERSION:-v0.2.17-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -201,6 +201,25 @@ What's new (cumulative since v0.1.0-g3):
     2 (was SEGV). zlib's full test suite passes. File-based
     sqlite (\`/tmp/test.db\`) still crashes inside sqlite3_open_v2
     — distinct bug in the file-open path; deferred.
+
+  * v0.2.17: alloca() works correctly. Previously, programs that
+    called alloca and then made any further function call (e.g.
+    \`p = alloca(N); strcpy(p, "x"); printf("%s", p);\`) would
+    silently corrupt the alloca'd memory (subsequent printf's
+    outgoing param area landed inside the alloca'd region) and
+    eventually segfault on epilog (epilog used \`addi r1, r1,
+    frame_size\` which doesn't account for alloca having moved
+    sp). Fix: epilog restores SP via the back chain (\`lwz r1,
+    0(r1)\`) and saved regs via FP (r31) instead of SP. New
+    \`lib/alloca-ppc.S\` reserves a 256-byte safety zone below
+    the user's region so subsequent param spills land in the
+    zone, not in alloca'd memory.
+
+    Also: full \`tcctest.c\` (the upstream 4500-line tcc stress
+    test) now runs to completion (was SEGV at line 770/4500 in
+    \`stdarg_test\`). New \`__bound_*\` library stubs unblock
+    \`-b\` compilation. Mach-O \`bcheck.o\` / \`bt-log.o\` shipped
+    so \`tcc -b -run\` finds them.
 
 Install:
   sudo mkdir -p $PREFIX

@@ -5,18 +5,21 @@
 A Mac OS X 10.4 Tiger / PowerPC backend for [tcc](https://repo.or.cz/tinycc.git),
 the Tiny C Compiler.
 
-**Status: v0.2.16-g3 SHIPPED — tests2 at 111/111 (100.0%); sqlite +
-zlib + lua all work.** TCC has never had a PowerPC backend in any
-release. As of session [027](docs/sessions/027-self-link/README.md),
+**Status: v0.2.17-g3 SHIPPED — tests2 at 111/111 (100.0%); sqlite +
+zlib + lua all work; full upstream `tcctest.c` (4500-line stress
+test) runs to completion.** TCC has never had a PowerPC backend in
+any release. As of session [027](docs/sessions/027-self-link/README.md),
 the entire bootstrap chain runs without `gcc-4.0`: tcc compiles AND
 links `tcc-self`, which compiles AND links `tcc-self2`, which
 produces a `.o` byte-identical to what `tcc-self3` produces — the
 canonical self-host fixpoint, on a 22-year-old G3 / G4.
-[v0.2.16-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.16-g3)
-fixes a long-standing call-setup bug in `gfunc_call` where the
-LL arg shuffle clobbered another arg's address register. With this
-fix, `./sqlite3 :memory: "select 1+1"` returns 2 and zlib's full
-test suite passes. Lua 5.4.7 builds and runs end-to-end
+[v0.2.17-g3](https://github.com/cellularmitosis/tcc-darwin8-ppc/releases/tag/v0.2.17-g3)
+makes `alloca()` actually work (was silently corrupting memory then
+SEGVing on epilog) by switching to back-chain restore in the function
+epilog and adding a 256-byte safety zone in the new
+[`alloca-ppc.S`](tcc/lib/alloca-ppc.S). Also adds the missing
+`__bound_*` library stubs and ships `bcheck.o` / `bt-log.o` so
+`tcc -b -run` works. Lua 5.4.7 builds and runs end-to-end
 ([demo](demos/v0.2.12-lua.sh)); `scripts/bench.sh` reports **tcc
 2s, gcc -O0 17s, gcc -Os 41s** for the lua 33-file build on a
 900 MHz iBook G3. A ~160 KB `/opt`-installable tarball is built
