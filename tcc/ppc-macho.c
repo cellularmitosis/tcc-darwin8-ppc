@@ -1657,7 +1657,6 @@ static int macho_output_exe(TCCState *s1, const char *filename)
 
     /* Section index ranges (1-based: __text=1). */
     enum { SECT_TEXT = 1 };
-    int sect_const = 0, sect_stub = 0, sect_nlptr = 0;
     int n_text_sects, n_data_sects, total_msects;
 
     /* Maximum used so far is 9 with all data sections present:
