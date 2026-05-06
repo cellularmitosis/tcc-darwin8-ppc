@@ -14,10 +14,6 @@ TCC = $(TOP)/$(X)tcc$(EXESUF)
 XTCC ?= $(TOP)/$(X)tcc$(EXESUF)
 XCC = $(XTCC)
 XAR = $(XTCC) -ar
-# tcc's -ar driver only handles ELF; on PPC Mach-O we use system ar.
-ifneq "$(filter ppc%,$T)" ""
-XAR = $(AR)
-endif
 XFLAGS-unx = -B$(TOPSRC)
 XFLAGS-win = -B$(TOPSRC)/win32 -I$(TOPSRC)/include
 XFLAGS = $(XFLAGS$(XCFG))

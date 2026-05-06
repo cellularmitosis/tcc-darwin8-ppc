@@ -43,10 +43,12 @@ typedef struct {
     char ar_fmag[2];
 } ArHdr;
 
+#if !defined(TCC_TARGET_MACHO)
 static unsigned long le2belong(unsigned long ul) {
     return ((ul & 0xFF0000)>>8)+((ul & 0xFF000000)>>24) +
         ((ul & 0xFF)<<24)+((ul & 0xFF00)<<8);
 }
+#endif
 
 static int ar_usage(int ret) {
     fprintf(stderr, "usage: tcc -ar [crstvx] lib [files]\n");
@@ -71,12 +73,18 @@ ST_FUNC int tcc_tool_ar(int argc, char **argv)
 
     FILE *fi, *fh = NULL, *fo = NULL;
     const char *created_file = NULL; // must delete on error
+#if !defined(TCC_TARGET_MACHO)
     ElfW(Ehdr) *ehdr;
     ElfW(Shdr) *shdr;
     ElfW(Sym) *sym;
+#endif
     int i, fsize, i_lib, i_obj;
+#if !defined(TCC_TARGET_MACHO)
     char *buf, *shstr, *symtab, *strtab;
     int symtabsize = 0;//, strtabsize = 0;
+#else
+    char *buf;
+#endif
     char *anames = NULL;
     int *afpos = NULL;
     int istrlen, strpos = 0, fpos = 0, funccnt = 0, funcmax, hofs;
@@ -212,6 +220,116 @@ finish:
         fread(buf, fsize, 1, fi);
         fclose(fi);
 
+#if defined(TCC_TARGET_MACHO)
+        /* Mach-O symbol extraction.
+         * Handles fat (universal) binaries by finding the PPC slice first.
+         * Picks nlist entries where (n_type & N_EXT) && (n_type & N_TYPE) == N_SECT:
+         * defined, externally visible symbols. */
+        {
+            /* Local big-endian read helper (mach_get32 in ppc-macho.c is static). */
+#define ar_get32be(p) ( ((unsigned)(unsigned char)(p)[0]<<24) \
+                      | ((unsigned)(unsigned char)(p)[1]<<16) \
+                      | ((unsigned)(unsigned char)(p)[2]<<8)  \
+                      |  (unsigned)(unsigned char)(p)[3] )
+
+            const unsigned char *mb = (const unsigned char *)buf;
+            unsigned mb_off = 0;       /* offset of the Mach-O header within buf */
+            unsigned magic, ncmds, sizeofcmds, cmd_off;
+            unsigned symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
+            int found_symtab = 0;
+
+            /* Fat binary: locate the PPC32 slice. */
+            if ((unsigned)fsize >= 8) {
+                magic = ar_get32be(mb);
+                if (magic == 0xcafebabe) {  /* FAT_MAGIC */
+                    unsigned nfat = ar_get32be(mb + 4);
+                    unsigned j;
+                    if (nfat > 64) nfat = 64;
+                    for (j = 0; j < nfat; j++) {
+                        const unsigned char *fa = mb + 8 + j * 20;
+                        unsigned cputype, slice_off, slice_sz;
+                        if (8 + (j + 1) * 20 > (unsigned)fsize) break;
+                        cputype  = ar_get32be(fa);
+                        slice_off = ar_get32be(fa + 8);
+                        slice_sz  = ar_get32be(fa + 12);
+                        if (cputype == 18 /* CPU_TYPE_POWERPC */
+                                && slice_off + slice_sz <= (unsigned)fsize) {
+                            mb_off = slice_off;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            mb  += mb_off;
+            magic = (unsigned)fsize > mb_off + 4 ? ar_get32be(mb) : 0;
+            if (magic != 0xfeedface) {  /* MH_MAGIC PPC32 big-endian */
+                fprintf(stderr, "tcc: ar: not a PPC Mach-O object: %s\n", argv[i_obj]);
+                tcc_free(buf);
+                goto the_end;
+            }
+            if ((unsigned)fsize < mb_off + 28) goto macho_bad;
+
+            ncmds      = ar_get32be(mb + 16);
+            sizeofcmds = ar_get32be(mb + 20);
+            if (mb_off + 28 + sizeofcmds > (unsigned)fsize) goto macho_bad;
+
+            /* Walk load commands to find LC_SYMTAB (cmd == 2). */
+            cmd_off = 28;
+            for (i = 0; i < (int)ncmds; i++) {
+                unsigned cmd, cmdsize;
+                if (cmd_off + 8 > 28 + sizeofcmds) break;
+                cmd     = ar_get32be(mb + cmd_off);
+                cmdsize = ar_get32be(mb + cmd_off + 4);
+                if (cmdsize < 8) break;
+                if (cmd == 0x2 /* LC_SYMTAB */ && cmd_off + 24 <= 28 + sizeofcmds) {
+                    symoff  = ar_get32be(mb + cmd_off + 8);
+                    nsyms   = ar_get32be(mb + cmd_off + 12);
+                    stroff  = ar_get32be(mb + cmd_off + 16);
+                    strsize = ar_get32be(mb + cmd_off + 20);
+                    found_symtab = 1;
+                    break;
+                }
+                cmd_off += cmdsize;
+            }
+
+            if (found_symtab
+                    && symoff + nsyms * 12 <= (unsigned)fsize - mb_off
+                    && stroff + strsize    <= (unsigned)fsize - mb_off) {
+                const unsigned char *nl_base = mb + symoff;
+                const char *strtab_base = (const char *)(mb + stroff);
+                unsigned k;
+                for (k = 0; k < nsyms; k++) {
+                    const unsigned char *nl = nl_base + k * 12;
+                    unsigned n_strx = ar_get32be(nl);
+                    unsigned char n_type = nl[4];
+                    /* N_TYPE mask = 0x0e, N_SECT = 0x0e, N_EXT = 0x01 */
+                    if ((n_type & 0x01) && (n_type & 0x0e) == 0x0e) {
+                        const char *sym_name;
+                        if (n_strx >= strsize) continue;
+                        sym_name = strtab_base + n_strx;
+                        if (!*sym_name) continue;
+                        istrlen = strlen(sym_name) + 1;
+                        anames = tcc_realloc(anames, strpos + istrlen);
+                        strcpy(anames + strpos, sym_name);
+                        strpos += istrlen;
+                        if (++funccnt >= funcmax) {
+                            funcmax += 250;
+                            afpos = tcc_realloc(afpos, funcmax * sizeof *afpos);
+                        }
+                        afpos[funccnt] = fpos;
+                    }
+                }
+            }
+            if (0) {
+macho_bad:
+                fprintf(stderr, "tcc: ar: malformed Mach-O object: %s\n", argv[i_obj]);
+                tcc_free(buf);
+                goto the_end;
+            }
+#undef ar_get32be
+        }
+#else
         // elf header
         ehdr = (ElfW(Ehdr) *)buf;
         if (ehdr->e_ident[4] != ELFCLASSW)
@@ -271,6 +389,7 @@ finish:
                 }
             }
         }
+#endif
 
         file = argv[i_obj];
         for (name = strchr(file, 0);
@@ -306,11 +425,32 @@ finish:
     sprintf(stmp, "%-10d", (int)(strpos + (funccnt+1) * sizeof(int)) + fpos);
     memcpy(&arhdr.ar_size, stmp, 10);
     fwrite(&arhdr, sizeof(arhdr), 1, fh);
+#if defined(TCC_TARGET_MACHO)
+    /* The GNU ar '/' symtab header stores big-endian 32-bit integers.
+     * Write them byte-by-byte so the output is correct regardless of
+     * whether this tcc binary is running on a LE or BE host. */
+    {
+        unsigned char b[4];
+        unsigned long v;
+#define ar_put_be32(f, val) do { \
+    v = (unsigned long)(val); \
+    b[0]=(unsigned char)((v)>>24); b[1]=(unsigned char)((v)>>16); \
+    b[2]=(unsigned char)((v)>>8);  b[3]=(unsigned char)(v); \
+    fwrite(b, 4, 1, (f)); \
+} while(0)
+        ar_put_be32(fh, funccnt);
+        for (i = 1; i <= funccnt; i++)
+            ar_put_be32(fh, afpos[i] + hofs);
+        fwrite(anames, strpos, 1, fh);
+#undef ar_put_be32
+    }
+#else
     afpos[0] = le2belong(funccnt);
     for (i=1; i<=funccnt; i++)
         afpos[i] = le2belong(afpos[i] + hofs);
     fwrite(afpos, (funccnt+1) * sizeof(int), 1, fh);
     fwrite(anames, strpos, 1, fh);
+#endif
     if (fpos)
         fwrite("", 1, 1, fh);
     // write objects
