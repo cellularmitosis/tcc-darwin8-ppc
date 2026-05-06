@@ -1540,20 +1540,12 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
                  | ((uint32_t)sect_data[reloc_off+2] <<  8)
                  |  (uint32_t)sect_data[reloc_off+3];
             if (type == R_PPC_ADDR32) {
-                /* TODO: addend handling for `&arr[N]` style static
-                 * inits. Three attempts so far have all run into the
-                 * same wall: the in-place value's contents differ
-                 * between the in-memory single-TU path (init_putv
-                 * writes user-addend only) and the .o roundtrip path
-                 * (Mach-O .o emit folds sym->st_value, possibly
-                 * re-adjusted by sm->offset during section
-                 * concatenation). The right fix probably needs a
-                 * pre-link pass that normalizes in-place values
-                 * across all loaded sections. For now we keep the
-                 * original "ignore addend" behavior: `int *p =
-                 * &arr[N]` (N != 0) resolves to &arr+0. Affects
-                 * `relocation_test` in tcctest.c. */
-                inst = target_addr;
+                /* ELF Rel-format implicit-addend semantics: the in-place
+                 * value already holds the addend (init_putv wrote it for
+                 * `int *p = &arr[N]`, or the .o-loader zeroed it after
+                 * absorbing the addend into a synthetic anchor sym).
+                 * ADD, don't overwrite. Mirrors ppc-link.c::relocate(). */
+                inst += target_addr;
             } else if (type == R_PPC_ADDR16_HA) {
                 imm = ((target_addr + 0x8000) >> 16) & 0xffff;
                 inst = (inst & ~0xffff) | imm;
@@ -4012,6 +4004,22 @@ skip_pair_after:
                 new_sym = put_elf_sym(s1->symtab, merged_off, 0,
                                        ELFW(ST_INFO)(STB_LOCAL, STT_NOTYPE),
                                        0, target_tcc->sh_num, NULL);
+                /* For VANILLA ADDR32, the addend is now baked into the
+                 * anchor's st_value (= sec_to_off + addend). Zero the
+                 * in-place value in tcc's section so the ADD-semantics
+                 * relocator doesn't double-count. (For HA16/LO16/HI16,
+                 * the loader currently uses OVERWRITE in relocate() so
+                 * this scrub is unnecessary; addend-in-immediate isn't
+                 * supported by codegen anyway.) */
+                if (r_type == PPC_RELOC_VANILLA && r_length == 2) {
+                    uint32_t tcc_off = sec_off + r_address;
+                    if (s->data && tcc_off + 4 <= s->data_offset) {
+                        s->data[tcc_off + 0] = 0;
+                        s->data[tcc_off + 1] = 0;
+                        s->data[tcc_off + 2] = 0;
+                        s->data[tcc_off + 3] = 0;
+                    }
+                }
                 goto have_sym;
             }
         }

@@ -227,9 +227,12 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
         return;
 
     case R_PPC_ADDR32:
-        /* 32-bit absolute address (used for data references and the
-         * GOT-style indirection paths we don't yet exercise). */
-        ppc_link_write32be(ptr, (uint32_t)val);
+        /* 32-bit absolute address. ELF Rel-format implicit-addend
+         * convention: the in-place value IS the addend (e.g. init_putv
+         * writes `4` for `int *p = &arr[1]`). ADD val, don't overwrite,
+         * so the addend survives. Matches what i386-link.c does for
+         * R_386_32. */
+        ppc_link_write32be(ptr, ppc_link_read32be(ptr) + (uint32_t)val);
         return;
 
     case R_PPC_REL24:
