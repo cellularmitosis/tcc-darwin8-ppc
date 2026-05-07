@@ -56,6 +56,39 @@ float __floatundisf(unsigned long long x)
     return (float)__floatundidf(x);
 }
 
+/* Forward declarations of helpers defined further down the file
+ * but referenced by the LD <-> LL conversion stubs that need to
+ * appear close to their float counterparts. */
+long long __fixdfdi(double);
+unsigned long long __fixunsdfdi(double);
+
+/* (un)signed 64-bit -> long double. Tcc's generic gen_cvt_itof1
+ * emits these names for LL/ULL -> LD when LDOUBLE_SIZE != 8.
+ * Lossy: produce LD with high = (double)x, low = 0. The tcc-on-PPC
+ * conversion (long double)d goes through our gen_cvt_ftof which
+ * fills the LD pair (high = d, low = 0). */
+long double __floatundixf(unsigned long long x)
+{
+    return (long double)__floatundidf(x);
+}
+long double __floatdixf(long long x)
+{
+    return (long double)__floatdidf(x);
+}
+
+/* long double -> (un)signed 64-bit. Tcc's generic gen_cvt_ftoi1
+ * emits these for LD -> LL/ULL conversions when LDOUBLE_SIZE != 8.
+ * Lossy: discard the low half of the LD double-double, then
+ * convert the high double via existing __fixdfdi / __fixunsdfdi. */
+long long __fixxfdi(long double x)
+{
+    return __fixdfdi((double)x);
+}
+unsigned long long __fixunsxfdi(long double x)
+{
+    return __fixunsdfdi((double)x);
+}
+
 /* double -> unsigned long long.
  *
  * IEEE 754 double layout (big-endian PPC, 8 bytes):
@@ -179,37 +212,64 @@ float __builtin_inff(void) {
  *
  * Apple PPC's `long double` is 128-bit IBM double-double (a pair of
  * doubles). gcc-4.0 on Tiger emits calls to these helpers for any
- * `long double` arithmetic; they would normally come from libgcc.
+ * `long double` arithmetic; tcc emits the same calls (see
+ * `gen_opf` in ppc-gen.c).
  *
- * Tiger libc/libSystem doesn't ship the libgcc helpers, and our own
- * tcc-PPC backend treats `long double` as plain 8-byte double
- * (LDOUBLE_SIZE = 8). For programs we COMPILE with tcc, the helpers
- * are never referenced. But programs we LINK that include
- * gcc-4.0-built objects (e.g. libtcc.a built during the build-tiger
- * bootstrap step) carry undefined references to these names.
+ * Apple's libgcc-style ABI for these helpers: input is two `long
+ * double` values (each = pair of doubles in FPR pair), output is
+ * `long double` (returned in f1, f2). gcc-4.0's source declaration
+ * uses 4 doubles in / struct{double,double} out, but the actual
+ * register-level ABI matches the long-double convention because
+ * Apple PPC32 returns LD in (f1, f2).
  *
- * Provide weak-double-only implementations: we accept the high-word
- * pair, do plain double arithmetic, and return (result, 0). This
- * loses extended precision but keeps tcc-built programs that depend
- * on libgcc-emitting third-party objects link-and-run.
- *
- * The IBM double-double calling convention on PPC32: each long
- * double argument is a pair of doubles passed in two FPRs. Our C
- * declaration uses double pairs by struct return -- we don't need
- * to match the exact IBM ABI because gcc-4.0 emits inline reg-pair
- * code that just sees the (hi, lo) FPR pair returned. */
-struct ppc_dd { double hi, lo; };
-struct ppc_dd __gcc_qadd(double xhi, double xlo, double yhi, double ylo) {
-    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi + yhi; r.lo = 0; return r;
+ * We provide LOSSY implementations: take the high half of each
+ * operand, do plain double arithmetic, return as a long double
+ * with low half zero. This drops extended precision but is
+ * link-and-ABI compatible. abitest-cc's ret_longdouble (single LD
+ * input/output) and arg_align (small integer values cast to LD)
+ * both pass with this lossy form because the values fit in a
+ * double's 53-bit mantissa. Real precision-preserving math is
+ * deferred. */
+long double __gcc_qadd(long double x, long double y) {
+    return (long double)((double)x + (double)y);
 }
-struct ppc_dd __gcc_qsub(double xhi, double xlo, double yhi, double ylo) {
-    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi - yhi; r.lo = 0; return r;
+long double __gcc_qsub(long double x, long double y) {
+    return (long double)((double)x - (double)y);
 }
-struct ppc_dd __gcc_qmul(double xhi, double xlo, double yhi, double ylo) {
-    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi * yhi; r.lo = 0; return r;
+long double __gcc_qmul(long double x, long double y) {
+    return (long double)((double)x * (double)y);
 }
-struct ppc_dd __gcc_qdiv(double xhi, double xlo, double yhi, double ylo) {
-    struct ppc_dd r; (void)xlo; (void)ylo; r.hi = xhi / yhi; r.lo = 0; return r;
+long double __gcc_qdiv(long double x, long double y) {
+    return (long double)((double)x / (double)y);
+}
+
+/* Long-double comparison helpers (libgcc tf2 family). Lossy form:
+ * compare just the high doubles. The low halves hold whatever the
+ * quad arith left there; for tcc-emitted LD values the low half
+ * is exact-zero so the high-only compare matches IEEE on values
+ * that fit in a double. Real precision-preserving tf2 would
+ * compute (xhi+xlo) - (yhi+ylo) sign and handle subnormal cases. */
+int __eqtf2(long double x, long double y) {
+    return ((double)x == (double)y) ? 0 : 1;
+}
+int __netf2(long double x, long double y) {
+    return ((double)x == (double)y) ? 0 : 1;
+}
+int __lttf2(long double x, long double y) {
+    double a = (double)x, b = (double)y;
+    return (a < b) ? -1 : (a > b) ? 1 : 0;
+}
+int __letf2(long double x, long double y) {
+    double a = (double)x, b = (double)y;
+    return (a < b) ? -1 : (a > b) ? 1 : 0;
+}
+int __gttf2(long double x, long double y) {
+    double a = (double)x, b = (double)y;
+    return (a < b) ? -1 : (a > b) ? 1 : 0;
+}
+int __getf2(long double x, long double y) {
+    double a = (double)x, b = (double)y;
+    return (a < b) ? -1 : (a > b) ? 1 : 0;
 }
 
 /* 64-bit comparison helpers also from libgcc. Same situation as
