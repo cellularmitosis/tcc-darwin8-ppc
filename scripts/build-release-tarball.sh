@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.28-g3}"
+VERSION="${VERSION:-v0.2.29-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -395,6 +395,37 @@ What's new (cumulative since v0.1.0-g3):
     longjmp path needed working stack walk. test1b now
     reports real "RUNTIME ERROR: invalid memory access"
     with backtrace.
+
+  * v0.2.29: dylib slide support. Pre-v0.2.29, tcc-built
+    dylibs only worked when dyld loaded them at the preferred
+    vmaddr (0x40000000). If dyld had to slide them (e.g.
+    because that range was occupied), absolute references
+    inside the dylib pointed at the unslid VAs and either
+    crashed or returned garbage.
+
+    Two changes:
+    (a) ppc_need_pic_for_sym() now returns 1 for locally-
+    defined symbols in DLL mode too. This routes code refs
+    to local data through the PIC sectdiff (sym - anchor)
+    pattern that's invariant under whole-image slide. The
+    PIC base setup (mflr/bcl/mflr/mtlr giving r30 as anchor)
+    is now also pinned to function prolog for DLL mode --
+    lazy emission was unsafe when the first PIC use was
+    inside a conditional branch.
+
+    (b) macho_output_dylib() now walks the relocation tables
+    of __data, __mod_init_func, __mod_term_func looking for
+    R_PPC_ADDR32 entries against locally-defined symbols.
+    For each, it emits a Mach-O VANILLA local relocation_info
+    entry into LC_DYSYMTAB.locrel. dyld walks this table at
+    load time and adds the slide amount to each location --
+    fixing static-initializer pointers like
+    \`int *p = &arr[3];\` and \`(void(*)())fns[] = {f1,f2}\`.
+
+    Limitation: \`static const struct {const char *name;...}
+    tbl[]\` placed in __const can't be slid (read-only at
+    runtime; dyld can't write). Such tables continue to
+    work when no slide happens.
 
 Install:
   sudo mkdir -p $PREFIX
