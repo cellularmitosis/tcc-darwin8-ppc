@@ -239,13 +239,22 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
         /* PC-relative 24-bit branch displacement, used by `b` and
          * `bl`. The encoding stores LI in bits 6-29 (mask 0x03fffffc)
          * and treats it as a signed 26-bit byte offset (low 2 bits
-         * implicit zero). */
+         * implicit zero).
+         *
+         * For absolute symbols (SHN_ABS, e.g. tcc_add_symbol-registered
+         * callbacks) that land >32MB from the JIT region, build_got_entries
+         * synthesizes a PLT trampoline near the JIT code and rewrites
+         * the reloc to target it; so by the time we run, val is always
+         * in range. The check below is a defensive guard. */
         disp = (int32_t)(val - addr);
         if (disp < -(1 << 25) || disp >= (1 << 25)) {
+            int sym_idx = ELFW(R_SYM)(rel->r_info);
+            ElfW(Sym) *sym = (ElfW(Sym) *)symtab_section->data + sym_idx;
+            const char *sym_name = (char *)symtab_section->link->data + sym->st_name;
             tcc_error_noabort("R_PPC_REL24 out of range "
-                              "(addr=0x%lx val=0x%lx disp=0x%x)",
+                              "(addr=0x%lx val=0x%lx sym='%s')",
                               (unsigned long)addr, (unsigned long)val,
-                              (unsigned)disp);
+                              sym_name ? sym_name : "(null)");
             return;
         }
         orig = ppc_link_read32be(ptr);
