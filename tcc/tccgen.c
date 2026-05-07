@@ -250,6 +250,11 @@ static int R2_RET(int t)
 #if PTR_SIZE == 4
     if (t == VT_LLONG)
         return REG_IRE2;
+# if defined TCC_TARGET_PPC
+    /* Apple PPC32 ABI: long double returns in FPR pair (f1, f2). */
+    if (t == VT_LDOUBLE)
+        return REG_FRE2;
+# endif
 #elif defined TCC_TARGET_X86_64
     if (t == VT_QLONG)
         return REG_IRE2;
@@ -1444,14 +1449,25 @@ ST_FUNC void save_reg_upstack(int r, int n)
                                       between full-LL and single-half
                                       stores, so we need a known value */
 #ifdef TCC_TARGET_PPC
-                /* Big-endian save: HIGH at offset, LOW at offset+PTR_SIZE.
-                   Without this swap, the spill writes LOW at the lower
-                   address — that confuses the LL load path which (on BE)
-                   reads LOW from offset+4 and HIGH from offset+0. */
+                /* Big-endian save:
+                 *   LL:  HIGH (in r2) at off+0, LOW (in r) at off+4.
+                 *   LD:  HIGH (in r) at off+0,  LOW (in r2) at off+8.
+                 * Without this, the spill writes one half on top of
+                 * the other (since PTR_SIZE=4 < 8 for LD halves).
+                 * Use store_type to keep the stored size consistent
+                 * — VT_DOUBLE for LD halves, VT_INT for LL halves. */
                 if (p->r2 < VT_CONST && USING_TWO_WORDS(bt)) {
-                    store(p->r2, &sv);
-                    sv.c.i += PTR_SIZE;
-                    store(p->r & VT_VALMASK, &sv);
+                    if (bt == VT_LDOUBLE) {
+                        sv.type.t = VT_DOUBLE;
+                        store(p->r & VT_VALMASK, &sv);   /* HIGH at +0 */
+                        sv.c.i += 8;
+                        store(p->r2, &sv);               /* LOW at +8 */
+                        sv.type.t = bt;
+                    } else {
+                        store(p->r2, &sv);               /* HIGH at +0 */
+                        sv.c.i += PTR_SIZE;
+                        store(p->r & VT_VALMASK, &sv);   /* LOW at +4 */
+                    }
                 } else {
                     store(p->r & VT_VALMASK, &sv);
                 }
@@ -1964,6 +1980,17 @@ ST_FUNC int gv(int rc)
             if (rc2) {
                 int load_type = (bt == VT_QFLOAT) ? VT_DOUBLE : VT_PTRDIFF_T;
                 int original_type = vtop->type.t;
+#ifdef TCC_TARGET_PPC
+                /* Apple PPC32 long double = IBM double-double = pair
+                 * of doubles. Load each half as a double, with 8-byte
+                 * stride between halves (overrides the int-pair
+                 * default of PTR_SIZE = 4). */
+                int load_stride = (bt == VT_LDOUBLE) ? 8 : PTR_SIZE;
+                if (bt == VT_LDOUBLE)
+                    load_type = VT_DOUBLE;
+#else
+                int load_stride = PTR_SIZE;
+#endif
 
                 /* two register type load :
                    expand to two words temporarily */
@@ -2006,24 +2033,39 @@ ST_FUNC int gv(int rc)
                     /* load from memory */
                     vtop->type.t = load_type;
 #ifdef TCC_TARGET_PPC
-                    /* LOW at offset+4 on BE. */
-                    incr_offset(PTR_SIZE);
-                    load(r, vtop);
-                    vdup();
-                    vtop[-1].r = r;
-                    {
-                        int v_loc = vtop->r & VT_VALMASK;
-                        if (v_loc == VT_LOCAL || v_loc == VT_CONST) {
-                            vtop->c.i -= PTR_SIZE;
-                        } else if (orig_v_loc_pre == VT_LLOCAL) {
-                            /* Re-anchor to the original VT_LLOCAL so
-                             * the HIGH load reloads the pointer fresh
-                             * from the saved local. */
-                            vtop->r = orig_v_full_pre;
-                            vtop->c.i = orig_c_i_pre;
-                            vtop->r2 = orig_r2_pre;
-                        } else {
-                            incr_offset(-PTR_SIZE);
+                    /* Big-endian load order:
+                     * - LL: LOW at offset+4, HIGH at offset+0. We
+                     *   load LOW first into r (vtop->r=LOW after),
+                     *   then HIGH into r2.
+                     * - LDOUBLE: HIGH at offset+0, LOW at offset+8.
+                     *   We load HIGH first into r (vtop->r=HIGH),
+                     *   then LOW into r2. (load_stride is 8.) */
+                    if (bt == VT_LDOUBLE) {
+                        /* HIGH first at unmodified offset. */
+                        load(r, vtop);
+                        vdup();
+                        vtop[-1].r = r;
+                        incr_offset(load_stride);
+                    } else {
+                        /* LL path: LOW first at offset+4. */
+                        incr_offset(PTR_SIZE);
+                        load(r, vtop);
+                        vdup();
+                        vtop[-1].r = r;
+                        {
+                            int v_loc = vtop->r & VT_VALMASK;
+                            if (v_loc == VT_LOCAL || v_loc == VT_CONST) {
+                                vtop->c.i -= PTR_SIZE;
+                            } else if (orig_v_loc_pre == VT_LLOCAL) {
+                                /* Re-anchor to the original VT_LLOCAL so
+                                 * the HIGH load reloads the pointer fresh
+                                 * from the saved local. */
+                                vtop->r = orig_v_full_pre;
+                                vtop->c.i = orig_c_i_pre;
+                                vtop->r2 = orig_r2_pre;
+                            } else {
+                                incr_offset(-PTR_SIZE);
+                            }
                         }
                     }
 #else
@@ -2031,7 +2073,7 @@ ST_FUNC int gv(int rc)
                     vdup();
                     vtop[-1].r = r; /* save register value */
                     /* increment pointer to get second word */
-                    incr_offset(PTR_SIZE);
+                    incr_offset(load_stride);
 #endif
                 } else {
                     /* move registers */
@@ -3953,14 +3995,32 @@ ST_FUNC void vstore(void)
                store second register at word + 4 (or +8 for x86-64)  */
             if (USING_TWO_WORDS(dbt)) {
                 int load_type = (dbt == VT_QFLOAT) ? VT_DOUBLE : VT_PTRDIFF_T;
+#ifdef TCC_TARGET_PPC
+                /* Apple PPC32 long double = double-double: HIGH at
+                 * offset+0 in r, LOW at offset+8 in r2 (stride 8,
+                 * not the 4 used for long-long). */
+                int store_stride = (dbt == VT_LDOUBLE) ? 8 : PTR_SIZE;
+                if (dbt == VT_LDOUBLE)
+                    load_type = VT_DOUBLE;
+#endif
                 vtop[-1].type.t = load_type;
 #ifdef TCC_TARGET_PPC
-                /* Big-endian: HIGH at offset+0, LOW at offset+4. */
-                store(vtop->r2, vtop - 1);
-                vswap();
-                incr_offset(PTR_SIZE);
-                vswap();
-                store(r, vtop - 1);
+                /* Big-endian:
+                 * - LL: HIGH at offset+0 (in r2), LOW at offset+4 (in r).
+                 * - LD: HIGH at offset+0 (in r),  LOW at offset+8 (in r2). */
+                if (dbt == VT_LDOUBLE) {
+                    store(r, vtop - 1);
+                    vswap();
+                    incr_offset(store_stride);
+                    vswap();
+                    store(vtop->r2, vtop - 1);
+                } else {
+                    store(vtop->r2, vtop - 1);
+                    vswap();
+                    incr_offset(PTR_SIZE);
+                    vswap();
+                    store(r, vtop - 1);
+                }
 #else
                 store(r, vtop - 1);
                 vswap();

@@ -315,17 +315,12 @@
 #if defined TCC_TARGET_PE
      DEF(TOK___chkstk, "__chkstk")
 #endif
-#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
-     DEF(TOK___arm64_clear_cache, "__arm64_clear_cache")
-     DEF(TOK___addtf3, "__addtf3")
-     DEF(TOK___subtf3, "__subtf3")
-     DEF(TOK___multf3, "__multf3")
-     DEF(TOK___divtf3, "__divtf3")
+#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64 \
+    || defined TCC_TARGET_PPC
      DEF(TOK___extendsftf2, "__extendsftf2")
      DEF(TOK___extenddftf2, "__extenddftf2")
      DEF(TOK___trunctfsf2, "__trunctfsf2")
      DEF(TOK___trunctfdf2, "__trunctfdf2")
-     DEF(TOK___negtf2, "__negtf2")
      DEF(TOK___fixtfsi, "__fixtfsi")
      DEF(TOK___fixtfdi, "__fixtfdi")
      DEF(TOK___fixunstfsi, "__fixunstfsi")
@@ -340,6 +335,26 @@
      DEF(TOK___letf2, "__letf2")
      DEF(TOK___gttf2, "__gttf2")
      DEF(TOK___getf2, "__getf2")
+#endif
+#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_RISCV64
+     DEF(TOK___arm64_clear_cache, "__arm64_clear_cache")
+     DEF(TOK___addtf3, "__addtf3")
+     DEF(TOK___subtf3, "__subtf3")
+     DEF(TOK___multf3, "__multf3")
+     DEF(TOK___divtf3, "__divtf3")
+     DEF(TOK___negtf2, "__negtf2")
+#endif
+#if defined TCC_TARGET_PPC
+     /* Apple PPC long-double arithmetic helpers. gcc-4.0's Darwin
+      * convention names them __gcc_q{add,sub,mul,div}; they take
+      * two long doubles and return a long double (despite gcc's
+      * source declaring 4 doubles in / struct{double,double} out,
+      * the actual ABI on Darwin matches the long-double convention
+      * because Apple PPC returns LD in (f1,f2)). */
+     DEF(TOK___gcc_qadd, "__gcc_qadd")
+     DEF(TOK___gcc_qsub, "__gcc_qsub")
+     DEF(TOK___gcc_qmul, "__gcc_qmul")
+     DEF(TOK___gcc_qdiv, "__gcc_qdiv")
 #endif
 
 /* bound checking symbols */

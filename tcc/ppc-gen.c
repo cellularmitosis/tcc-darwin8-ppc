@@ -60,22 +60,29 @@
 #define RC_R3           RC_R(0)
 #define RC_R4           RC_R(1)
 #define RC_F1           RC_F(0)
+#define RC_F2           RC_F(1)
 
 /* Function-call return register classes & numbers. */
 #define RC_IRET         RC_R3           /* int return register class */
 #define RC_IRE2         RC_R4           /* second word of long long return */
 #define RC_FRET         RC_F1           /* float return register class */
+#define RC_FRE2         RC_F2           /* second FPR of long-double return */
 
 #define REG_IRET        TREG_R(0)       /* r3 */
 #define REG_IRE2        TREG_R(1)       /* r4, used for long long */
 #define REG_FRET        TREG_F(0)       /* f1 */
+#define REG_FRE2        TREG_F(1)       /* f2, used for long-double low */
 
 #define PTR_SIZE        4
 
-/* Apple PPC: long double = double (no 128-bit "double-double" yet).
- * Future: support double-double for full ABI compat. */
-#define LDOUBLE_SIZE    8
-#define LDOUBLE_ALIGN   8
+/* Apple PPC32 ABI: `long double` is 128-bit IBM double-double — a
+ * pair of doubles representing (high, low) where the value is
+ * high+low. Natural alignment is 4 bytes per Apple's ABI doc.
+ * Passed in two consecutive FPRs (f{n}, f{n+1}); returned in
+ * (f1, f2). Arithmetic is delegated to libgcc helpers
+ * (__gcc_qadd/qsub/qmul/qdiv); see tcctok.h and lib-ppc.c. */
+#define LDOUBLE_SIZE    16
+#define LDOUBLE_ALIGN   4
 
 /* Largest required alignment for any scalar; 8 covers double. */
 #define MAX_ALIGN       8
@@ -95,7 +102,15 @@
 #include <assert.h>
 
 /* Predefined macros for `cpp -dM`-style queries. The classic PPC
- * predefined macros, plus Apple's. */
+ * predefined macros, plus Apple's.
+ *
+ * The __*_MANT_DIG__ pair is critical on Apple PPC: Tiger's
+ * <sys/cdefs.h> uses `__LDBL_MANT_DIG__ > __DBL_MANT_DIG__` to
+ * decide whether to redirect printf/scanf/etc. to the
+ * `*$LDBLStub` symbols (the LDBL-128 ABI). Without these
+ * defines the cdefs check evaluates `0 > 0` and emits no
+ * redirect, so printf("%Lf", ld) routes to the legacy 8-byte
+ * LDBL printf and reads only half of our 16-byte LD value. */
 ST_DATA const char * const target_machine_defs =
     "__powerpc__\0"
     "__POWERPC__\0"
@@ -106,6 +121,14 @@ ST_DATA const char * const target_machine_defs =
 #if defined(TCC_TARGET_MACHO)
     "__APPLE__\0"
     "__MACH__\0"
+    "__DBL_MANT_DIG__ 53\0"
+    "__LDBL_MANT_DIG__ 106\0"
+    /* Set minimum-OSX-version high enough that <sys/cdefs.h>'s
+     * __DARWIN_LDBL_COMPAT macro emits direct $LDBL128 references
+     * (in libSystem on Tiger 10.4+) rather than $LDBLStub (which
+     * gcc resolves via libgcc-provided runtime-lookup stubs that
+     * we don't ship). */
+    "__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ 1040\0"
 #endif
     ;
 
@@ -1440,11 +1463,16 @@ ST_FUNC void gfunc_call(int nb_args)
      * slot, double skips two. Int args take a GPR slot (LL takes two). */
     gpr_alloc = nb_args ? tcc_malloc(nb_args * sizeof(int)) : NULL;
     fpr_alloc = nb_args ? tcc_malloc(nb_args * sizeof(int)) : NULL;
+    /* Per-arg base-type: needed in the post-pass-2 loop to find LD
+     * args (whose ABI FPR placement happens after pass 2 — see the
+     * LD branch in pass 2 for rationale). */
+    int *arg_bt = nb_args ? tcc_malloc(nb_args * sizeof(int)) : NULL;
     gpr_used = 0;
     fpr_used = 0;
     for (i = 0; i < nb_args; i++) {
         SValue *arg = &vtop[-(nb_args - 1 - i)];
         int bt = arg->type.t & VT_BTYPE;
+        arg_bt[i] = bt;
         gpr_alloc[i] = -1;
         fpr_alloc[i] = -1;
         if (bt == VT_STRUCT) {
@@ -1463,10 +1491,24 @@ ST_FUNC void gfunc_call(int nb_args)
             fpr_alloc[i] = fpr_used++;
             gpr_alloc[i] = gpr_used;  /* shadow slot start (for variadic) */
             gpr_used += 1;  /* float shadows 1 GPR slot */
-        } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+        } else if (bt == VT_DOUBLE) {
             fpr_alloc[i] = fpr_used++;
             gpr_alloc[i] = gpr_used;  /* shadow slot start (for variadic) */
             gpr_used += 2;  /* double shadows 2 GPR slots */
+        } else if (bt == VT_LDOUBLE) {
+            /* IBM double-double: 2 consecutive FPRs (HIGH+LOW),
+             * 4 GPR-shadow slots, 16 stack bytes. fpr_alloc[i] is
+             * the HIGH FPR slot; LOW is fpr_alloc[i]+1. If the pair
+             * doesn't fit in remaining FPRs (13 total), pass via
+             * stack only; signal that with fslot = -1. */
+            if (fpr_used + 1 < 13) {
+                fpr_alloc[i] = fpr_used;
+                fpr_used += 2;
+            } else {
+                fpr_alloc[i] = -1;  /* stack-only */
+            }
+            gpr_alloc[i] = gpr_used;
+            gpr_used += 4;
         } else if (bt == VT_LLONG) {
             gpr_alloc[i] = gpr_used;
             gpr_used += 2;
@@ -1565,7 +1607,43 @@ ST_FUNC void gfunc_call(int nb_args)
                     }
                 }
             }
-        } else if (bt == VT_FLOAT || bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+        } else if (bt == VT_LDOUBLE) {
+            /* IBM double-double arg: 2-FPR pair (HIGH+LOW), 4 GPR
+             * shadow slots, 16 stack bytes.
+             *
+             * Strategy: gv() materializes the LD into an arbitrary
+             * pair of FPRs (vtop->r = HIGH, vtop->r2 = LOW). We
+             * then stfd both to the outgoing parameter slot at
+             * 24+gslot*4(r1). After pass 2 (in a follow-up loop
+             * just before the call), we lfd from there into the
+             * specific ABI FPR slots f{fslot+1}/f{fslot+2}, plus
+             * populate the GPR shadow if needed.
+             *
+             * This decouples materialization-time FPR allocation
+             * (where tcc's regalloc may pick anything) from
+             * ABI-time FPR placement (which must be in specific
+             * slots). Each LD's memory image in the outgoing param
+             * area doubles as the temp. */
+            int gslot = gpr_alloc[src_index];
+            int fslot = fpr_alloc[src_index];
+            int hi_fpr, lo_fpr;
+            int hi_off = 24 + gslot * 4;
+            int lo_off = hi_off + 8;
+            (void)fslot;  /* used in post-pass loop, not here */
+            gv(RC_FLOAT);
+            hi_fpr = TREG_TO_FPR(vtop->r);
+            if (vtop->r2 < VT_CONST) {
+                lo_fpr = TREG_TO_FPR(vtop->r2);
+            } else {
+                tcc_error("ppc-gen: LD arg without r2");
+                lo_fpr = hi_fpr;
+            }
+            /* stfd HIGH, hi_off(r1) ; stfd LOW, lo_off(r1) */
+            o(0xd8010000 | (hi_fpr << 21) | (hi_off & 0xffff));
+            o(0xd8010000 | (lo_fpr << 21) | (lo_off & 0xffff));
+            vtop--;
+            continue;
+        } else if (bt == VT_FLOAT || bt == VT_DOUBLE) {
             int fslot = fpr_alloc[src_index];
             int gslot = gpr_alloc[src_index];  /* shadow slot, set in first pass */
             if (fslot >= 13) {
@@ -1778,8 +1856,45 @@ ST_FUNC void gfunc_call(int nb_args)
         }
         vtop--;
     }
+
+    /* Post-pass for LD args: each was stfd'd to its outgoing param
+     * slot during pass 2 but not yet placed in the ABI FPR pair.
+     * We deferred that until now so tcc's regalloc state during
+     * pass 2 didn't have to keep ABI-reserved FPRs sequestered.
+     * Now (just before the call), all per-arg materialization is
+     * done and we own f1..f13. */
+    for (i = 0; i < nb_args; i++) {
+        if (arg_bt[i] != VT_LDOUBLE)
+            continue;
+        int fslot = fpr_alloc[i];
+        int gslot = gpr_alloc[i];
+        int hi_off = 24 + gslot * 4;
+        int lo_off = hi_off + 8;
+        if (fslot >= 0) {
+            int hi_fpr = fslot + 1;        /* PPC reg number f1..f13 */
+            int lo_fpr = fslot + 2;
+            /* lfd hi_fpr, hi_off(r1) ; lfd lo_fpr, lo_off(r1) */
+            o(0xc8010000 | (hi_fpr << 21) | (hi_off & 0xffff));
+            o(0xc8010000 | (lo_fpr << 21) | (lo_off & 0xffff));
+        }
+        /* GPR shadow: for variadic callees, the first 32 bytes of
+         * the param area must be mirrored into r3..r10. Bytes past
+         * 32 are read directly from stack by callee. */
+        if (gslot < 8) {
+            int target = gslot + 3;
+            int word_off;
+            int w;
+            for (w = 0; w < 4 && (gslot + w) < 8; w++) {
+                word_off = hi_off + w * 4;
+                /* lwz r{target+w}, word_off(r1) */
+                o(0x80010000 | ((target + w) << 21) | (word_off & 0xffff));
+            }
+        }
+    }
+
     tcc_free(gpr_alloc);
     tcc_free(fpr_alloc);
+    tcc_free(arg_bt);
 
     /* Determine the return type before we lose access to vtop. We need
      * this so we can swap r3<->r4 after the call if the function
@@ -2200,7 +2315,7 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             gfunc_set_param(sym, param_offset, 0);
             gpr_index += 1;
             fpr_index += 1;
-        } else if (bt == VT_DOUBLE || bt == VT_LDOUBLE) {
+        } else if (bt == VT_DOUBLE) {
             if (fpr_index >= 13)
                 tcc_error("ppc-gen: parameters exceed 13 FPR slots");
             param_offset = 24 + gpr_index * 4;
@@ -2210,6 +2325,25 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             gfunc_set_param(sym, param_offset, 0);
             gpr_index += 2;
             fpr_index += 1;
+        } else if (bt == VT_LDOUBLE) {
+            /* IBM double-double: 16 bytes, 2 consecutive FPRs (high
+             * then low), 4 GPR-shadow slots. Spill BOTH FPRs to
+             * consecutive 8-byte param-area offsets so the body can
+             * lfd them as a pair. */
+            if (fpr_index + 1 >= 13)
+                tcc_error("ppc-gen: parameters exceed 13 FPR slots");
+            param_offset = 24 + gpr_index * 4;
+            /* HIGH FPR (the f{n} of the pair) spilled at off+0. */
+            ppc_fp_param_off[ppc_fp_param_count] = param_offset;
+            ppc_fp_param_is_double[ppc_fp_param_count] = 1;
+            ppc_fp_param_count++;
+            /* LOW FPR (f{n+1}) spilled at off+8. */
+            ppc_fp_param_off[ppc_fp_param_count] = param_offset + 8;
+            ppc_fp_param_is_double[ppc_fp_param_count] = 1;
+            ppc_fp_param_count++;
+            gfunc_set_param(sym, param_offset, 0);
+            gpr_index += 4;
+            fpr_index += 2;
         } else {
             int slots = (bt == VT_LLONG) ? 2 : 1;
             param_offset = 24 + gpr_index * 4;
@@ -2684,9 +2818,84 @@ ST_FUNC void gen_opi(int op)
 ST_FUNC void gen_opf(int op)
 {
     int bt = vtop[0].type.t & VT_BTYPE;
-    int dbl = (bt == VT_DOUBLE || bt == VT_LDOUBLE);
+    int dbl = (bt == VT_DOUBLE);
     int a_slot, b_slot, fa, fb, fd;
     uint32_t base, instr;
+
+    /* Long double (IBM double-double): delegate to libgcc-style
+     * helpers. Apple PPC's gcc-4.0 names the arithmetic ops
+     * __gcc_q{add,sub,mul,div}; comparisons use the standard tf2
+     * libgcc names (__eqtf2 etc.). Each takes two long doubles in
+     * (f1,f2,f3,f4) and either returns LD in (f1,f2) (for arith)
+     * or int in r3 (for compares). */
+    if (bt == VT_LDOUBLE) {
+        int func;
+        int is_cmp = (op >= TOK_ULT && op <= TOK_GT);
+        if (op == TOK_NEG) {
+            /* IBM double-double negation: negate both halves
+             * (-(hi+lo) = -hi + -lo). Materialize as 2-FPR pair
+             * and emit fneg on each. */
+            int hi_fpr, lo_fpr;
+            gv(RC_FLOAT);
+            hi_fpr = TREG_TO_FPR(vtop->r);
+            lo_fpr = (vtop->r2 < VT_CONST)
+                     ? TREG_TO_FPR(vtop->r2) : hi_fpr;
+            o(0xfc000050 | (hi_fpr << 21) | (hi_fpr << 11));   /* fneg hi,hi */
+            if (vtop->r2 < VT_CONST)
+                o(0xfc000050 | (lo_fpr << 21) | (lo_fpr << 11));
+            return;
+        }
+        if (is_cmp) {
+            /* libgcc tf2 comparison helpers return an int such that
+             * `result <op> 0` matches `a <op> b`:
+             *   __eqtf2 → 0 iff a==b (so == 0 ⟺ a==b)
+             *   __netf2 → 0 iff a==b (so != 0 ⟺ a!=b)
+             *   __lttf2 → <0 iff a<b
+             *   __letf2 → <=0 iff a<=b
+             *   __gttf2 → >0 iff a>b
+             *   __getf2 → >=0 iff a>=b */
+            switch (op) {
+            case TOK_EQ:                   func = TOK___eqtf2; break;
+            case TOK_NE:                   func = TOK___netf2; break;
+            case TOK_LT:  case TOK_ULT:    func = TOK___lttf2; break;
+            case TOK_LE:  case TOK_ULE:    func = TOK___letf2; break;
+            case TOK_GT:  case TOK_UGT:    func = TOK___gttf2; break;
+            case TOK_GE:  case TOK_UGE:    func = TOK___getf2; break;
+            default:
+                tcc_error("ppc-gen: LD compare op 0x%x", op);
+                return;
+            }
+            vpush_helper_func(func);
+            vrott(3);
+            gfunc_call(2);
+            vpushi(0);
+            vtop->type.t = VT_INT;
+            vtop->r = REG_IRET;
+            vtop->r2 = VT_CONST;
+            /* Now the int return is on top. Compare to 0 with the
+             * original op via the int compare path. */
+            vpushi(0);
+            gen_opi(op);
+            return;
+        }
+        switch (op) {
+        case '+': func = TOK___gcc_qadd; break;
+        case '-': func = TOK___gcc_qsub; break;
+        case '*': func = TOK___gcc_qmul; break;
+        case '/': func = TOK___gcc_qdiv; break;
+        default:
+            tcc_error("ppc-gen: long-double op 0x%x not yet supported", op);
+            return;
+        }
+        vpush_helper_func(func);
+        vrott(3);
+        gfunc_call(2);
+        vpushi(0);
+        vtop->type.t = VT_LDOUBLE;
+        vtop->r = REG_FRET;
+        vtop->r2 = REG_FRE2;
+        return;
+    }
 
     if (op == TOK_NEG) {
         int slot;
@@ -2863,6 +3072,20 @@ ST_FUNC void gen_cvt_itof(int t)
         /* frsp fD, fB */
         o(0xfc000018 | (fpr_dst << 21) | (fpr_dst << 11));
     }
+
+    /* For LDOUBLE destination, the high half is now in fpr_dst; we
+     * also need a low half = 0.0 in vtop->r2 so subsequent two-word
+     * codegen sees a complete LD value. The integer-to-double step
+     * above is exact for any representable int32, so the LD low half
+     * should be exactly 0. */
+    if ((t & VT_BTYPE) == VT_LDOUBLE) {
+        int lo_slot, lo_fpr;
+        static const unsigned char zero_d[8] = {0,0,0,0,0,0,0,0};
+        lo_slot = get_reg(RC_FLOAT);
+        lo_fpr = TREG_TO_FPR(lo_slot);
+        ppc_load_fp_const(lo_fpr, 1, zero_d);
+        vtop->r2 = lo_slot;
+    }
 }
 
 /* Convert FP to integer. Sequence:
@@ -2923,11 +3146,20 @@ ST_FUNC void gen_cvt_ftoi(int t)
     o(0x80000000 | (gpr_dst << 21) | (1 << 16) | 28);
 }
 
-/* Convert between float and double precision.
+/* Convert between float / double / long-double precision.
+ *
+ * LDOUBLE on Apple PPC is IBM double-double = pair of doubles.
+ * Conversion summary:
  *   double -> float:  frsp fD, fB
- *   float  -> double: no-op (float in FPR is already representable
- *                     as double; PPC FPRs are always 64-bit and
- *                     internally hold the converted value). */
+ *   float  -> double: no-op (PPC FPRs hold doubles natively)
+ *   LDOUBLE -> double: drop the low half (vtop->r2), keep vtop->r
+ *   LDOUBLE -> float:  same drop, then frsp on the high half
+ *   double -> LDOUBLE: keep vtop->r as high, set r2 = freshly-loaded 0
+ *   float  -> LDOUBLE: float -> double (no-op), then double -> LDOUBLE
+ *
+ * The lossy LD->D narrowing (truncating low half) is what gcc-4.0
+ * does too; the compensated path would cost cycles for typical
+ * downstream uses where the low half is already negligible. */
 ST_FUNC void gen_cvt_ftof(int t)
 {
     int src_bt = vtop->type.t & VT_BTYPE;
@@ -2937,10 +3169,32 @@ ST_FUNC void gen_cvt_ftof(int t)
     if (src_bt == dst_bt)
         return;
 
-    /* Treat LDOUBLE as DOUBLE (Apple PPC + our LDOUBLE_SIZE=8). */
-    if (src_bt == VT_LDOUBLE) src_bt = VT_DOUBLE;
-    if (dst_bt == VT_LDOUBLE) dst_bt = VT_DOUBLE;
-    if (src_bt == dst_bt) {
+    /* LDOUBLE -> {float, double}: discard low half. */
+    if (src_bt == VT_LDOUBLE && dst_bt != VT_LDOUBLE) {
+        gv(RC_FLOAT);
+        fpr = TREG_TO_FPR(vtop->r);
+        /* r2 holds the low half — drop it from the value stack so
+         * downstream code treats the SValue as a single-FPR value. */
+        vtop->r2 = VT_CONST;
+        if (dst_bt == VT_FLOAT) {
+            /* frsp on the high half. */
+            o(0xfc000018 | (fpr << 21) | (fpr << 11));
+        }
+        vtop->type.t = t;
+        return;
+    }
+
+    /* {float, double} -> LDOUBLE: keep value as high, low = 0. */
+    if (dst_bt == VT_LDOUBLE && src_bt != VT_LDOUBLE) {
+        int lo_slot, lo_fpr;
+        static const unsigned char zero_d[8] = {0,0,0,0,0,0,0,0};
+        gv(RC_FLOAT);
+        /* Float -> LDOUBLE goes via Double first; PPC FPRs hold the
+         * widened value already so no instruction needed. */
+        lo_slot = get_reg(RC_FLOAT);
+        lo_fpr = TREG_TO_FPR(lo_slot);
+        ppc_load_fp_const(lo_fpr, 1, zero_d);
+        vtop->r2 = lo_slot;
         vtop->type.t = t;
         return;
     }
