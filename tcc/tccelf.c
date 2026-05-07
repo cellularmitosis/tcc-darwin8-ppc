@@ -3766,6 +3766,114 @@ static int read_ar_header(int fd, int offset, ArchiveHeader *hdr)
     return len;
 }
 
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+/* Load only the objects which resolve undefined symbols, using the
+ * BSD `__.SYMDEF [SORTED]` archive symbol table format used by Mach-O
+ * `.a` files on Tiger.
+ *
+ * Layout (all multi-byte integers big-endian on PPC):
+ *   uint32_t ranlib_size            -- size of ranlib_t[] in bytes
+ *   ranlib_t entries[ranlib_size/8]
+ *       { uint32_t ran_strx;        -- offset into strtab
+ *         uint32_t ran_off; }       -- file offset of member header
+ *   uint32_t strtab_size
+ *   char strtab[strtab_size]        -- NUL-separated names
+ *
+ * `ran_off` is the absolute file offset of the member's archive
+ * header (the `#1/N <ar fields>` line, not the content). We seek
+ * to that offset, read the header, advance past the BSD long-name
+ * field if present, then call macho_load_object_file. */
+static int tcc_load_alacarte_macho(TCCState *s1, int fd, int size)
+{
+    int i, bound, nsyms, sym_index, len, ret = -1;
+    uint8_t *data;
+    uint32_t ranlib_size, strtab_size;
+    const uint8_t *ranlib_entries;
+    const char *strtab;
+    ElfW(Sym) *sym;
+    ArchiveHeader hdr;
+
+    data = tcc_malloc(size);
+    if (full_read(fd, data, size) != size)
+        goto invalid;
+
+    if (size < 8)
+        goto invalid;
+    ranlib_size = (uint32_t)get_be(data, 4);
+    if (ranlib_size % 8 != 0 || 8 + ranlib_size > (uint32_t)size)
+        goto invalid;
+    nsyms = ranlib_size / 8;
+    ranlib_entries = data + 4;
+    strtab_size = (uint32_t)get_be(ranlib_entries + ranlib_size, 4);
+    if (8 + ranlib_size + strtab_size > (uint32_t)size)
+        goto invalid;
+    strtab = (const char *)(ranlib_entries + ranlib_size + 4);
+
+    do {
+        bound = 0;
+        for (i = 0; i < nsyms; i++) {
+            uint32_t ran_strx, ran_off;
+            unsigned long content_off;
+            const char *name;
+            ran_strx = (uint32_t)get_be(ranlib_entries + i*8, 4);
+            ran_off  = (uint32_t)get_be(ranlib_entries + i*8 + 4, 4);
+            if (ran_strx >= strtab_size)
+                continue;
+            name = strtab + ran_strx;
+            /* Note: tcc's Mach-O frontend keeps the leading underscore
+             * in its symtab when compiling C (because leading_underscore
+             * is on), so we look up by the BSD-archive name verbatim
+             * (e.g. `_lib_a`). Don't strip; that would shift us out of
+             * sync with the freshly-compiled translation unit's symbols. */
+            sym_index = find_elf_sym(symtab_section, name);
+            if (!sym_index)
+                continue;
+            sym = &((ElfW(Sym) *)symtab_section->data)[sym_index];
+            if (sym->st_shndx != SHN_UNDEF)
+                continue;
+            len = read_ar_header(fd, ran_off, &hdr);
+            if (len <= 0 || memcmp(hdr.ar_fmag, ARFMAG, 2)) {
+        invalid:
+                tcc_error_noabort("invalid Mach-O archive symdef");
+                goto the_end;
+            }
+            content_off = (unsigned long)ran_off + (unsigned long)len;
+            /* BSD long-name header: read the embedded name into the
+             * ar_name field for verbose-mode reporting and skip past
+             * it so macho_load_object_file sees the actual member
+             * content. */
+            if (!strncmp(hdr.ar_name, "#1/", 3)) {
+                int nlen = atoi(hdr.ar_name + 3);
+                if (nlen > 0) {
+                    char namebuf[256];
+                    int rd = nlen < (int)sizeof(namebuf)
+                           ? nlen : (int)sizeof(namebuf) - 1;
+                    lseek(fd, (long)content_off, SEEK_SET);
+                    if (full_read(fd, namebuf, rd) == rd) {
+                        int ll = rd;
+                        while (ll > 0 && namebuf[ll-1] == 0) ll--;
+                        if (ll >= (int)sizeof(hdr.ar_name))
+                            ll = sizeof(hdr.ar_name) - 1;
+                        memcpy(hdr.ar_name, namebuf, ll);
+                        hdr.ar_name[ll] = 0;
+                    }
+                    content_off += (unsigned long)nlen;
+                }
+            }
+            if (s1->verbose == 2)
+                printf("   -> %s (for %s)\n", hdr.ar_name, name);
+            if (macho_load_object_file(s1, fd, content_off) < 0)
+                goto the_end;
+            ++bound;
+        }
+    } while (bound);
+    ret = 0;
+the_end:
+    tcc_free(data);
+    return ret;
+}
+#endif
+
 /* load only the objects which resolve undefined symbols */
 static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
 {
@@ -3804,6 +3912,25 @@ static int tcc_load_alacarte(TCCState *s1, int fd, int size, int entrysize)
             off += len;
             if (s1->verbose == 2)
                 printf("   -> %s\n", hdr.ar_name);
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+            {
+                /* The archive may contain Mach-O .o members (e.g. tcc -ar
+                 * builds libtcc1.a as Mach-O .o's wrapped in a SysV-style
+                 * `/`-symdef archive). Sniff the magic to pick the right
+                 * loader. */
+                ElfW(Ehdr) ehdr;
+                int t;
+                lseek(fd, off, SEEK_SET);
+                t = tcc_object_type(fd, &ehdr);
+                lseek(fd, off, SEEK_SET);
+                if (t == AFF_BINTYPE_MACHO_REL) {
+                    if (macho_load_object_file(s1, fd, off) < 0)
+                        goto the_end;
+                    ++bound;
+                    continue;
+                }
+            }
+#endif
             if (tcc_load_object_file(s1, fd, off) < 0)
                 goto the_end;
             ++bound;
@@ -3828,13 +3955,11 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
     /* full_read(fd, magic, sizeof(magic)); */
     file_offset = sizeof ARMAG - 1;
 
-#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
     /* Mach-O archives use BSD format with `#1/N` names and the symdef
-     * is `__.SYMDEF` / `__.SYMDEF SORTED`. We don't yet implement
-     * selective alacarte loading via that symdef; fall back to
-     * whole-archive on these. */
-    alacarte = 0;
-#endif
+     * is `__.SYMDEF` / `__.SYMDEF SORTED`. The first member is the
+     * symdef; the alacarte path below reads the BSD long-name to
+     * detect it and routes to tcc_load_alacarte_macho when the
+     * caller wants selective loading. */
 
     for(;;) {
         unsigned long content_off;
@@ -3877,6 +4002,21 @@ ST_FUNC int tcc_load_archive(TCCState *s1, int fd, int alacarte)
                 return tcc_load_alacarte(s1, fd, size, 4);
             if (!strcmp(hdr.ar_name, "/SYM64/"))
                 return tcc_load_alacarte(s1, fd, size, 8);
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+            /* Mach-O BSD-style symdef. The ar header was `#1/N` and
+             * the long-name read above set hdr.ar_name to either
+             * `__.SYMDEF` or `__.SYMDEF SORTED` -- but the latter is
+             * 16 chars and the ar_name field is only 15 chars + NUL,
+             * so it ends up truncated to `__.SYMDEF SORTE`. Match by
+             * 9-char prefix to catch both forms regardless of
+             * truncation. Position fd at the symdef content (after
+             * the name bytes). */
+            if (!strncmp(hdr.ar_name, "__.SYMDEF", 9)) {
+                int symdef_size = size - (int)(content_off - file_offset);
+                lseek(fd, content_off, SEEK_SET);
+                return tcc_load_alacarte_macho(s1, fd, symdef_size);
+            }
+#endif
         } else {
             int t;
             lseek(fd, content_off, SEEK_SET);
