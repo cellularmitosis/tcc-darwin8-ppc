@@ -129,6 +129,15 @@ ST_DATA const char * const target_machine_defs =
      * gcc resolves via libgcc-provided runtime-lookup stubs that
      * we don't ship). */
     "__ENVIRONMENT_MAC_OS_X_VERSION_MIN_REQUIRED__ 1040\0"
+    /* And the math.h analog: <architecture/ppc/math.h>'s
+     * __LIBMLDBL_COMPAT macro emits $LDBL128 only when
+     * __APPLE_CC__ && __LONG_DOUBLE_128__ are defined. Without
+     * the redirect, math functions (ldexpl, expl, sinl, etc.) go
+     * to the legacy 8-byte-LD libm entry which silently treats
+     * the LD as double. Tiger libm has the LDBL128 entries
+     * bundled in libSystem. (__APPLE_CC__ is already defined to
+     * 1 in tccdefs.h for TargetConditionals.h compatibility.) */
+    "__LONG_DOUBLE_128__ 1\0"
 #endif
     ;
 
