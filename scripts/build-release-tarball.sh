@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.30-g3}"
+VERSION="${VERSION:-v0.2.31-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -447,6 +447,31 @@ What's new (cumulative since v0.1.0-g3):
     members through macho_load_object_file — this lets
     tcc -ar-built archives (libtcc1.a) keep loading via the
     SysV path while gaining alacarte semantics.
+
+  * v0.2.31: const-data-with-pointers slide fix. Pre-v0.2.31,
+    \`static const struct {const char *name; ...} tbl[]\`
+    landed in __TEXT,__const (read-only at runtime); dyld
+    couldn't write the slide fixups to the embedded \`name\`
+    pointers, so under slide they stayed unslid and any
+    dereference crashed. v0.2.29's locrel emission only
+    covered __data / __mod_init_func / __mod_term_func; the
+    pointers in __const went unslid.
+
+    Fix: when output_type is TCC_OUTPUT_DLL, tccgen routes
+    initialized const data to data_section instead of
+    rodata_section. The whole table now lives in __DATA,__data
+    which IS writable and IS slid by dyld; the existing locrel
+    walker picks up the embedded pointers. Trade-off: lose the
+    RO protection for const data in dylibs, but ensure
+    correctness under slide.
+
+    Practical impact: libtcc.c compiled as -shared produces a
+    dylib whose \`tcc_options[]\`-style tables now slide
+    correctly. Verified by dlopening libtcc2.dylib with a
+    MAP_FIXED blocker over 0x40000000 and exercising
+    \`tcc_compile_string\` + \`tcc_relocate\` + \`tcc_get_symbol\`
+    end-to-end — pre-v0.2.31 SIGBUS'd in tcc_compile_string;
+    post-v0.2.31 the JIT'd function runs and returns 42.
 
 Install:
   sudo mkdir -p $PREFIX
