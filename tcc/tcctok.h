@@ -355,6 +355,12 @@
      DEF(TOK___gcc_qsub, "__gcc_qsub")
      DEF(TOK___gcc_qmul, "__gcc_qmul")
      DEF(TOK___gcc_qdiv, "__gcc_qdiv")
+     /* PPC has hardware fused multiply-add (fmadd / fmadds) that
+      * compute a*b+c in a single rounding step. Expose as
+      * intrinsics so tcc emits the instruction directly instead
+      * of an external library call. */
+     DEF(TOK_builtin_fma,  "__builtin_fma")
+     DEF(TOK_builtin_fmaf, "__builtin_fmaf")
 #endif
 
 /* bound checking symbols */

@@ -6007,6 +6007,52 @@ ST_FUNC void unary(void)
 	parse_builtin_params(0, "ee");
 	vpop();
         break;
+#ifdef TCC_TARGET_PPC
+    case TOK_builtin_fma:
+    case TOK_builtin_fmaf: {
+        /* PPC has hardware fmadd/fmadds (a*b+c in one rounding step).
+         * Emit it inline rather than fall back to libm's fma() which
+         * Tiger libm has but is a runtime function call. The
+         * implementation lives in ppc-gen.c. */
+        extern void gen_ppc_fmadd(int, int, int, int, int);
+        int dbl = (tok == TOK_builtin_fma);
+        int a_slot, b_slot, c_slot, dst_slot;
+        parse_builtin_params(0, "eee");
+        type.t = dbl ? VT_DOUBLE : VT_FLOAT;
+        type.ref = NULL;
+        /* Cast all three args to the target precision. After
+         * parse_builtin_params vstack is [a, b, c] (vtop=c). */
+        gen_cast(&type);
+        vrott(3); gen_cast(&type);
+        vrott(3); gen_cast(&type);
+        /* Materialize each into an FPR. tcc's regalloc avoids
+         * vstack-occupied registers, so successive gv()s land in
+         * distinct FPRs without us having to track them. After
+         * the casts above, vstack is [b, c, a] (vtop=a, a-cast).
+         * gv-then-vrott rotates the just-loaded value down so the
+         * next gv targets a fresh entry. End state: [c, a, b]. */
+        gv(RC_FLOAT);              /* a into FPR; vstack [b, c, a] */
+        vrott(3);                  /* [a, b, c], vtop=c */
+        gv(RC_FLOAT);              /* c into FPR */
+        vrott(3);                  /* [c, a, b], vtop=b */
+        gv(RC_FLOAT);              /* b into FPR */
+        /* Now vstack [c, a, b]: vtop[0]=b, vtop[-1]=a, vtop[-2]=c. */
+        b_slot = vtop[0].r & VT_VALMASK;
+        a_slot = vtop[-1].r & VT_VALMASK;
+        c_slot = vtop[-2].r & VT_VALMASK;
+        /* Allocate the destination FPR. With three vstack entries
+         * holding the operand FPRs, get_reg(RC_FLOAT) picks a
+         * fourth distinct one. */
+        dst_slot = get_reg(RC_FLOAT);
+        gen_ppc_fmadd(dst_slot, a_slot, b_slot, c_slot, dbl);
+        /* Drop the three argument SValues, push the result. */
+        vtop -= 3;
+        vpushi(0);
+        vtop->type.t = type.t;
+        vtop->r = dst_slot;
+        break;
+    }
+#endif
     case TOK_builtin_types_compatible_p:
 	parse_builtin_params(0, "tt");
 	vtop[-1].type.t &= ~(VT_CONSTANT | VT_VOLATILE);

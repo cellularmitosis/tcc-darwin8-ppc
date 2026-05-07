@@ -3220,6 +3220,35 @@ ST_FUNC void gen_cvt_ftof(int t)
     vtop->type.t = t;
 }
 
+/* PPC fused multiply-add: emit fmadd / fmadds for __builtin_fma /
+ * __builtin_fmaf. Args are tcc TREG slots; dbl selects double vs
+ * single precision.
+ *
+ * PPC encoding: `fmadd FRT, FRA, FRC, FRB` computes FRT = FRA*FRC + FRB.
+ * Note FRC is the 5-bit field at bits 6..10, NOT the usual FRB
+ * field at 11..15 — fmul* and fmadd* swap the second-operand field
+ * because they need 4 register operands.
+ *
+ * `__builtin_fma(a, b, c) = a*b + c` maps to:
+ *   FRT = dst   FRA = a   FRC = b   FRB = c
+ *
+ * Double encoding: opcode 63 (0xfc), XO 29, Rc=0  -> 0xfc00003a
+ * Single encoding: opcode 59 (0xec), XO 29, Rc=0  -> 0xec00003a */
+/* No ST_FUNC: the extern declaration in tccgen.c's TOK_builtin_fma
+ * dispatcher (one TU under ONE_SOURCE) would otherwise warn about
+ * "static storage ignored for redefinition." Plain external linkage
+ * is fine since this lives in libtcc.a's link unit. */
+void gen_ppc_fmadd(int dst_slot, int a_slot, int b_slot,
+                   int c_slot, int dbl)
+{
+    int frt = TREG_TO_FPR(dst_slot);
+    int fra = TREG_TO_FPR(a_slot);
+    int frc = TREG_TO_FPR(b_slot);   /* FRC = b */
+    int frb = TREG_TO_FPR(c_slot);   /* FRB = c */
+    uint32_t base = dbl ? 0xfc00003a : 0xec00003a;
+    o(base | (frt << 21) | (fra << 16) | (frb << 11) | (frc << 6));
+}
+
 ST_FUNC void gen_cvt_csti(int t)
 {
     tcc_error("ppc-gen: gen_cvt_csti stub");
