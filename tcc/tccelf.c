@@ -1493,12 +1493,15 @@ redo:
                 } else if (sym->st_shndx == SHN_ABS) {
                     if (sym->st_value == 0) /* from tcc_add_btstub() */
                         continue;
-#ifndef TCC_TARGET_ARM
+#if !defined TCC_TARGET_ARM && !defined TCC_TARGET_PPC
                     if (PTR_SIZE != 8)
                         continue;
 #endif
-                    /* from tcc_add_symbol(): on 64 bit platforms these
-                       need to go through .got */
+                    /* from tcc_add_symbol(): on 64-bit platforms (and
+                       on PPC32, where the JIT region can land >32MB
+                       from libtcc1.a's helpers, so a direct REL24 to
+                       an absolute symbol fails) these need to go
+                       through .got/.plt. */
                 } else
                     continue;
             }
