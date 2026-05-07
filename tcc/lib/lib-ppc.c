@@ -222,55 +222,180 @@ float __builtin_inff(void) {
  * register-level ABI matches the long-double convention because
  * Apple PPC32 returns LD in (f1, f2).
  *
- * We provide LOSSY implementations: take the high half of each
- * operand, do plain double arithmetic, return as a long double
- * with low half zero. This drops extended precision but is
- * link-and-ABI compatible. abitest-cc's ret_longdouble (single LD
- * input/output) and arg_align (small integer values cast to LD)
- * both pass with this lossy form because the values fit in a
- * double's 53-bit mantissa. Real precision-preserving math is
- * deferred. */
-long double __gcc_qadd(long double x, long double y) {
-    return (long double)((double)x + (double)y);
-}
-long double __gcc_qsub(long double x, long double y) {
-    return (long double)((double)x - (double)y);
-}
-long double __gcc_qmul(long double x, long double y) {
-    return (long double)((double)x * (double)y);
-}
-long double __gcc_qdiv(long double x, long double y) {
-    return (long double)((double)x / (double)y);
+ * Implementation: precision-correct (not lossy) IBM double-double
+ * arithmetic via Knuth Two-Sum + Veltkamp split + Dekker product.
+ * No fma dependency (PPC has fmadd as an instruction but tcc-on-PPC
+ * doesn't emit it; calling libm's fma() would create a libm
+ * dependency we'd rather avoid). The Veltkamp split costs a few
+ * extra multiplies per two_prod but is otherwise comparable.
+ *
+ * References: Hida/Li/Bailey "Library for Double-Double and
+ * Quad-Double Arithmetic" (2007); Dekker "A Floating-Point
+ * Technique for Extending the Available Precision" (1971);
+ * Knuth TAOCP vol 2 §4.2.2 (TwoSum). */
+
+/* Memory layout of an Apple PPC `long double` is (high double at
+ * offset 0, low double at offset 8). Cast through a union to
+ * extract / pack the pair. We avoid type-punning via raw pointer
+ * cast because tcc's optimizer is a non-issue but a union read is
+ * still cleaner. */
+typedef union {
+    struct { double hi, lo; } p;
+    long double ld;
+} dd_union;
+
+/* TwoSum(a, b): exact representation of a+b as (s, e) where
+ * s = round(a+b) and s+e = a+b exactly (in infinite precision).
+ * Knuth's algorithm — works for any a, b. */
+static void dd_two_sum(double a, double b, double *s, double *e)
+{
+    double bb;
+    *s = a + b;
+    bb = *s - a;
+    *e = (a - (*s - bb)) + (b - bb);
 }
 
-/* Long-double comparison helpers (libgcc tf2 family). Lossy form:
- * compare just the high doubles. The low halves hold whatever the
- * quad arith left there; for tcc-emitted LD values the low half
- * is exact-zero so the high-only compare matches IEEE on values
- * that fit in a double. Real precision-preserving tf2 would
- * compute (xhi+xlo) - (yhi+ylo) sign and handle subnormal cases. */
-int __eqtf2(long double x, long double y) {
-    return ((double)x == (double)y) ? 0 : 1;
+/* QuickTwoSum(a, b): like TwoSum but requires |a| >= |b|. Saves
+ * three flops; used to renormalize after we've already computed
+ * the high-magnitude sum. */
+static void dd_quick_two_sum(double a, double b, double *s, double *e)
+{
+    *s = a + b;
+    *e = b - (*s - a);
 }
-int __netf2(long double x, long double y) {
-    return ((double)x == (double)y) ? 0 : 1;
+
+/* Veltkamp split: divides a 53-bit double into two halves
+ * (hi: top ~27 bits, lo: bottom ~26 bits) such that hi + lo == a
+ * exactly. The split constant 2^27 + 1 is exact. */
+static void dd_split(double a, double *hi, double *lo)
+{
+    /* 2^27 + 1 = 134217729 */
+    double t = a * 134217729.0;
+    double t1 = t - a;
+    *hi = t - t1;
+    *lo = a - *hi;
 }
-int __lttf2(long double x, long double y) {
-    double a = (double)x, b = (double)y;
-    return (a < b) ? -1 : (a > b) ? 1 : 0;
+
+/* TwoProd(a, b): exact representation of a*b as (p, e) where
+ * p = round(a*b) and p+e = a*b exactly. Dekker's algorithm using
+ * Veltkamp split. */
+static void dd_two_prod(double a, double b, double *p, double *e)
+{
+    double ahi, alo, bhi, blo;
+    *p = a * b;
+    dd_split(a, &ahi, &alo);
+    dd_split(b, &bhi, &blo);
+    *e = ((ahi * bhi - *p) + ahi * blo + alo * bhi) + alo * blo;
 }
-int __letf2(long double x, long double y) {
-    double a = (double)x, b = (double)y;
-    return (a < b) ? -1 : (a > b) ? 1 : 0;
+
+/* DD addition. Sloppy variant from Hida/Li/Bailey — the IEEE-754
+ * faithfully-rounded result for ordinary inputs; can deviate by
+ * <= 2 ulp in the final low half for nasty cases (acceptable for
+ * abitest and matches gcc-4.0's libgcc for the cases we tested). */
+long double __gcc_qadd(long double x, long double y)
+{
+    dd_union ux, uy, ur;
+    double s, e;
+    ux.ld = x;
+    uy.ld = y;
+    dd_two_sum(ux.p.hi, uy.p.hi, &s, &e);
+    e += (ux.p.lo + uy.p.lo);
+    dd_quick_two_sum(s, e, &ur.p.hi, &ur.p.lo);
+    return ur.ld;
 }
-int __gttf2(long double x, long double y) {
-    double a = (double)x, b = (double)y;
-    return (a < b) ? -1 : (a > b) ? 1 : 0;
+
+long double __gcc_qsub(long double x, long double y)
+{
+    dd_union ux, uy, ur;
+    double s, e;
+    ux.ld = x;
+    uy.ld = y;
+    dd_two_sum(ux.p.hi, -uy.p.hi, &s, &e);
+    e += (ux.p.lo - uy.p.lo);
+    dd_quick_two_sum(s, e, &ur.p.hi, &ur.p.lo);
+    return ur.ld;
 }
-int __getf2(long double x, long double y) {
-    double a = (double)x, b = (double)y;
-    return (a < b) ? -1 : (a > b) ? 1 : 0;
+
+long double __gcc_qmul(long double x, long double y)
+{
+    dd_union ux, uy, ur;
+    double p, e;
+    ux.ld = x;
+    uy.ld = y;
+    dd_two_prod(ux.p.hi, uy.p.hi, &p, &e);
+    /* Cross terms: hi*lo + lo*hi. Lo*lo is below ~2^-104, dropped. */
+    e += ux.p.hi * uy.p.lo + ux.p.lo * uy.p.hi;
+    dd_quick_two_sum(p, e, &ur.p.hi, &ur.p.lo);
+    return ur.ld;
 }
+
+/* DD division via long division: q1 = xhi/yhi (rounded), then
+ * compute the residual (x - q1*y) and refine with q2 = (residual
+ * hi)/yhi. Two iterations are enough for ~104 bits of precision. */
+long double __gcc_qdiv(long double x, long double y)
+{
+    dd_union ux, uy, ur, urem;
+    double q1, q2, p, e, rhi, rlo;
+    long double q1_dd, q2b;
+
+    ux.ld = x;
+    uy.ld = y;
+
+    q1 = ux.p.hi / uy.p.hi;
+
+    /* Compute q1 * y as a dd value. q1 is one double, y is dd. */
+    dd_two_prod(q1, uy.p.hi, &p, &e);
+    e += q1 * uy.p.lo;
+    dd_quick_two_sum(p, e, &rhi, &rlo);
+    /* Hand-pack into a dd_union for re-use as a long double. */
+    {
+        dd_union tmp;
+        tmp.p.hi = rhi;
+        tmp.p.lo = rlo;
+        q1_dd = tmp.ld;
+    }
+
+    /* x - q1*y, again as dd. */
+    q2b = __gcc_qsub(x, q1_dd);
+    urem.ld = q2b;
+    q2 = urem.p.hi / uy.p.hi;
+
+    /* Combine: result = q1 + q2 (precise sum). */
+    dd_quick_two_sum(q1, q2, &ur.p.hi, &ur.p.lo);
+    return ur.ld;
+}
+
+/* Long-double comparison helpers (libgcc tf2 family). For canonical
+ * dd values (hi is the rounded-double of the true value, lo is the
+ * remainder satisfying |lo| <= ulp(hi)/2), comparison is "compare
+ * highs; on tie, compare lows." Our arithmetic functions all
+ * produce canonical dd outputs via dd_quick_two_sum, so this
+ * comparison is exact for any value that flowed through them. */
+int __eqtf2(long double x, long double y)
+{
+    dd_union ux, uy;
+    ux.ld = x; uy.ld = y;
+    return (ux.p.hi == uy.p.hi && ux.p.lo == uy.p.lo) ? 0 : 1;
+}
+int __netf2(long double x, long double y)
+{
+    dd_union ux, uy;
+    ux.ld = x; uy.ld = y;
+    return (ux.p.hi == uy.p.hi && ux.p.lo == uy.p.lo) ? 0 : 1;
+}
+int __lttf2(long double x, long double y)
+{
+    dd_union ux, uy;
+    ux.ld = x; uy.ld = y;
+    if (ux.p.hi != uy.p.hi)
+        return ux.p.hi < uy.p.hi ? -1 : 1;
+    if (ux.p.lo != uy.p.lo)
+        return ux.p.lo < uy.p.lo ? -1 : 1;
+    return 0;
+}
+int __letf2(long double x, long double y) { return __lttf2(x, y); }
+int __gttf2(long double x, long double y) { return __lttf2(x, y); }
+int __getf2(long double x, long double y) { return __lttf2(x, y); }
 
 /* 64-bit comparison helpers also from libgcc. Same situation as
  * __gcc_q*: gcc-4.0-built objects in libtcc.a reference these and
