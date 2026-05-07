@@ -8564,7 +8564,29 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
             while ((tp->t & (VT_BTYPE|VT_ARRAY)) == (VT_PTR|VT_ARRAY))
                 tp = &tp->ref->type;
             if (tp->t & VT_CONSTANT) {
+#if defined(TCC_TARGET_MACHO) && defined(TCC_TARGET_PPC)
+                /* Mach-O dylibs: const data with pointer initializers
+                 * (e.g. `static const struct {const char *name;...} t[]`)
+                 * lands in __TEXT,__const which is read-only at
+                 * runtime. dyld can't write the slide fixups to its
+                 * pointer slots, so under slide the embedded pointers
+                 * stay unslid and dereferences crash. Route initialized
+                 * const data to the regular data_section in DLL mode
+                 * so it lands in __DATA,__data (RW, slid by dyld) and
+                 * picks up the locrel entries our writer emits.
+                 *
+                 * Plain const scalars without initializers, and const
+                 * data without pointer types, would be safe in __const
+                 * — but we don't know yet (init_putv runs later), so
+                 * route conservatively. The cost is some lost RO
+                 * protection and slightly larger __DATA. */
+                if (tcc_state->output_type == TCC_OUTPUT_DLL && has_init)
+		    sec = data_section;
+                else
+		    sec = rodata_section;
+#else
 		sec = rodata_section;
+#endif
             } else if (has_init) {
 		sec = data_section;
                 /*if (g_debug & 4)
