@@ -437,6 +437,21 @@ static void ppc_load_fp_const(int fpr, int is_double, const void *bytes)
      * section at our literal's offset. */
     sym = get_sym_ref(is_double ? &char_pointer_type : &char_pointer_type,
                       rodata_section, off, size);
+    /* In DLL mode, the literal's absolute VA isn't slide-invariant.
+     * Use the PIC sectdiff path: addis/lwz against r30 (anchor),
+     * which the macho writer rewrites into addis/addi giving the
+     * literal's runtime VA in r12. Then lfs/lfd from there.
+     *
+     * For OBJ/EXE/MEMORY, keep the direct lis/lfs idiom — simpler
+     * and avoids the PIC base setup overhead. */
+    if (ppc_need_pic_for_sym(sym)) {
+        ppc_emit_pic_addr_load(12, sym);
+        if (is_double)
+            o(0xc8000000 | (fpr << 21) | (12 << 16));   /* lfd fD, 0(r12) */
+        else
+            o(0xc0000000 | (fpr << 21) | (12 << 16));   /* lfs fD, 0(r12) */
+        return;
+    }
     /* lis r12, ha16(literal_addr) */
     greloc(cur_text_section, sym, ind, R_PPC_ADDR16_HA);
     o(0x3c000000 | (12 << 21));  /* lis r12, 0 */
@@ -1966,15 +1981,19 @@ static int ppc_need_pic_for_sym(Sym *sym)
 {
 #if defined(TCC_TARGET_MACHO)
     ElfSym *esym;
+    int output_type;
     if (!sym)
         return 0;
     /* PIC indirection is needed for any output type that goes through
      * dyld (OBJ for the linker to fix up, EXE so we can resolve
-     * external data refs at link time via __nl_symbol_ptr slots).
-     * -run / TCC_OUTPUT_MEMORY uses direct addresses since the JIT
-     * resolves symbols in-process. */
-    if (tcc_state->output_type != TCC_OUTPUT_OBJ
-        && tcc_state->output_type != TCC_OUTPUT_EXE)
+     * external data refs at link time via __nl_symbol_ptr slots, DLL
+     * for both extern data refs AND local data refs since dylibs can
+     * slide). -run / TCC_OUTPUT_MEMORY uses direct addresses since
+     * the JIT resolves symbols in-process. */
+    output_type = tcc_state->output_type;
+    if (output_type != TCC_OUTPUT_OBJ
+        && output_type != TCC_OUTPUT_EXE
+        && output_type != TCC_OUTPUT_DLL)
         return 0;
     /* Ensure sym has been pushed to the elf symtab so we can inspect
      * its st_shndx. greloc() does this on demand, but we want to
@@ -1984,10 +2003,28 @@ static int ppc_need_pic_for_sym(Sym *sym)
     esym = elfsym(sym);
     if (!esym)
         return 0;
-    /* Only externals. Defined-locally symbols (rodata FP literals,
-     * static globals, locally-defined functions) keep the direct path. */
-    if (esym->st_shndx != SHN_UNDEF)
-        return 0;
+    /* For OBJ/EXE: only externals need PIC (their address comes from
+     * dyld via __nl_symbol_ptr). Locally-defined symbols use direct
+     * lis/addi against the link-time-resolved absolute VA.
+     *
+     * For DLL: also PIC-ify locally-defined symbols. The dylib's
+     * preferred vmaddr is high (0x40000000) so dyld usually loads at
+     * that address, but if it has to slide, absolute lis/addi values
+     * are wrong. PIC sectdiff (sym - anchor) is invariant under
+     * slide. The macho writer's "PIC reloc against locally-defined
+     * sym" fallback in exe_resolve_section_relocs computes the
+     * sectdiff and rewrites the LO16 lwz to addi. */
+    if (esym->st_shndx != SHN_UNDEF) {
+        if (output_type != TCC_OUTPUT_DLL)
+            return 0;
+        /* In DLL mode, also PIC-ify local refs. Skip SHN_ABS
+         * symbols (e.g. __mh_dylib_header) — those are constant VAs
+         * supplied by dyld at the image base; lis/addi against the
+         * resolved value works. */
+        if (esym->st_shndx == SHN_ABS)
+            return 0;
+        return 1;
+    }
     /* COMMON symbols (uninitialized globals without an explicit
      * extern) are tentative-defined and should be emitted by us;
      * they're still in our object so direct ADDR16 works.
@@ -2103,7 +2140,8 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     ppc_func_pic_base_anchor = 0;
 #if defined(TCC_TARGET_MACHO)
     if (tcc_state->output_type == TCC_OUTPUT_OBJ
-        || tcc_state->output_type == TCC_OUTPUT_EXE)
+        || tcc_state->output_type == TCC_OUTPUT_EXE
+        || tcc_state->output_type == TCC_OUTPUT_DLL)
         ppc_emit_pic_base_setup();
 #endif
 

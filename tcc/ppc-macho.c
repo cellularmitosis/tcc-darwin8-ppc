@@ -1337,6 +1337,123 @@ static uint32_t exe_sym_addr(TCCState *s1, int symidx,
     return 0;
 }
 
+/* --------------------------------------------------------------------
+ * Local-relocation entries for dylib slide
+ * --------------------------------------------------------------------
+ * When dyld loads a dylib at a non-preferred vmaddr, every absolute
+ * reference inside the dylib that points at another in-image VA needs
+ * to be patched by the slide amount. dyld walks LC_DYSYMTAB.locrel for
+ * this; each entry is a struct relocation_info (8 bytes) saying "at
+ * file location X there's a 4-byte word whose value is an in-image VA;
+ * add the slide to it".
+ *
+ * For tcc's dylib output, the only places where unslid in-image VAs
+ * end up baked into data are static-initializer pointers like
+ *   int *p = &arr[3];
+ *   void (*fns[])(void) = { foo, bar };
+ * which produce R_PPC_ADDR32 relocs against locally-defined symbols
+ * in __data, __mod_init_func, __mod_term_func. Code sequences that
+ * compute a local-symbol address (lis/addi pairs) are handled
+ * separately by ppc_need_pic_for_sym() routing them through PIC.
+ *
+ * exe_count_locrels_one() and exe_emit_locrels_one() walk one ELF
+ * section's reloc table and count / emit corresponding Mach-O VANILLA
+ * local relocs. Called per data-section by macho_output_dylib(). */
+static int exe_count_locrels_one(TCCState *s1, Section *s)
+{
+    int nrel, k, count;
+    Section *sr;
+    if (!s) return 0;
+    sr = s->reloc;
+    if (!sr) return 0;
+    nrel = sr->data_offset / sizeof(ElfW_Rel);
+    count = 0;
+    for (k = 0; k < nrel; k++) {
+        ElfW_Rel *rel = (ElfW_Rel *)sr->data + k;
+        int type = ELFW(R_TYPE)(rel->r_info);
+        int symidx = ELFW(R_SYM)(rel->r_info);
+        ElfW(Sym) *esym;
+        if (symidx <= 0) continue;
+        if (type != R_PPC_ADDR32) continue;
+        esym = (ElfW(Sym) *)s1->symtab->data + symidx;
+        /* Only locally-defined targets need a slide-time fixup.
+         * SHN_UNDEF: extern symbol -- handled by stubs / __nl_symbol_ptr.
+         * SHN_ABS:   constant VA (e.g. __mh_dylib_header) -- nothing
+         *            to slide; the value isn't a runtime VA. */
+        if (esym->st_shndx == SHN_UNDEF) continue;
+        if (esym->st_shndx == SHN_ABS) continue;
+        count++;
+    }
+    return count;
+}
+
+/* Find the Mach-O section ordinal (1-based, in load command order)
+ * for the section that holds the given ELF symbol. Used as
+ * relocation_info.r_symbolnum for VANILLA local relocs. dyld doesn't
+ * actually consult r_symbolnum for slide processing (it just adds
+ * the slide unconditionally), but otool / ld -r expect a meaningful
+ * value, and Apple's static linker uses it to merge images. */
+static int exe_section_ordinal_for_sym(struct exe_sect *sects, int nsec,
+                                        ElfW(Sym) *esym)
+{
+    int j;
+    if (esym->st_shndx == SHN_UNDEF || esym->st_shndx == SHN_ABS)
+        return 0;
+    for (j = 0; j < nsec; j++) {
+        if (sects[j].elf && sects[j].elf->sh_num == esym->st_shndx)
+            return j + 1;
+    }
+    return 0;
+}
+
+/* Emit Mach-O struct relocation_info entries (8 bytes each, BE) into
+ * `out` for every R_PPC_ADDR32 in `s`'s reloc table that targets a
+ * locally-defined symbol. Returns the count emitted.
+ *
+ * Encoding for VANILLA local reloc (r_extern=0, r_pcrel=0,
+ * r_length=2, r_type=0):
+ *   bytes 0..3: r_address (4-byte BE) = location_va - image_base
+ *   bytes 4..7: bitfield  (4-byte BE) = (r_symbolnum << 8) | 0x40
+ *
+ * `image_base` is the vmaddr of the first segment (__TEXT). dyld
+ * uses (image_base_runtime + r_address) to find the location to
+ * patch. */
+static int exe_emit_locrels_one(TCCState *s1, Section *s,
+                                 uint32_t sect_vmaddr,
+                                 struct exe_sect *sects, int nsec,
+                                 uint32_t image_base, obuf *out)
+{
+    int nrel, k, count;
+    Section *sr;
+    if (!s) return 0;
+    sr = s->reloc;
+    if (!sr) return 0;
+    nrel = sr->data_offset / sizeof(ElfW_Rel);
+    count = 0;
+    for (k = 0; k < nrel; k++) {
+        ElfW_Rel *rel = (ElfW_Rel *)sr->data + k;
+        int type = ELFW(R_TYPE)(rel->r_info);
+        int symidx = ELFW(R_SYM)(rel->r_info);
+        ElfW(Sym) *esym;
+        int ord;
+        uint32_t r_address;
+        uint32_t bitfield;
+        if (symidx <= 0) continue;
+        if (type != R_PPC_ADDR32) continue;
+        esym = (ElfW(Sym) *)s1->symtab->data + symidx;
+        if (esym->st_shndx == SHN_UNDEF) continue;
+        if (esym->st_shndx == SHN_ABS) continue;
+        ord = exe_section_ordinal_for_sym(sects, nsec, esym);
+        if (ord == 0) continue;
+        r_address = sect_vmaddr + (uint32_t)rel->r_offset - image_base;
+        bitfield = ((uint32_t)ord << 8) | 0x40u;  /* length=2, rest 0 */
+        put32be(out, r_address);
+        put32be(out, bitfield);
+        count++;
+    }
+    return count;
+}
+
 /* Bundled context for exe_resolve_section_relocs(); keeps the param
  * count to 5 so it stays within tcc's PPC backend's 8-GPR-slot
  * function call limit. */
@@ -2851,18 +2968,23 @@ cleanup:
  *   * __mh_dylib_header (not __mh_execute_header) at __TEXT base
  *   * PIC stubs (32 bytes / 8 instructions) instead of absolute stubs
  *
- * Default __TEXT vmaddr is high (0x40000000) so dyld can usually load
- * us at the preferred address. Not yet emitting local relocations, so
- * if dyld slides the dylib, absolute references in __data with
- * pointer initializers will be wrong. Function calls go through PIC
- * stubs and __nl_symbol_ptr (filled by dyld), so they are unaffected.
+ * Default __TEXT vmaddr is high (0x40000000) so dyld usually loads
+ * at the preferred address. When dyld has to slide:
+ *   * Function calls survive (PIC stubs, slide-invariant displacements)
+ *   * Code refs to local data survive (since v0.2.29, ppc_need_pic_for_sym
+ *     returns 1 in DLL mode for local syms too — emits PIC sectdiff)
+ *   * Static-initializer pointers (`int *p = &arr[3]`, fn ptr in
+ *     init_array, etc.) are patched via locrel entries in
+ *     LC_DYSYMTAB — emitted below for every R_PPC_ADDR32 to a
+ *     locally-defined symbol in __data / __mod_init_func /
+ *     __mod_term_func.
  * ================================================================== */
 #define DYLIB_TEXT_VMADDR_BASE  0x40000000
 
 static int macho_output_dylib(TCCState *s1, const char *filename)
 {
     obuf out;
-    obuf nlist, strtab, indirect;
+    obuf nlist, strtab, indirect, locrel;
     Section *text = NULL, *rodata = NULL, *data = NULL, *bss = NULL;
     Section *init_array = NULL;
     Section *fini_array = NULL;
@@ -2906,6 +3028,8 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     uint32_t data_seg_filesize = 0, data_seg_vmsize = 0;
     uint32_t linkedit_vmaddr, linkedit_file_off, linkedit_filesize;
     uint32_t indirect_file_off = 0, sym_file_off, str_file_off;
+    uint32_t locrel_file_off = 0;
+    int      n_locrel = 0;
 
     /* LC sizes. */
     uint32_t text_seg_cmd_size, data_seg_cmd_size = 0;
@@ -2940,6 +3064,7 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     memset(&nlist,    0, sizeof(nlist));
     memset(&strtab,   0, sizeof(strtab));
     memset(&indirect, 0, sizeof(indirect));
+    memset(&locrel,   0, sizeof(locrel));
     memset(sects,     0, sizeof(sects));
 
     /* ---- Find sections. ---- */
@@ -3264,6 +3389,27 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
             goto cleanup;
     }
 
+    /* ---- Build local-relocation table for slide-time fixups. ----
+     * Walk every data-segment section's reloc list looking for
+     * R_PPC_ADDR32 against locally-defined symbols. Each becomes one
+     * Mach-O relocation_info entry that dyld processes when the
+     * dylib loads at a non-preferred vmaddr. */
+    if (data)
+        n_locrel += exe_emit_locrels_one(s1, data,
+                                          sects[sect_idx_data].vmaddr,
+                                          sects, nsec, text_seg_vmaddr,
+                                          &locrel);
+    if (init_array)
+        n_locrel += exe_emit_locrels_one(s1, init_array,
+                                          sects[sect_idx_init_array].vmaddr,
+                                          sects, nsec, text_seg_vmaddr,
+                                          &locrel);
+    if (fini_array)
+        n_locrel += exe_emit_locrels_one(s1, fini_array,
+                                          sects[sect_idx_fini_array].vmaddr,
+                                          sects, nsec, text_seg_vmaddr,
+                                          &locrel);
+
     /* ---- Generate PIC stub bytes. Each stub is 8 instructions:
      *
      *   mflr    r0                 ; save caller's LR
@@ -3483,6 +3629,12 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     /* ---- Compute __LINKEDIT layout. ---- */
     {
         uint32_t loff = linkedit_file_off;
+        /* Local relocations come first (Apple convention), then
+         * external (we have none), then indirect, then nlist+strtab. */
+        if (n_locrel > 0) {
+            locrel_file_off = loff;
+            loff += (uint32_t)locrel.len;
+        }
         if (nstubs > 0 || n_nlptrs > 0) {
             indirect_file_off = loff;
             loff += (uint32_t)indirect.len;
@@ -3762,8 +3914,8 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     put32be(&out, nstubs + n_nlptrs);              /* nindirectsyms */
     put32be(&out, 0);                              /* extreloff */
     put32be(&out, 0);                              /* nextrel */
-    put32be(&out, 0);                              /* locreloff */
-    put32be(&out, 0);                              /* nlocrel */
+    put32be(&out, n_locrel ? locrel_file_off : 0); /* locreloff */
+    put32be(&out, n_locrel);                       /* nlocrel */
 
     /* ---- Pad to text data offset, then write text. ---- */
     while (out.len < hdr_and_lc_size)
@@ -3815,6 +3967,11 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
 
     while (out.len < linkedit_file_off)
         put8(&out, 0);
+    if (n_locrel > 0) {
+        while (out.len < locrel_file_off)
+            put8(&out, 0);
+        obuf_put(&out, locrel.buf, locrel.len);
+    }
     if (nstubs > 0) {
         while (out.len < indirect_file_off)
             put8(&out, 0);
@@ -3841,8 +3998,8 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     fclose(fp); fp = NULL;
     chmod(filename, 0755);
     if (s1->verbose)
-        printf("<- %s (dylib %u bytes, %d stubs, %d nl_ptrs)\n",
-               filename, (unsigned)out.len, nstubs, n_nlptrs);
+        printf("<- %s (dylib %u bytes, %d stubs, %d nl_ptrs, %d locrels)\n",
+               filename, (unsigned)out.len, nstubs, n_nlptrs, n_locrel);
     ret = 0;
 
 cleanup:
@@ -3851,6 +4008,7 @@ cleanup:
     tcc_free(nlist.buf);
     tcc_free(strtab.buf);
     tcc_free(indirect.buf);
+    tcc_free(locrel.buf);
     tcc_free(text_data);
     tcc_free(rodata_data);
     tcc_free(data_data);
