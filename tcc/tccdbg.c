@@ -87,7 +87,7 @@ static const struct {
 #define	DWARF_LINE_RANGE			14
 #define	DWARF_OPCODE_BASE			13
 
-#if defined TCC_TARGET_ARM64
+#if defined TCC_TARGET_ARM64 || defined TCC_TARGET_PPC
 #define	DWARF_MIN_INSTR_LEN			4
 #elif defined TCC_TARGET_ARM
 #define	DWARF_MIN_INSTR_LEN			2
@@ -547,14 +547,46 @@ static void put_stabn(TCCState *s1, int type, int other, int desc, int value)
 }
 
 /* ------------------------------------------------------------------------- */
+/* DWARF integers follow target endianness (per DWARF spec). All other
+ * tcc backends are little-endian, so the bare write*le calls below
+ * worked. PPC32 is big-endian and needs BE writes; route through
+ * dwarf_target_*. The tail patches in this file (length-prefix
+ * back-fills, reloc-target-offset writes) also use these. */
+#if defined TCC_TARGET_PPC
+#  define dwarf_target_write16(p,v) write16be((p),(v))
+#  define dwarf_target_write32(p,v) write32be((p),(v))
+#  define dwarf_target_write64(p,v) write64be((p),(v))
+#  define dwarf_target_read32(p)    read32be(p)
+/* Provide BE writers if missing in tcc.h. */
+static inline void write16be(unsigned char *p, uint16_t v) {
+    p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v;
+}
+static inline void write32be(unsigned char *p, uint32_t v) {
+    p[0] = (uint8_t)(v >> 24); p[1] = (uint8_t)(v >> 16);
+    p[2] = (uint8_t)(v >> 8);  p[3] = (uint8_t)v;
+}
+static inline void write64be(unsigned char *p, uint64_t v) {
+    write32be(p, (uint32_t)(v >> 32));
+    write32be(p + 4, (uint32_t)v);
+}
+static inline uint32_t read32be(unsigned char *p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8)  | (uint32_t)p[3];
+}
+#else
+#  define dwarf_target_write16(p,v) write16le((p),(v))
+#  define dwarf_target_write32(p,v) write32le((p),(v))
+#  define dwarf_target_write64(p,v) write64le((p),(v))
+#  define dwarf_target_read32(p)    read32le(p)
+#endif
 #define	dwarf_data1(s,data) \
 	(*(uint8_t*)section_ptr_add((s), 1) = (data))
 #define	dwarf_data2(s,data) \
-	write16le(section_ptr_add((s), 2), (data))
+	dwarf_target_write16(section_ptr_add((s), 2), (data))
 #define	dwarf_data4(s,data) \
-	write32le(section_ptr_add((s), 4), (data))
+	dwarf_target_write32(section_ptr_add((s), 4), (data))
 #define	dwarf_data8(s,data) \
-	write64le(section_ptr_add((s), 8), (data))
+	dwarf_target_write64(section_ptr_add((s), 8), (data))
 
 static int dwarf_get_section_sym(Section *s)
 {
@@ -870,10 +902,26 @@ ST_FUNC void tcc_eh_frame_start(TCCState *s1)
     dwarf_data1(eh_frame_section, DW_CFA_def_cfa);
     dwarf_uleb128(eh_frame_section, 2); // r2 (sp)
     dwarf_uleb128(eh_frame_section, 0); // ofs 0
+#elif defined TCC_TARGET_PPC
+    /* PPC32 ABI: instructions are 4 bytes (CAF=4); stack grows down
+     * by 4-byte words (DAF=-4); the DWARF "return address column" is
+     * 65, the conventional pseudo-register for LR. At function entry
+     * CFA = r1 + 0 (DWARF column 1 is the SP register on PPC32). The
+     * prolog frame moves are described per-FDE in tcc_debug_frame_end
+     * below — for our minimal scope only the CIE initial state is
+     * filled in and per-prolog CFI is left to lldb's heuristics. */
+    dwarf_uleb128(eh_frame_section, 4); // code_alignment_factor
+    dwarf_sleb128(eh_frame_section, -4); // data_alignment_factor
+    dwarf_uleb128(eh_frame_section, 65); // return address column (LR)
+    dwarf_uleb128(eh_frame_section, 1); // Augmentation len
+    dwarf_data1(eh_frame_section, FDE_ENCODING);
+    dwarf_data1(eh_frame_section, DW_CFA_def_cfa);
+    dwarf_uleb128(eh_frame_section, 1); // r1 (sp)
+    dwarf_uleb128(eh_frame_section, 0); // ofs 0
 #endif
     while ((eh_frame_section->data_offset - s1->eh_start) & 3)
 	dwarf_data1(eh_frame_section, DW_CFA_nop);
-    write32le(eh_frame_section->data + s1->eh_start, // length
+    dwarf_target_write32(eh_frame_section->data + s1->eh_start, // length
 	      eh_frame_section->data_offset - s1->eh_start - 4);
 }
 
@@ -899,6 +947,8 @@ static void tcc_debug_frame_end(TCCState *s1, int size)
     dwarf_reloc(eh_frame_section, eh_section_sym, R_AARCH64_PREL32);
 #elif defined TCC_TARGET_RISCV64
     dwarf_reloc(eh_frame_section, eh_section_sym, R_RISCV_32_PCREL);
+#elif defined TCC_TARGET_PPC
+    dwarf_reloc(eh_frame_section, eh_section_sym, R_PPC_REL32);
 #endif
     dwarf_data4(eh_frame_section, func_ind); // PC Begin
     dwarf_data4(eh_frame_section, size); // PC Range
@@ -962,6 +1012,14 @@ static void tcc_debug_frame_end(TCCState *s1, int size)
     dwarf_data1(eh_frame_section, DW_CFA_restore + 29); // x29 (fp)
     dwarf_data1(eh_frame_section, DW_CFA_def_cfa_offset);
     dwarf_uleb128(eh_frame_section, 0);
+#elif defined TCC_TARGET_PPC
+    /* Minimal CFI for PPC32: emit no prolog frame moves; the CIE's
+     * initial state (CFA = r1+0) applies for the whole function.
+     * That's technically inaccurate after the prolog's stwu, but
+     * lldb's PPC32 unwinder falls back to back-chain following when
+     * CFI is incomplete — and our prolog DOES preserve a valid back
+     * chain (`stwu r1, -fs(r1)`). Adequate for source-level debugging
+     * via .debug_line, which is the focus of this DWARF cut. */
 #elif defined TCC_TARGET_RISCV64
     dwarf_data1(eh_frame_section, DW_CFA_advance_loc + 4);
     dwarf_data1(eh_frame_section, DW_CFA_def_cfa_offset);
@@ -993,7 +1051,7 @@ static void tcc_debug_frame_end(TCCState *s1, int size)
 #endif
     while ((eh_frame_section->data_offset - fde_start) & 3)
 	dwarf_data1(eh_frame_section, DW_CFA_nop);
-    write32le(eh_frame_section->data + fde_start, // length
+    dwarf_target_write32(eh_frame_section->data + fde_start, // length
 	      eh_frame_section->data_offset - fde_start - 4);
 }
 
@@ -1311,8 +1369,8 @@ ST_FUNC void tcc_debug_end(TCCState *s1)
 	fix_debug_forw_hash(s1, 1, 0);
 	dwarf_data1(dwarf_info_section, 0);
 	ptr = dwarf_info_section->data + dwarf_info.start;
-	write32le(ptr, dwarf_info_section->data_offset - dwarf_info.start - 4);
-	write32le(ptr + 25 + (s1->dwarf >= 5) + PTR_SIZE, text_size);
+	dwarf_target_write32(ptr, dwarf_info_section->data_offset - dwarf_info.start - 4);
+	dwarf_target_write32(ptr + 25 + (s1->dwarf >= 5) + PTR_SIZE, text_size);
 
 	/* dwarf_aranges */
 	start_aranges = dwarf_aranges_section->data_offset;
@@ -1340,7 +1398,7 @@ ST_FUNC void tcc_debug_end(TCCState *s1)
 	dwarf_data8(dwarf_aranges_section, 0); // End list
 #endif
 	ptr = dwarf_aranges_section->data + start_aranges;
-	write32le(ptr, dwarf_aranges_section->data_offset - start_aranges - 4);
+	dwarf_target_write32(ptr, dwarf_aranges_section->data_offset - start_aranges - 4);
 
 	/* dwarf_line */
 	if (s1->dwarf >= 5) {
@@ -1394,14 +1452,14 @@ ST_FUNC void tcc_debug_end(TCCState *s1)
 	dwarf_uleb128_op(s1, 1); // extended size
 	dwarf_line_op(s1, DW_LNE_end_sequence);
 	i = (s1->dwarf >= 5) * 2;
-	write32le(&dwarf_line_section->data[dwarf_line.start + 6 + i],
+	dwarf_target_write32(&dwarf_line_section->data[dwarf_line.start + 6 + i],
 		  dwarf_line_section->data_offset - dwarf_line.start - (10 + i));
 	section_ptr_add(dwarf_line_section, 3);
 	dwarf_reloc(dwarf_line_section, section_sym, R_DATA_PTR);
 	ptr = section_ptr_add(dwarf_line_section, dwarf_line.line_size - 3);
 	memmove(ptr - 3, dwarf_line.line_data, dwarf_line.line_size);
 	tcc_free(dwarf_line.line_data);
-	write32le(dwarf_line_section->data + dwarf_line.start,
+	dwarf_target_write32(dwarf_line_section->data + dwarf_line.start,
 		  dwarf_line_section->data_offset - dwarf_line.start - 4);
     }
     else
@@ -1583,7 +1641,7 @@ static void fix_debug_forw_hash(TCCState *s1, int global, int start)
             dwarf_uleb128(dwarf_info_section, dwarf_line.cur_file);
             dwarf_uleb128(dwarf_info_section, file->line_num);
 	    for (j = 0; j < hash[i].n_debug_type; j++)
-		write32le(dwarf_info_section->data +
+		dwarf_target_write32(dwarf_info_section->data +
 			  hash[i].debug_type[j],
 			  pos - dwarf_info.start);
 	    tcc_free (hash[i].debug_type);
@@ -1716,7 +1774,7 @@ ST_FUNC void tcc_debug_fix_forw(TCCState *s1, CType *t)
 
 		    debug_type = tcc_get_dwarf_info(s1, &sym);
 		    for (j = 0; j < (*forw_hash)[i].n_debug_type; j++)
-		        write32le(dwarf_info_section->data +
+		        dwarf_target_write32(dwarf_info_section->data +
 			          (*forw_hash)[i].debug_type[j],
 			          debug_type - dwarf_info.start);
 		    tcc_free((*forw_hash)[i].debug_type);
@@ -1986,7 +2044,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    }
 	    if (t->next) {
 	        dwarf_data1(dwarf_info_section, 0);
-	        write32le(dwarf_info_section->data + pos_sib,
+	        dwarf_target_write32(dwarf_info_section->data + pos_sib,
 		          dwarf_info_section->data_offset - dwarf_info.start);
 	    }
 	    e = t;
@@ -1997,7 +2055,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 		    continue;
 		type = tcc_get_dwarf_info(s1, e);
 		tcc_debug_check_forw(s1, e, pos_type[i]);
-		write32le(dwarf_info_section->data + pos_type[i++],
+		dwarf_target_write32(dwarf_info_section->data + pos_type[i++],
 			  type - dwarf_info.start);
 	    }
 	    tcc_free(pos_type);
@@ -2039,7 +2097,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	            dwarf_sleb128(dwarf_info_section, e->enum_val);
             }
 	    dwarf_data1(dwarf_info_section, 0);
-	    write32le(dwarf_info_section->data + pos_sib,
+	    dwarf_target_write32(dwarf_info_section->data + pos_sib,
 		      dwarf_info_section->data_offset - dwarf_info.start);
 	}
     }
@@ -2077,7 +2135,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    dwarf_data1(dwarf_info_section, PTR_SIZE);
 	    if (last_pos != -1) {
 		tcc_debug_check_forw(s1, e, last_pos);
-		write32le(dwarf_info_section->data + last_pos,
+		dwarf_target_write32(dwarf_info_section->data + last_pos,
 			  i - dwarf_info.start);
 	    }
 	    last_pos = dwarf_info_section->data_offset;
@@ -2099,7 +2157,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    dwarf_data1(dwarf_info_section, DWARF_ABBREV_ARRAY_TYPE);
 	    if (last_pos != -1) {
 		tcc_debug_check_forw(s1, e, last_pos);
-		write32le(dwarf_info_section->data + last_pos,
+		dwarf_target_write32(dwarf_info_section->data + last_pos,
 			  i - dwarf_info.start);
 	    }
 	    last_pos = dwarf_info_section->data_offset;
@@ -2118,7 +2176,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 		t = s;
 	    }
 	    dwarf_data1(dwarf_info_section, 0);
-	    write32le(dwarf_info_section->data + sib_pos,
+	    dwarf_target_write32(dwarf_info_section->data + sib_pos,
 		      dwarf_info_section->data_offset - dwarf_info.start);
 	}
         else if (type == VT_FUNC) {
@@ -2134,7 +2192,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 					  : DWARF_ABBREV_SUBROUTINE_EMPTY_TYPE);
 	    if (last_pos != -1) {
 		tcc_debug_check_forw(s1, e, last_pos);
-		write32le(dwarf_info_section->data + last_pos,
+		dwarf_target_write32(dwarf_info_section->data + last_pos,
 			  i - dwarf_info.start);
 	    }
 	    last_pos = dwarf_info_section->data_offset;
@@ -2161,7 +2219,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 	    }
 	    if (t->type.ref->next) {
 	        dwarf_data1(dwarf_info_section, 0);
-	        write32le(dwarf_info_section->data + sib_pos,
+	        dwarf_target_write32(dwarf_info_section->data + sib_pos,
 		          dwarf_info_section->data_offset - dwarf_info.start);
 	    }
 	    f = t->type.ref;
@@ -2170,7 +2228,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
 		f = f->next;
 		type = tcc_get_dwarf_info(s1, f);
 		tcc_debug_check_forw(s1, f, pos_type[i]);
-	        write32le(dwarf_info_section->data + pos_type[i++],
+	        dwarf_target_write32(dwarf_info_section->data + pos_type[i++],
                           type - dwarf_info.start);
 	    }
 	    tcc_free(pos_type);
@@ -2178,7 +2236,7 @@ static int tcc_get_dwarf_info(TCCState *s1, Sym *s)
         else {
 	    if (last_pos != -1) {
 		tcc_debug_check_forw(s1, e, last_pos);
-		write32le(dwarf_info_section->data + last_pos,
+		dwarf_target_write32(dwarf_info_section->data + last_pos,
 			  debug_type - dwarf_info.start);
 	    }
             break;
@@ -2412,7 +2470,7 @@ ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
 #endif
         tcc_debug_finish (s1, debug_info_root);
 	dwarf_data1(dwarf_info_section, 0);
-        write32le(dwarf_info_section->data + func_sib,
+        dwarf_target_write32(dwarf_info_section->data + func_sib,
                   dwarf_info_section->data_offset - dwarf_info.start);
     }
     else

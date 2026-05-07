@@ -111,6 +111,7 @@ ST_FUNC void ppc_pic_pairs_reset(void);
 /* Section attributes (top 24 bits of section.flags). */
 #define S_ATTR_PURE_INSTRUCTIONS    0x80000000
 #define S_ATTR_SOME_INSTRUCTIONS    0x00000400
+#define S_ATTR_DEBUG                0x02000000  /* DWARF debug info */
 
 /* Reference flags (low 4 bits of n_desc). */
 #define REFERENCE_FLAG_UNDEFINED_NON_LAZY   0
@@ -368,6 +369,44 @@ static int classify_section(Section *s, const char **segname,
                             const char **sectname, uint32_t *flags)
 {
     const char *n = s->name;
+
+    /* DWARF debug sections (created by tccdbg.c when -g is in use)
+     * are NOT SHF_ALLOC — they don't get loaded at runtime — but
+     * they do need to be emitted in the .o / exe so debuggers can
+     * read them. Map each `.debug_<x>` to `__DWARF,__debug_<x>`
+     * with the S_ATTR_DEBUG flag. Mach-O's sectname field is
+     * exactly 16 bytes (NUL-padded if shorter); names longer than
+     * that are truncated — that's standard Apple practice. The
+     * known set is finite, so hardcode the mapping rather than
+     * stamp out the strings dynamically. */
+    {
+        static const struct { const char *elf, *macho; } dwarf_map[] = {
+            {".debug_info",         "__debug_info"},
+            {".debug_abbrev",       "__debug_abbrev"},
+            {".debug_line",         "__debug_line"},
+            {".debug_aranges",      "__debug_aranges"},
+            {".debug_loc",          "__debug_loc"},
+            {".debug_loclists",     "__debug_loclists"},
+            {".debug_macinfo",      "__debug_macinfo"},
+            {".debug_pubnames",     "__debug_pubnames"},
+            {".debug_pubtypes",     "__debug_pubtypes"},
+            {".debug_ranges",       "__debug_ranges"},
+            {".debug_rnglists",     "__debug_rnglists"},
+            {".debug_str_offsets",  "__debug_str_offs"},   /* truncated */
+            {".debug_addr",         "__debug_addr"},
+            {".debug_str",          "__debug_str"},
+            {".debug_line_str",     "__debug_line_str"},
+        };
+        size_t k;
+        for (k = 0; k < sizeof(dwarf_map)/sizeof(dwarf_map[0]); k++) {
+            if (!strcmp(n, dwarf_map[k].elf)) {
+                *segname  = "__DWARF";
+                *sectname = dwarf_map[k].macho;
+                *flags    = S_ATTR_DEBUG;
+                return 1;
+            }
+        }
+    }
 
     /* Skip non-allocated and bookkeeping sections. */
     if (!(s->sh_flags & SHF_ALLOC))
@@ -4211,10 +4250,21 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
         if ((smap[i].flags & 0xff) == S_ZEROFILL)
             continue;
         cur_off = (cur_off + (a - 1)) & ~(a - 1);
-        vmaddr = (vmaddr + (a - 1)) & ~(a - 1);
         smap[i].offset = cur_off;
-        smap[i].addr = vmaddr;
         cur_off += smap[i].size;
+        /* DWARF sections (S_ATTR_DEBUG) live in the file but have
+         * no runtime VA — leave addr = 0 so cross-section R_PPC_ADDR32
+         * relocations within the .o resolve to "0 + addend = addend"
+         * (the linker reapplies on top with the real section base
+         * once dsymutil/ld place it). Without this, dwarfdump on
+         * the raw .o reads the relocated-against-pre-link-VA values,
+         * which look like garbage offsets. */
+        if (smap[i].flags & S_ATTR_DEBUG) {
+            smap[i].addr = 0;
+            continue;
+        }
+        vmaddr = (vmaddr + (a - 1)) & ~(a - 1);
+        smap[i].addr = vmaddr;
         vmaddr += smap[i].size;
     }
     total_filesize = cur_off - hdr_and_lc_size;

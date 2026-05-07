@@ -291,6 +291,13 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
         ppc_link_write32be(ptr, (uint32_t)val);
         return;
 
+    case R_PPC_REL32:
+        /* 32-bit PC-relative absolute. Used by DWARF eh_frame FDEs
+         * to point at the function start: stored value =
+         * (target - here). Big-endian 32-bit signed displacement. */
+        ppc_link_write32be(ptr, (uint32_t)(val - addr));
+        return;
+
     case R_PPC_HA16_PIC:
     case R_PPC_LO16_PIC:
         /* Synthetic PIC relocations are only emitted for Mach-O .o
