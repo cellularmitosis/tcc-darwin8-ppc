@@ -128,3 +128,62 @@ Solution: two separate test programs. One dlopens normally;
 the other reserves 0x40000000 first, then dlopens. They link
 to the same dylib but exercise it at different load addresses.
 This is what `demos/v0.2.29-dylib-slide.sh` does.
+
+## Mach-O archive symdef formats — two variants in the wild
+
+Tiger PPC archives come in two flavors:
+
+* **BSD format** (Apple's stock `ar` and `libtool -static`): first
+  member is named via `#1/N` long-name, with the actual name in
+  the first N bytes of content. Common names are `__.SYMDEF` and
+  `__.SYMDEF SORTED` (16 chars; gets truncated in `hdr.ar_name[16]`
+  to "__.SYMDEF SORTE" — match by 9-char prefix to handle both
+  forms regardless of truncation). Symdef layout (BE on PPC):
+  ```
+  uint32_t ranlib_size                 -- bytes used by entries
+  ranlib_t entries[ranlib_size/8]
+      { uint32_t ran_strx;             -- offset into strtab
+        uint32_t ran_off; }            -- file offset of member header
+  uint32_t strtab_size
+  char strtab[strtab_size]             -- NUL-separated names
+  ```
+  `ran_off` is the absolute file offset of the member's archive
+  header (the `#1/N <ar fields>\n` line, not the content). Names
+  in the strtab carry a leading `_` (Mach-O convention).
+
+* **SysV format** (used by tcc -ar's output, including
+  `libtcc1.a`): first member is named `/`. Symdef layout:
+  ```
+  uint32_t nsyms                       -- count of entries
+  uint32_t offsets[nsyms]              -- file offsets, parallel to strs
+  char strs[]                          -- NUL-separated names, in order
+  ```
+  No ran_strx — `i`-th entry's name is the `i`-th NUL-separated
+  string in the trailing block.
+
+The two formats coexist on the same Tiger box. tcc -ar produces
+SysV-style. Apple's tools produce BSD-style. We handle both:
+
+* `tcc_load_alacarte_macho` for BSD `__.SYMDEF` / `__.SYMDEF SORTED`.
+* `tcc_load_alacarte` (existing, for COFF/SysV) was extended to
+  sniff each loaded member's magic and route Mach-O `.o` files
+  through `macho_load_object_file`.
+
+## Symbol naming convention during tcc compilation vs .o loading
+
+When tcc compiles a C source file (`leading_underscore` on for
+Mach-O), the symbol table stores names WITH leading underscore
+(`_lib_a`, `_main`, etc.). When tcc loads an existing Mach-O `.o`
+file (`macho_load_object_file`), the nlist walker STRIPS the
+leading `_` before registering. So:
+
+* Look up symbols from a BSD archive symdef (which carries `_`):
+  use the name verbatim (`find_elf_sym(s, "_lib_a")`).
+* Look up symbols from inside an already-loaded `.o` after the
+  underscore-strip: use the bare name.
+
+These two lookups appear in the same alacarte loader path, so
+mixing them up is a real failure mode (and our v0.2.30 first
+draft did exactly that). The strtab → tcc-symtab lookup must
+match the convention used at COMPILATION time, not the .o-loader
+post-strip convention.
