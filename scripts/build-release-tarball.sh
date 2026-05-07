@@ -22,7 +22,7 @@ ROOT=$(pwd)
 OUTDIR="$ROOT/artifacts"
 mkdir -p "$OUTDIR"
 
-VERSION="${VERSION:-v0.2.29-g3}"
+VERSION="${VERSION:-v0.2.30-g3}"
 PKGNAME=tcc-darwin8-ppc-$VERSION
 TARNAME=$PKGNAME.tar.gz
 PREFIX=/opt/$PKGNAME
@@ -426,6 +426,27 @@ What's new (cumulative since v0.1.0-g3):
     tbl[]\` placed in __const can't be slid (read-only at
     runtime; dyld can't write). Such tables continue to
     work when no slide happens.
+
+  * v0.2.30: Mach-O archive alacarte loader. Pre-v0.2.30, tcc
+    force-loaded every member of every \`.a\` archive
+    (whole-archive). For an archive with a hundred members of
+    which only three are referenced, the resulting binary
+    pulled in 97 redundant \`.o\` files, and any one of those
+    unrelated members crashing during load could fail an
+    otherwise-fine link.
+
+    v0.2.30 parses the archive's BSD \`__.SYMDEF SORTED\` (or
+    \`__.SYMDEF\`) symbol table, mapping each defined symbol to
+    its member's file offset, and pulls in only the members
+    needed to resolve currently-undefined symbols. Iterates
+    until no new members get added (so transitive dependencies
+    work).
+
+    Also extends the existing SysV-style \`/\` symdef path to
+    sniff each loaded member's magic and route Mach-O \`.o\`
+    members through macho_load_object_file — this lets
+    tcc -ar-built archives (libtcc1.a) keep loading via the
+    SysV path while gaining alacarte semantics.
 
 Install:
   sudo mkdir -p $PREFIX
