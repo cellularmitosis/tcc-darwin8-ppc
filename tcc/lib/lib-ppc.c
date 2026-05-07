@@ -277,15 +277,16 @@ static void dd_split(double a, double *hi, double *lo)
 }
 
 /* TwoProd(a, b): exact representation of a*b as (p, e) where
- * p = round(a*b) and p+e = a*b exactly. Dekker's algorithm using
- * Veltkamp split. */
+ * p = round(a*b) and p+e = a*b exactly. With PPC's hardware fmadd
+ * (exposed via tcc's __builtin_fma since v0.2.36), the algorithm
+ * collapses to two flops:
+ *   p = a*b           (rounded)
+ *   e = fma(a, b, -p) (= a*b - p, exact thanks to single rounding step)
+ * vs. the ~10-flop Veltkamp+Dekker fallback for arches without fma. */
 static void dd_two_prod(double a, double b, double *p, double *e)
 {
-    double ahi, alo, bhi, blo;
     *p = a * b;
-    dd_split(a, &ahi, &alo);
-    dd_split(b, &bhi, &blo);
-    *e = ((ahi * bhi - *p) + ahi * blo + alo * bhi) + alo * blo;
+    *e = __builtin_fma(a, b, -*p);
 }
 
 /* DD addition. Sloppy variant from Hida/Li/Bailey — the IEEE-754
