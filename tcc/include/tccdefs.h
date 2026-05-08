@@ -118,6 +118,13 @@
 #elif defined __APPLE__
     /* emulate APPLE-GCC to make libc's headerfiles compile: */
     #define __GNUC__ 4   /* darwin emits warning on GCC<4 */
+    #define __GNUC_MINOR__ 0
+    #define __GNUC_PATCHLEVEL__ 1
+    /* Programs that test __GNUC__ often use __VERSION__ as a string-
+     * concat token (e.g. Python's getcompiler.c: `"\n[GCC " __VERSION__
+     * "]"`). gcc / clang both predefine it; tcc upstream doesn't. Set
+     * it to a recognizable string so those programs compile. */
+    #define __VERSION__ "4.0.1 (tcc-darwin8-ppc)"
     #define __APPLE_CC__ 1 /* for <TargetConditionals.h> */
     #define __LITTLE_ENDIAN__ 1
     #define _DONT_USE_CTYPE_INLINE_ 1

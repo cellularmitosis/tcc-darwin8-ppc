@@ -208,6 +208,41 @@ float __builtin_inff(void) {
     u.u = 0x7F800000u;
     return u.f;
 }
+/* __builtin_isnan / __builtin_isinf / __builtin_isfinite — gcc treats
+ * these as type-generic intrinsics that inline to FP register checks.
+ * tcc emits a regular call. Provide thin C implementations covering the
+ * float / double / long-double overloads gcc inlines. (Long double on
+ * Apple PPC is IBM double-double; NaN-ness lives in the high half.)
+ *
+ * Tiger's <math.h> uses __builtin_isnan inside the isnan() macro:
+ *   #define isnan(x) (__builtin_isnan(x))
+ * — so any program that #includes <math.h> and calls isnan() will
+ * unresolved-link without these stubs. Same for isinf / isfinite. */
+int __builtin_isnan(double x) {
+    union { double d; unsigned long long u; } u;
+    u.d = x;
+    return ((u.u >> 52) & 0x7ff) == 0x7ff && (u.u & 0xfffffffffffffull) != 0;
+}
+int __builtin_isnanf(float x) {
+    union { float f; unsigned u; } u;
+    u.f = x;
+    return ((u.u >> 23) & 0xff) == 0xff && (u.u & 0x7fffffu) != 0;
+}
+int __builtin_isnanl(long double x) { return __builtin_isnan((double)x); }
+int __builtin_isinf(double x) {
+    union { double d; unsigned long long u; } u;
+    u.d = x;
+    return ((u.u >> 52) & 0x7ff) == 0x7ff && (u.u & 0xfffffffffffffull) == 0;
+}
+int __builtin_isinff(float x) {
+    union { float f; unsigned u; } u;
+    u.f = x;
+    return ((u.u >> 23) & 0xff) == 0xff && (u.u & 0x7fffffu) == 0;
+}
+int __builtin_isinfl(long double x) { return __builtin_isinf((double)x); }
+int __builtin_isfinite(double x) { return !(__builtin_isnan(x) || __builtin_isinf(x)); }
+int __builtin_isfinitef(float x)  { return !(__builtin_isnanf(x) || __builtin_isinff(x)); }
+int __builtin_isfinitel(long double x) { return __builtin_isfinite((double)x); }
 /* IBM double-double helpers (__gcc_qadd / qsub / qmul / qdiv).
  *
  * Apple PPC's `long double` is 128-bit IBM double-double (a pair of
