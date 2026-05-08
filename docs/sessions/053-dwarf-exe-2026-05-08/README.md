@@ -121,30 +121,95 @@ otool -l /tmp/dexe | grep -A 5 -i dwarf   # __DWARF segment, vmaddr=0
   Empty `.debug_info contents:` with default DWARF-4; correct
   output with `-gdwarf-2`. Same as the v0.2.37 .o path.
 
+## Continued: v0.2.39-g3 (same evening)
+
+After v0.2.38 shipped, three follow-ups landed:
+
+### Default DWARF version → 2 on Darwin
+
+`tcc/configure`'s OSX block now sets `dwarf=2` (was `4`). Tiger's
+bundled `dwarfdump` and `gdb 6.3` fully understand DWARF-2 but only
+partially DWARF-4 (Unknown `DW_FORM_sec_offset = 0x17`, etc.). With
+the new default, bare `tcc -g` produces tooling-friendly output
+without needing `-gdwarf-2`. `-gdwarf-3`/`-gdwarf-4` still available
+explicitly.
+
+### Per-prolog CFI
+
+Tcc's PPC prolog has a constant layout (mflr, stw r0, 8x GPR
+spill, 13x FP/nop spill, then stwu) so the offset of the CFA-shift
+is a literal: 92 bytes from function start, +4 for the stwu
+instruction itself, so post-stwu state begins at byte 96 = 24
+CAF units. tccdbg.c's PPC FDE block now emits per FDE:
+
+```
+DW_CFA_advance_loc 24                  ; past the stwu
+DW_CFA_def_cfa_offset frame_size       ; CFA = r1 + frame_size
+DW_CFA_offset_extended 65, (fs-8)/4    ; LR (col 65) at CFA + (8-fs)
+```
+
+`ppc_last_frame_size` (in `tcc.h`'s PPC block, defined by
+`ppc-gen.c`, set in `gfunc_epilog`) carries the frame size from
+codegen to dwarf emission. ppc-link.c's gotplt_entry_type marks
+`R_PPC_REL32` as `NO_GOTPLT_ENTRY` (used by FDE PC-begin fields;
+got/plt allocation would be wrong for these — caused
+`125_atomic_misc` to spew "Unknown relocation type for got: 26"
+until added).
+
+### `.eh_frame` actually reaches the linked exe
+
+Three subproblems all fixed in this same edit:
+
+1. `tcc.h` has `#if !(defined ELF_OBJ_ONLY || ...)` around
+   `TCC_EH_FRAME`. `ELF_OBJ_ONLY` is defined for Mach-O (and PE),
+   so `tcc_eh_frame_start` / `tcc_debug_frame_end` were never
+   compiled in. Added `|| defined TCC_TARGET_MACHO` so the
+   per-FDE machinery runs. The runtime ELF-only paths
+   (`tcc_eh_frame_hdr`, `dl_iterate_phdr` registration) only fire
+   on the dynamic-link ELF code path, so they never trigger for
+   Mach-O — adding the macro is safe.
+2. `tccelf.c` sets `unwind_tables = 0` for non-ELF outputs.
+   Loosened to keep it on when `-g` is also in use, so the
+   `.eh_frame` section actually gets created during the compile.
+3. `classify_section` now maps `.eh_frame` to `__TEXT,__eh_frame`
+   (the conventional Mach-O slot). `macho_output_exe` got a new
+   discovery + layout slot for it within `__TEXT` after
+   `__symbol_stub` (4-byte aligned, S_REGULAR), plus the standard
+   allocate / resolve / emit / write pattern.
+
+Plus one merge-related bug: every `.o` tcc emits with
+`unwind_tables=1` (i.e. every `.o` from `tcc -c`, regardless of
+`-g`, since `output_format=ELF` for OBJ output) ends its
+`.eh_frame` with a 4-byte length=0 terminator. When tcc's section
+merger concatenates input `.o` `.eh_frame` chunks into the exe's
+single `.eh_frame`, the chunks' inner terminators end up
+mid-section. dwarfdump and lldb both treat the first length=0
+record as end-of-data and stop reading — and Tiger's dwarfdump
+Bus-errored when continuing past it. `macho_output_exe` now runs
+a post-reloc cleanup pass over `eh_frame_data`: walks records,
+drops length=0, fixes up FDE `CIE_pointer` values to compensate
+for the 4-byte shifts (CIE_pointer encodes
+`field_pos - CIE_pos`; CIE stays at section offset 0, so each
+stripped 4 bytes before the FDE drops the value by 4). One clean
+terminator at the end. The strip happens AFTER reloc resolution
+so reloc `r_offset`s aren't invalidated; the LC `__eh_frame` size
+header reports the post-strip value, and the difference between
+that and the laid-out `__TEXT` slot is harmless trailing pad.
+
+### Verification (v0.2.39)
+
+`dwarfdump --eh-frame` on a `tcc -g`-linked exe produces a clean
+CIE (ra_register=0x41 = LR, CAF=4, DAF=-4) + one FDE per function
+with proper per-prolog CFI directives (`advance_loc 24`,
+`def_cfa_offset N`, `offset_extended 65, (N-8)/4`). Bootstrap
+fixpoint, tests2 (111/111), abitest, libtest, dlltest all green.
+
 ## Open work for next session
-
-The DWARF arc is functionally complete (information present and
-parseable). The next-tier polish:
-
-* **Per-prolog CFI** so lldb (and any DWARF unwinder) can
-  reconstruct frames. The CIE has minimal initial state
-  (CFA=r1+0); after `stwu r1, -frame_size(r1)` the actual CFA
-  is `r1 + frame_size`. Real fix: emit per-FDE
-  `DW_CFA_advance_loc` + `DW_CFA_def_cfa_offset` annotations
-  describing the prolog's frame moves. Requires sleb128-encoded
-  offsets and per-insn advance_loc bookkeeping keyed off
-  ppc-gen.c's variable-length prolog backfill.
 
 * **OSO STAB entries** so gdb-on-Tiger can find the .o files
   during link and pull DWARF from them on demand. Would also
   make `dsymutil` work as expected. Requires keeping `.o` paths
   in scope during linking.
-
-* **Default DWARF version**: tcc emits DWARF-4 by default;
-  Tiger's dwarfdump only partially understands it. Defaulting to
-  DWARF-2 or 3 on PPC for tooling compatibility would make
-  bare `-g` produce the most readable output. Workaround for
-  now: `-gdwarf-2`.
 
 ## Other open items (carried forward)
 
