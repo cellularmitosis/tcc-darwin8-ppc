@@ -42,15 +42,28 @@ entries; the DWARF item retired from the "larger scope" list.
 | DWARF in .o | [`v0.2.37-dwarf-obj.sh`](../../../demos/v0.2.37-dwarf-obj.sh) | ✅ |
 | **DWARF in linked exe** | [`v0.2.38-dwarf-exe.sh`](../../../demos/v0.2.38-dwarf-exe.sh) | ✅ |
 | **__eh_frame + per-prolog CFI** | [`v0.2.39-eh-frame.sh`](../../../demos/v0.2.39-eh-frame.sh) | ✅ |
+| **GNU gzip 1.11** | [`v0.2.39-gzip.sh`](../../../demos/v0.2.39-gzip.sh) | ✅ |
 
-Real-world build attempts this session: tried building `gzip
-1.13` and `dash 0.5.12`. Both hit autoconf-gnulib header-shim
-issues that aren't tcc bugs (gnulib's `stdlib.h` shim re-includes
-the system header which uses `__darwin_mcontext64_t`; dash's
-`mknodes` build helper is configured to use the same CC and
-chokes on `<stdarg.h>` recursive include). Skipping further
-real-world builds for this session — the existing demo set
-already exercises a representative spread of codegen paths.
+Real-world build attempts this session: gzip 1.13 + dash 0.5.12
+both hit gnulib/autoconf shim bugs that aren't tcc's fault (the
+1.13 gnulib `stdlib.h` shim transitively includes
+`__darwin_mcontext64_t` from the system header; dash's `mknodes`
+build helper uses the configured CC and chokes on `<stdarg.h>`
+recursion). **gzip 1.11 (from leopard.sh)** built clean with the
+binpkg's bundled `config.cache` — sixth real-world program
+verified end-to-end (lua, zlib, bzip2, cJSON, sqlite, gzip).
+
+The cache trick generalizes: programs that fail with
+"`stdio_ext.h` not found" or "implicit declaration of
+`__freading`" need a config.cache that pre-records the absent
+glibc-isms as `=no`. The leopard.sh `tiger.cache` +
+`tiger.32.cache` base caches give optimistic `=yes` defaults that
+gcc-4.0's `-Werror=implicit-function-declaration` would correct
+during the AC_CHECK_FUNC re-probe; tcc accepts them and the build
+breaks. Each leopard.sh binpkg bundles a `config.cache` with the
+corrected values baked in; pulling that cache out of the binpkg is
+the cleanest fix for tcc builds. Reusable pattern for future
+real-world program demos.
 
 ## Open work
 
