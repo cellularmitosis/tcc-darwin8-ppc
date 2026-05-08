@@ -1709,6 +1709,34 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
             sect_data[reloc_off+3] =  inst        & 0xff;
             break;
         }
+        case R_PPC_REL32: {
+            /* DWARF eh_frame FDEs use REL32 to encode the function PC
+             * begin: the field's in-place value holds the function's
+             * offset within .text (written by tccdbg.c::dwarf_data4(
+             * eh_frame_section, func_ind)), the symbol is .text's
+             * section symbol (st_value=0), and we must encode
+             *   delta = (text_vmaddr + addend) - reloc_vma
+             * so dwarfdump computes
+             *   target = field_vma + delta
+             *          = (sect_vmaddr + reloc_off) + delta
+             *          = text_vmaddr + addend
+             * = the runtime VA of the function. ELF Rel-format implicit
+             * addend (in-place value treated as part of the target),
+             * matching how R_PPC_ADDR32 is handled below. */
+            uint32_t reloc_va = sect_vmaddr + reloc_off;
+            int32_t addend, delta;
+            inst = ((uint32_t)sect_data[reloc_off] << 24)
+                 | ((uint32_t)sect_data[reloc_off+1] << 16)
+                 | ((uint32_t)sect_data[reloc_off+2] <<  8)
+                 |  (uint32_t)sect_data[reloc_off+3];
+            addend = (int32_t)inst;
+            delta  = (int32_t)(target_addr + (uint32_t)addend - reloc_va);
+            sect_data[reloc_off+0] = (uint32_t)delta >> 24;
+            sect_data[reloc_off+1] = ((uint32_t)delta >> 16) & 0xff;
+            sect_data[reloc_off+2] = ((uint32_t)delta >>  8) & 0xff;
+            sect_data[reloc_off+3] =  (uint32_t)delta        & 0xff;
+            break;
+        }
         case R_PPC_ADDR16_HA:
         case R_PPC_ADDR16_HI:
         case R_PPC_ADDR16_LO:
@@ -1815,14 +1843,15 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     enum { SECT_TEXT = 1 };
     int n_text_sects, n_data_sects, total_msects;
 
-    /* Maximum used so far is 9 with all data sections present:
-     * text + rodata + stub + data + init_array + fini_array
-     *      + nlptr + dyld + bss. Keep some headroom for future
-     *      additions (debug, eh_frame, ...). EXE_MAX_SECTS guards
-     *      every nsec++ in the layout block below — bump it (and
-     *      the array size in lockstep) if a future section type
-     *      pushes us past the limit. */
-#define EXE_MAX_SECTS 16
+    /* Loaded sections without DWARF top out around 9 (text, rodata,
+     * stub, data, init_array, fini_array, nlptr, dyld, bss). DWARF
+     * adds another ~7-9 (.debug_info / .debug_abbrev / .debug_line /
+     * .debug_aranges / .debug_str / .debug_str_offsets / .debug_loc
+     * / .debug_ranges / .debug_addr — and .eh_frame when emitted).
+     * 32 leaves headroom; bump in lockstep with the array if a
+     * future section type pushes past it. EXE_MAX_SECTS guards
+     * every nsec++ in the layout block below. */
+#define EXE_MAX_SECTS 32
     struct exe_sect sects[EXE_MAX_SECTS];
     int nsec = 0;
     int sect_idx_text = -1, sect_idx_rodata = -1, sect_idx_data = -1;
@@ -1830,6 +1859,20 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     int sect_idx_bss = -1;
     int sect_idx_init_array = -1;
     int sect_idx_fini_array = -1;
+    /* DWARF (.debug_*) sections: laid out after __LINKEDIT in the
+     * exe Mach-O image, all with vmaddr=0 (debug data is not
+     * loaded). We keep parallel arrays for segname / sectname /
+     * flags so the LC_SEGMENT __DWARF write loop can reproduce the
+     * Mach-O conventional names that classify_section() chose. */
+    int n_dwarf_sects = 0;
+    int sect_idx_dwarf_first = -1;
+    Section **dwarf_elf = NULL;
+    const char **dwarf_segnames = NULL;
+    const char **dwarf_sectnames = NULL;
+    uint32_t *dwarf_flags_arr = NULL;
+    unsigned char **dwarf_data_arr = NULL;
+    uint32_t dwarf_seg_cmd_size = 0;
+    uint32_t dwarf_seg_file_off = 0, dwarf_seg_filesize = 0;
     unsigned char *init_array_data = NULL;
     unsigned char *fini_array_data = NULL;
     /* External-data __nl_symbol_ptr bookkeeping. The function-stub
@@ -1942,6 +1985,49 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     /* ---- Collect external data references. ---- */
     n_nlptrs = collect_extern_nlptrs(s1, &nlptrs, &nl_for_elfsym);
 
+    /* ---- Find DWARF (.debug_*) sections. ----
+     *
+     * Same `classify_section` filter as the .o path: any section
+     * the helper maps to a `__DWARF,__debug_*` Mach-O slot
+     * (S_ATTR_DEBUG flag) gets a per-section bookkeeping entry
+     * here. They're emitted into the linked exe so dwarfdump /
+     * lldb can read symbolic info from `tcc -o exe -g` output. */
+    {
+        int j;
+        for (i = 1; i < s1->nb_sections; i++) {
+            Section *s = s1->sections[i];
+            const char *segname = NULL, *sectname = NULL;
+            uint32_t flags = 0;
+            if (!s) continue;
+            if (s->data_offset == 0) continue;
+            if (!classify_section(s, &segname, &sectname, &flags)) continue;
+            if (!(flags & S_ATTR_DEBUG)) continue;
+            n_dwarf_sects++;
+        }
+        if (n_dwarf_sects > 0) {
+            dwarf_elf       = tcc_mallocz(n_dwarf_sects * sizeof(*dwarf_elf));
+            dwarf_segnames  = tcc_mallocz(n_dwarf_sects * sizeof(*dwarf_segnames));
+            dwarf_sectnames = tcc_mallocz(n_dwarf_sects * sizeof(*dwarf_sectnames));
+            dwarf_flags_arr = tcc_mallocz(n_dwarf_sects * sizeof(*dwarf_flags_arr));
+            dwarf_data_arr  = tcc_mallocz(n_dwarf_sects * sizeof(*dwarf_data_arr));
+            j = 0;
+            for (i = 1; i < s1->nb_sections; i++) {
+                Section *s = s1->sections[i];
+                const char *segname = NULL, *sectname = NULL;
+                uint32_t flags = 0;
+                if (!s) continue;
+                if (s->data_offset == 0) continue;
+                if (!classify_section(s, &segname, &sectname, &flags)) continue;
+                if (!(flags & S_ATTR_DEBUG)) continue;
+                dwarf_elf[j]       = s;
+                dwarf_segnames[j]  = segname;
+                dwarf_sectnames[j] = sectname;
+                dwarf_flags_arr[j] = flags;
+                j++;
+            }
+        }
+    }
+
     /* ---- Plan section layout. ---- */
     n_text_sects = 1;       /* __text */
     if (rodata)
@@ -1962,14 +2048,14 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     if (bss)
         n_data_sects++;     /* __bss (zerofill) */
 
-    total_msects = n_text_sects + n_data_sects;
+    total_msects = n_text_sects + n_data_sects + n_dwarf_sects;
     if (total_msects > EXE_MAX_SECTS) {
         tcc_error_noabort("ppc-macho: section count %d exceeds the "
-                          "compiled-in limit %d (text=%d data=%d). "
+                          "compiled-in limit %d (text=%d data=%d dwarf=%d). "
                           "Bump EXE_MAX_SECTS in ppc-macho.c and the "
                           "matching exe_sect array.",
                           total_msects, EXE_MAX_SECTS,
-                          n_text_sects, n_data_sects);
+                          n_text_sects, n_data_sects, n_dwarf_sects);
         return -1;
     }
 
@@ -1977,6 +2063,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     text_seg_cmd_size = 56 + 68u * n_text_sects;
     if (n_data_sects > 0)
         data_seg_cmd_size = 56 + 68u * n_data_sects;
+    if (n_dwarf_sects > 0)
+        dwarf_seg_cmd_size = 56 + 68u * (uint32_t)n_dwarf_sects;
 
     /* Per-loaded-dll LC_LOAD_DYLIB sizes. Each dll's name string is
      * variable length, so we precompute. We always emit libSystem
@@ -2023,6 +2111,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                          + dysymtab_cmd_size;
         ncmds += n_extra_dylibs;
         total_cmds_size += extra_dylib_cmds_size;
+    }
+    if (n_dwarf_sects > 0) {
+        ncmds++;
+        total_cmds_size += dwarf_seg_cmd_size;
     }
     hdr_and_lc_size = 28 + total_cmds_size;
 
@@ -2179,6 +2271,25 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     linkedit_file_off = text_seg_filesize + data_seg_filesize;
     linkedit_vmaddr   = text_seg_vmaddr + text_seg_filesize + data_seg_vmsize;
 
+    /* ---- Add DWARF sections to sects[] with vmaddr=0. ----
+     * file_off is filled in once linkedit_filesize is known. vmaddr
+     * stays 0 — debug data isn't loaded, and cross-section
+     * R_PPC_ADDR32 within DWARF resolves to "0 + addend = addend"
+     * (offset within the target debug section), matching the .o
+     * convention dwarfdump expects. */
+    if (n_dwarf_sects > 0) {
+        int j;
+        sect_idx_dwarf_first = nsec;
+        for (j = 0; j < n_dwarf_sects; j++) {
+            sects[nsec].elf      = dwarf_elf[j];
+            sects[nsec].vmaddr   = 0;
+            sects[nsec].size     = (uint32_t)dwarf_elf[j]->data_offset;
+            sects[nsec].file_off = 0;          /* assigned later */
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+        }
+    }
+
     /* Now we know the stub addresses; set them in `stubs[]`.
      * Function-stub slots come first in __nl_symbol_ptr, data slots
      * follow them. */
@@ -2217,10 +2328,19 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         fini_array_data = tcc_malloc(fini_array->data_offset);
         memcpy(fini_array_data, fini_array->data, fini_array->data_offset);
     }
+    {
+        int j;
+        for (j = 0; j < n_dwarf_sects; j++) {
+            Section *s = dwarf_elf[j];
+            dwarf_data_arr[j] = tcc_malloc(s->data_offset);
+            memcpy(dwarf_data_arr[j], s->data, s->data_offset);
+        }
+    }
 
     /* ---- Resolve relocations in text and rodata. ---- */
     {
         struct exe_reloc_ctx ctx;
+        int j;
         ctx.all_sects = sects;
         ctx.nsec = nsec;
         ctx.stubs = stubs;
@@ -2248,6 +2368,13 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                                                 sects[sect_idx_fini_array].vmaddr,
                                                 fini_array_data, &ctx) < 0)
             goto cleanup;
+        for (j = 0; j < n_dwarf_sects; j++) {
+            /* sect_vmaddr=0 is intentional — see the DWARF
+             * sects[] population block above. */
+            if (exe_resolve_section_relocs(s1, dwarf_elf[j], 0,
+                                           dwarf_data_arr[j], &ctx) < 0)
+                goto cleanup;
+        }
     }
 
     /* ---- Append crt-shim. ---- */
@@ -2561,6 +2688,19 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         linkedit_filesize = loff - linkedit_file_off;
     }
 
+    /* ---- Compute __DWARF layout (after __LINKEDIT). ---- */
+    if (n_dwarf_sects > 0) {
+        uint32_t dcur = (linkedit_file_off + linkedit_filesize + 3u) & ~3u;
+        int j;
+        dwarf_seg_file_off = dcur;
+        for (j = 0; j < n_dwarf_sects; j++) {
+            int idx = sect_idx_dwarf_first + j;
+            sects[idx].file_off = dcur;
+            dcur += sects[idx].size;
+        }
+        dwarf_seg_filesize = dcur - dwarf_seg_file_off;
+    }
+
     /* ---- Serialize: Mach header. ---- */
     put32be(&out, MH_MAGIC);
     put32be(&out, CPU_TYPE_POWERPC);
@@ -2766,6 +2906,44 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     put32be(&out, 0);
     put32be(&out, 0);
 
+    /* ---- LC_SEGMENT __DWARF. ----
+     *
+     * Mirrors the .o-side debug-segment layout: vmaddr=0/vmsize=0
+     * (debug data isn't loaded, dyld won't try to map it), real
+     * file_offset / file_size, per-section headers carrying
+     * S_ATTR_DEBUG. Section vmaddrs all 0 (matching the .o
+     * convention: cross-section ADDR32 within DWARF resolves to
+     * "0 + addend = addend" = offset within the target debug
+     * section, which is what dwarfdump reads). */
+    if (n_dwarf_sects > 0) {
+        int j;
+        put32be(&out, LC_SEGMENT);
+        put32be(&out, dwarf_seg_cmd_size);
+        put_sectname(&out, "__DWARF");
+        put32be(&out, 0);                     /* vmaddr */
+        put32be(&out, 0);                     /* vmsize */
+        put32be(&out, dwarf_seg_file_off);
+        put32be(&out, dwarf_seg_filesize);
+        put32be(&out, VM_PROT_READ);          /* maxprot */
+        put32be(&out, VM_PROT_READ);          /* initprot */
+        put32be(&out, n_dwarf_sects);
+        put32be(&out, 0);                     /* flags */
+        for (j = 0; j < n_dwarf_sects; j++) {
+            int idx = sect_idx_dwarf_first + j;
+            put_sectname(&out, dwarf_sectnames[j]);
+            put_sectname(&out, dwarf_segnames[j]);
+            put32be(&out, 0);                 /* addr (vmaddr=0) */
+            put32be(&out, sects[idx].size);
+            put32be(&out, sects[idx].file_off);
+            put32be(&out, 0);                 /* align (1 << 0 = 1 byte) */
+            put32be(&out, 0);                 /* nreloc */
+            put32be(&out, 0);                 /* reloff */
+            put32be(&out, dwarf_flags_arr[j]);
+            put32be(&out, 0);                 /* reserved1 */
+            put32be(&out, 0);                 /* reserved2 */
+        }
+    }
+
     /* ---- LC_LOAD_DYLINKER (only if we use libSystem). ---- */
     if (nstubs > 0 || n_nlptrs > 0) {
         uint32_t k;
@@ -2952,6 +3130,19 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         put8(&out, 0);
     obuf_put(&out, strtab.buf, strtab.len);
 
+    /* ---- Pad to __DWARF, then write debug section payloads. ---- */
+    if (n_dwarf_sects > 0) {
+        int j;
+        while (out.len < dwarf_seg_file_off)
+            put8(&out, 0);
+        for (j = 0; j < n_dwarf_sects; j++) {
+            int idx = sect_idx_dwarf_first + j;
+            while (out.len < sects[idx].file_off)
+                put8(&out, 0);
+            obuf_put(&out, dwarf_data_arr[j], sects[idx].size);
+        }
+    }
+
     /* ---- Write file. ---- */
     unlink(filename);
     fd = open(filename, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0755);
@@ -2990,6 +3181,16 @@ cleanup:
     tcc_free(nlptrs);
     tcc_free(nl_for_elfsym);
     tcc_free(data_sym_idx);
+    if (dwarf_data_arr) {
+        int j;
+        for (j = 0; j < n_dwarf_sects; j++)
+            tcc_free(dwarf_data_arr[j]);
+        tcc_free(dwarf_data_arr);
+    }
+    tcc_free(dwarf_elf);
+    tcc_free(dwarf_segnames);
+    tcc_free(dwarf_sectnames);
+    tcc_free(dwarf_flags_arr);
     return ret;
 }
 

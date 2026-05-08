@@ -294,8 +294,20 @@ ST_FUNC void relocate(TCCState *s1, ElfW_Rel *rel, int type, unsigned char *ptr,
     case R_PPC_REL32:
         /* 32-bit PC-relative absolute. Used by DWARF eh_frame FDEs
          * to point at the function start: stored value =
-         * (target - here). Big-endian 32-bit signed displacement. */
-        ppc_link_write32be(ptr, (uint32_t)(val - addr));
+         * (target + addend - here). Big-endian 32-bit signed
+         * displacement.
+         *
+         * ELF Rel-format implicit-addend semantics: the in-place
+         * value holds the addend (e.g. tccdbg.c writes
+         * `dwarf_data4(eh_frame_section, func_ind)` then attaches a
+         * REL32 to .text's section symbol, where st_value=0 and
+         * func_ind is the in-place addend giving the function's
+         * offset within .text). Drop the addend and the FDE points
+         * to the start of .text instead of the function. */
+        {
+            uint32_t addend = ppc_link_read32be(ptr);
+            ppc_link_write32be(ptr, (uint32_t)(val + addend - addr));
+        }
         return;
 
     case R_PPC_HA16_PIC:
