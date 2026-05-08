@@ -85,6 +85,10 @@ ST_FUNC int gotplt_entry_type(int reloc_type)
         case R_PPC_JMP_SLOT:
         case R_PPC_HA16_PIC:
         case R_PPC_LO16_PIC:
+        case R_PPC_REL32:
+            /* REL32 is the DWARF eh_frame FDE-PC encoding (pcrel
+             * sdata4). Resolved by the relocator directly against
+             * the target symbol; no GOT/PLT involvement. */
             return NO_GOTPLT_ENTRY;
         case R_PPC_ADDR32:
         case R_PPC_REL24:

@@ -177,6 +177,24 @@ ST_DATA const int reg_classes[NB_REGS] = {
  * CONFIG_TCC_BCHECK), so its storage must always exist. The other
  * two are only used by future bcheck-aware codegen routines. */
 ST_DATA int func_bound_add_epilog;
+
+/* Most-recent function's frame size, set by gfunc_epilog. tccdbg.c
+ * reads this in tcc_debug_frame_end's PPC block to emit per-FDE
+ * DW_CFA_def_cfa_offset describing the post-prolog CFA position
+ * (CFA = r1 + frame_size). Declared in tcc.h with ST_DATA so the
+ * include order works under both ONE_SOURCE (file-scope static)
+ * and split-build (extern + this definition). */
+ST_DATA int ppc_last_frame_size;
+/* Tcc's PPC prolog has a constant layout. The stwu instruction
+ * (where the CFA changes from r1+0 to r1+frame_size) sits at:
+ *   mflr r0           4
+ *   stw r0, 8(r1)     4
+ *   8x stw rN spill  32
+ *   13x FP/nop spill 52
+ *   ------------------
+ *   stwu offset      92
+ * 4-byte stwu itself, so CFA advances kick in at +96 from func
+ * start. Lives as a literal inside tccdbg.c's PPC FDE block. */
 #if defined(CONFIG_TCC_BCHECK)
 static addr_t func_bound_offset;
 static unsigned long func_bound_ind;
@@ -2376,6 +2394,11 @@ ST_FUNC void gfunc_epilog(void)
     int frame_size = ppc_frame_size();
     int fp_save_off = frame_size - 4;  /* offset of saved-r31 slot from new SP */
     int pic_save_off = frame_size - 8; /* offset of saved-r30 slot from new SP */
+
+    /* Stash for tccdbg.c's PPC FDE block. Read inside
+     * tcc_debug_frame_end, which runs immediately after this
+     * function returns (per tccgen.c's funcend ordering). */
+    ppc_last_frame_size = frame_size;
 
     /* Note: tccgen.c already calls gsym(rsym) before invoking us
      * (see tccgen.c around `gsym(rsym); nocode_wanted = 0;` just

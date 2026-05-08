@@ -90,7 +90,12 @@ ST_FUNC void tccelf_new(TCCState *s)
     }
 
 #if TCC_EH_FRAME
-    if (s->output_format != TCC_OUTPUT_FORMAT_ELF)
+    /* Disable unwind tables on non-ELF outputs unless -g is in use:
+     * .eh_frame for runtime exception unwinding requires ELF-specific
+     * registration (.eh_frame_hdr, dl_iterate_phdr) that Mach-O lacks,
+     * but the per-FDE call-frame info is still useful as DWARF debug
+     * data when emitted into a __DWARF segment. So keep it on for -g. */
+    if (s->output_format != TCC_OUTPUT_FORMAT_ELF && !s->do_debug)
         s->unwind_tables = 0;
     tcc_eh_frame_start(s);
 #endif

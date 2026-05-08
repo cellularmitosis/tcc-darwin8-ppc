@@ -436,6 +436,23 @@ static int classify_section(Section *s, const char **segname,
         *flags = S_ZEROFILL;
         return 1;
     }
+    /* DWARF call-frame info emitted by tccdbg.c. Tcc writes
+     * eh_frame-format CIE/FDE records (CIE id = 0, augmentation
+     * string "zR", FDE_ENCODING = pcrel signed udata4); the
+     * conventional Mach-O slot is __TEXT,__eh_frame. dwarfdump
+     * --eh-frame and lldb's frame unwinder dispatch on this name.
+     * (We don't currently participate in libgcc_s ELF-style runtime
+     * exception unwinding registration — there's no .eh_frame_hdr
+     * and no dl_iterate_phdr — but the FDE records are still useful
+     * for debug-time stack-walking.) Plain S_REGULAR; coalescing is
+     * for cross-TU FDE dedupe which our single-TU emission doesn't
+     * need. */
+    if (!strcmp(n, ".eh_frame")) {
+        *segname  = "__TEXT";
+        *sectname = "__eh_frame";
+        *flags    = S_REGULAR;
+        return 1;
+    }
     if (!strcmp(n, ".rodata") || !strcmp(n, ".data.ro")) {
         *segname = "__TEXT";
         *sectname = "__const";
@@ -1827,6 +1844,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     Section *text = NULL, *rodata = NULL, *data = NULL, *bss = NULL;
     Section *init_array = NULL;     /* __attribute__((constructor)) array */
     Section *fini_array = NULL;     /* __attribute__((destructor)) array */
+    Section *eh_frame = NULL;       /* DWARF CIE/FDEs (when -g is in use) */
     int main_off, shim_off, target_off;
     int i, ret = -1;
     FILE *fp = NULL;
@@ -1859,6 +1877,14 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     int sect_idx_bss = -1;
     int sect_idx_init_array = -1;
     int sect_idx_fini_array = -1;
+    int sect_idx_eh_frame = -1;
+    unsigned char *eh_frame_data = NULL;
+    /* `eh_frame` data after stripping mid-section terminators (see
+     * the post-reloc cleanup below). The LC __eh_frame size and
+     * file payload write both use this; the layout step uses the
+     * full pre-strip size and lets the page-rounded __TEXT segment
+     * absorb the trailing pad. */
+    uint32_t eh_frame_clean_size = 0;
     /* DWARF (.debug_*) sections: laid out after __LINKEDIT in the
      * exe Mach-O image, all with vmaddr=0 (debug data is not
      * loaded). We keep parallel arrays for segname / sectname /
@@ -1951,6 +1977,9 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         else if (s->sh_type == SHT_FINI_ARRAY && s->data_offset > 0
             && !strcmp(s->name, ".fini_array"))
             fini_array = s;
+        else if (s->sh_type == SHT_PROGBITS && s->data_offset > 0
+            && !strcmp(s->name, ".eh_frame"))
+            eh_frame = s;
     }
     if (!text || text->data_offset == 0) {
         tcc_error_noabort("ppc-macho: empty or missing .text section");
@@ -2034,6 +2063,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         n_text_sects++;     /* __const */
     if (nstubs > 0)
         n_text_sects++;     /* __picsymbolstub1 (well, plain stub) */
+    if (eh_frame)
+        n_text_sects++;     /* __eh_frame (DWARF CIE/FDEs) */
     n_data_sects = 0;
     if (data)
         n_data_sects++;     /* __data */
@@ -2161,6 +2192,22 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         nsec++;
         cur_va  += nstubs * 16u;
         cur_off += nstubs * 16u;
+    }
+
+    /* DWARF .eh_frame: emitted at the tail of __TEXT in the
+     * conventional Mach-O location. 4-byte aligned. */
+    if (eh_frame) {
+        cur_va  = (cur_va  + 3u) & ~3u;
+        cur_off = (cur_off + 3u) & ~3u;
+        sect_idx_eh_frame = nsec;
+        sects[nsec].elf = eh_frame;
+        sects[nsec].vmaddr = cur_va;
+        sects[nsec].size = (uint32_t)eh_frame->data_offset;
+        sects[nsec].file_off = cur_off;
+        sects[nsec].is_zerofill = 0;
+        nsec++;
+        cur_va  += eh_frame->data_offset;
+        cur_off += eh_frame->data_offset;
     }
 
     /* Round up __TEXT segment to page. */
@@ -2328,6 +2375,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         fini_array_data = tcc_malloc(fini_array->data_offset);
         memcpy(fini_array_data, fini_array->data, fini_array->data_offset);
     }
+    if (eh_frame) {
+        eh_frame_data = tcc_malloc(eh_frame->data_offset);
+        memcpy(eh_frame_data, eh_frame->data, eh_frame->data_offset);
+    }
     {
         int j;
         for (j = 0; j < n_dwarf_sects; j++) {
@@ -2368,6 +2419,65 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                                                 sects[sect_idx_fini_array].vmaddr,
                                                 fini_array_data, &ctx) < 0)
             goto cleanup;
+        if (eh_frame && exe_resolve_section_relocs(s1, eh_frame,
+                                                sects[sect_idx_eh_frame].vmaddr,
+                                                eh_frame_data, &ctx) < 0)
+            goto cleanup;
+        /* Strip mid-section .eh_frame terminators in eh_frame_data
+         * (post-reloc, so reloc r_offsets are no longer needed). Each
+         * input .o that tcc compiled with unwind_tables on (every
+         * .o built via `tcc -c`, since output_format=ELF
+         * unconditionally for .o) contributed a CIE+FDEs+terminator
+         * chunk; tcc's section merger left the inner terminators
+         * (4-byte length=0 records) embedded mid-section, where
+         * dwarfdump treats the first one as end-of-data and stops.
+         * Walk the records, drop length=0, fix up FDE CIE_pointers
+         * (which encode "field_pos - CIE_start"; the merged CIE
+         * stays at section offset 0, so for each stripped 4-byte
+         * terminator before the FDE, CIE_pointer drops by 4).
+         * Re-append a single clean terminator at the end. */
+        if (eh_frame_data && sects[sect_idx_eh_frame].size >= 4) {
+            unsigned char *d = eh_frame_data;
+            uint32_t n = sects[sect_idx_eh_frame].size;
+            uint32_t i = 0, out = 0, bytes_removed = 0;
+            while (i + 4 <= n) {
+                uint32_t length = ((uint32_t)d[i] << 24)
+                                | ((uint32_t)d[i+1] << 16)
+                                | ((uint32_t)d[i+2] << 8)
+                                |  (uint32_t)d[i+3];
+                if (length == 0) {
+                    i += 4;
+                    bytes_removed += 4;
+                    continue;
+                }
+                if (i + 4 + length > n)
+                    break;     /* malformed; bail out */
+                if (out != i)
+                    memmove(d + out, d + i, length + 4);
+                if (length >= 4) {
+                    uint32_t cie_id = ((uint32_t)d[out+4] << 24)
+                                    | ((uint32_t)d[out+5] << 16)
+                                    | ((uint32_t)d[out+6] << 8)
+                                    |  (uint32_t)d[out+7];
+                    if (cie_id != 0) {
+                        uint32_t adj = cie_id - bytes_removed;
+                        d[out+4] = (adj >> 24) & 0xff;
+                        d[out+5] = (adj >> 16) & 0xff;
+                        d[out+6] = (adj >>  8) & 0xff;
+                        d[out+7] =  adj        & 0xff;
+                    }
+                }
+                out += length + 4;
+                i   += length + 4;
+            }
+            if (out + 4 <= n) {
+                d[out] = d[out+1] = d[out+2] = d[out+3] = 0;
+                out += 4;
+            }
+            eh_frame_clean_size = out;
+        } else if (eh_frame) {
+            eh_frame_clean_size = sects[sect_idx_eh_frame].size;
+        }
         for (j = 0; j < n_dwarf_sects; j++) {
             /* sect_vmaddr=0 is intentional — see the DWARF
              * sects[] population block above. */
@@ -2791,6 +2901,25 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         put32be(&out, 0);
         put32be(&out, 0);
     }
+    /* __eh_frame (DWARF call-frame info: CIE + per-function FDEs).
+     * Plain S_REGULAR; no special section type. dwarfdump --eh-frame
+     * dispatches by section name. The reported size is the
+     * post-strip clean size; the difference between that and the
+     * laid-out slot ends up as zero padding before the page-rounded
+     * __TEXT segment boundary, harmlessly. */
+    if (eh_frame) {
+        put_sectname(&out, "__eh_frame");
+        put_sectname(&out, "__TEXT");
+        put32be(&out, sects[sect_idx_eh_frame].vmaddr);
+        put32be(&out, eh_frame_clean_size);
+        put32be(&out, sects[sect_idx_eh_frame].file_off);
+        put32be(&out, 2);     /* align 2^2 = 4 */
+        put32be(&out, 0);
+        put32be(&out, 0);
+        put32be(&out, S_REGULAR);
+        put32be(&out, 0);
+        put32be(&out, 0);
+    }
 
     /* ---- LC_SEGMENT __DATA. ---- */
     if (n_data_sects > 0) {
@@ -3067,6 +3196,13 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         obuf_put(&out, stub_data, sects[sect_idx_stub].size);
     }
 
+    /* ---- .eh_frame. ---- */
+    if (eh_frame) {
+        while (out.len < sects[sect_idx_eh_frame].file_off)
+            put8(&out, 0);
+        obuf_put(&out, eh_frame_data, eh_frame_clean_size);
+    }
+
     /* ---- Pad to __DATA boundary, then write data sections. ---- */
     if (n_data_sects > 0) {
         while (out.len < data_seg_file_off)
@@ -3173,6 +3309,7 @@ cleanup:
     tcc_free(data_data);
     tcc_free(init_array_data);
     tcc_free(fini_array_data);
+    tcc_free(eh_frame_data);
     tcc_free(stub_data);
     tcc_free(nl_ptr_data);
     tcc_free(stubs);

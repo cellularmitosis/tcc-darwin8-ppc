@@ -1530,6 +1530,11 @@ ST_FUNC int classify_x86_64_va_arg(CType *ty);
 ST_FUNC void gbound_args(int nb_args);
 ST_DATA int func_bound_add_epilog;
 #endif
+#ifdef TCC_TARGET_PPC
+/* Last function's frame size, set by ppc-gen.c::gfunc_epilog;
+ * read by tccdbg.c's PPC FDE block to emit per-prolog CFI. */
+ST_DATA int ppc_last_frame_size;
+#endif
 ST_FUNC Sym *gfunc_set_param(Sym *s, int c, int byref);
 
 /* ------------ tccelf.c ------------ */
@@ -1845,7 +1850,16 @@ ST_FUNC void tcc_debug_typedef(TCCState *s1, Sym *sym);
 ST_FUNC void tcc_debug_stabn(TCCState *s1, int type, int value);
 ST_FUNC void tcc_debug_fix_forw(TCCState *s1, CType *t);
 
-#if !(defined ELF_OBJ_ONLY || defined TCC_TARGET_ARM || defined TARGETOS_BSD)
+/* eh_frame CIE/FDE emission. Originally upstream gates this on
+ * "non-ELF_OBJ_ONLY", which excludes Mach-O (and PE). For Mach-O
+ * we want the per-FDE call-frame info even though we don't
+ * participate in ELF-style runtime exception unwinding (no
+ * .eh_frame_hdr, no dl_iterate_phdr): it's emitted into a
+ * __DWARF segment and read by dwarfdump / lldb at debug time.
+ * `tcc_eh_frame_hdr` (called from the ELF dynamic-link path)
+ * never fires under Mach-O, so adding the macro is safe. */
+#if !(defined ELF_OBJ_ONLY || defined TCC_TARGET_ARM || defined TARGETOS_BSD) \
+    || defined TCC_TARGET_MACHO
 ST_FUNC void tcc_eh_frame_start(TCCState *s1);
 ST_FUNC void tcc_eh_frame_end(TCCState *s1);
 ST_FUNC void tcc_eh_frame_hdr(TCCState *s1, int final);

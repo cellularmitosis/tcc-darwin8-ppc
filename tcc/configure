@@ -356,7 +356,11 @@ esac
 
 case $targetos in
   Darwin)
-    confvars_set OSX dwarf=4
+    # Tiger's bundled dwarfdump / gdb 6.3 fully understand DWARF-2 and
+    # only partially DWARF-4 (e.g. Unknown DW_FORM_sec_offset = 0x17),
+    # so default plain `-g` to DWARF-2 for PPC Darwin tooling
+    # compatibility. Users can still request newer with -gdwarf-4 etc.
+    confvars_set OSX dwarf=2
     default_conf "codesign"
     DLLSUF=".dylib"
     if test -z "$build_cross"; then

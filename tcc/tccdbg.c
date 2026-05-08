@@ -1013,13 +1013,47 @@ static void tcc_debug_frame_end(TCCState *s1, int size)
     dwarf_data1(eh_frame_section, DW_CFA_def_cfa_offset);
     dwarf_uleb128(eh_frame_section, 0);
 #elif defined TCC_TARGET_PPC
-    /* Minimal CFI for PPC32: emit no prolog frame moves; the CIE's
-     * initial state (CFA = r1+0) applies for the whole function.
-     * That's technically inaccurate after the prolog's stwu, but
-     * lldb's PPC32 unwinder falls back to back-chain following when
-     * CFI is incomplete — and our prolog DOES preserve a valid back
-     * chain (`stwu r1, -fs(r1)`). Adequate for source-level debugging
-     * via .debug_line, which is the focus of this DWARF cut. */
+    /* Per-prolog CFI for PPC32. Tcc's prolog has a constant layout,
+     * so the only per-function input is the frame_size that
+     * gfunc_epilog stashes in ppc_last_frame_size:
+     *
+     *   ofs   instr                          effect
+     *     0   mflr r0
+     *     4   stw r0, 8(r1)                  LR saved at r1+8
+     *     8   8x stw rN, off(r1)             arg-GPR spills
+     *    40   13x stf? / nop                 FP-spills + nops
+     *    92   stwu r1, -frame_size(r1)       CFA changes here
+     *    96   ...                            CFA = r1 + frame_size
+     *
+     * After offset 96 (the post-stwu state) CFA = r1 + frame_size,
+     * and LR (DWARF column 65) sits at the old r1+8 = current
+     * CFA - frame_size + 8 = CFA + (8 - frame_size) bytes. With
+     * DAF=-4 the encoded offset is (frame_size - 8) / 4. Functions
+     * whose prolog the unwinder enters mid-stride still get the
+     * correct CIE initial state (CFA=r1+0).
+     *
+     * Encoding: advance_loc by (96 / 4 = 24) CAF units, then
+     * def_cfa_offset frame_size, then offset_extended for r65 (LR).
+     * 24 fits in the 6-bit packed advance_loc immediate (0x40 | n). */
+    {
+        /* ppc_last_frame_size is declared in tcc.h's PPC block;
+         * defined and set by ppc-gen.c::gfunc_epilog. */
+        int fs = ppc_last_frame_size;
+        int post_stwu_caf = 96 / 4;     /* = 24, fits packed advance_loc */
+        int lr_offset_units = (fs - 8) / 4;
+        if (fs >= 8 && post_stwu_caf < 64) {
+            dwarf_data1(eh_frame_section,
+                        DW_CFA_advance_loc + post_stwu_caf);
+            dwarf_data1(eh_frame_section, DW_CFA_def_cfa_offset);
+            dwarf_uleb128(eh_frame_section, fs);
+            /* DW_CFA_offset opcode encodes register in low 6 bits;
+             * LR's column is 65 (> 63), so use DW_CFA_offset_extended
+             * (0x05) which takes the register as a leading ULEB128. */
+            dwarf_data1(eh_frame_section, DW_CFA_offset_extended);
+            dwarf_uleb128(eh_frame_section, 65);
+            dwarf_uleb128(eh_frame_section, lr_offset_units);
+        }
+    }
 #elif defined TCC_TARGET_RISCV64
     dwarf_data1(eh_frame_section, DW_CFA_advance_loc + 4);
     dwarf_data1(eh_frame_section, DW_CFA_def_cfa_offset);
