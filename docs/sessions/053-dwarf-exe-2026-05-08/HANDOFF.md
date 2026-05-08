@@ -42,35 +42,21 @@ entries; the DWARF item retired from the "larger scope" list.
 | DWARF in .o | [`v0.2.37-dwarf-obj.sh`](../../../demos/v0.2.37-dwarf-obj.sh) | ✅ |
 | **DWARF in linked exe** | [`v0.2.38-dwarf-exe.sh`](../../../demos/v0.2.38-dwarf-exe.sh) | ✅ |
 | **__eh_frame + per-prolog CFI** | [`v0.2.39-eh-frame.sh`](../../../demos/v0.2.39-eh-frame.sh) | ✅ |
-| **GNU gzip 1.11** | [`v0.2.39-gzip.sh`](../../../demos/v0.2.39-gzip.sh) | ✅ |
-| **GNU sed 4.8** | [`v0.2.39-sed.sh`](../../../demos/v0.2.39-sed.sh) | ✅ |
 
 Real-world build attempts this session: gzip 1.13 + dash 0.5.12
-both hit gnulib/autoconf shim bugs that aren't tcc's fault (the
-1.13 gnulib `stdlib.h` shim transitively includes
-`__darwin_mcontext64_t` from the system header; dash's `mknodes`
-build helper uses the configured CC and chokes on `<stdarg.h>`
-recursion). **gzip 1.11** and **sed 4.8** (both from leopard.sh)
-both built clean with the binpkg-bundled `config.cache` trick —
-sixth and seventh real-world programs verified end-to-end (lua,
-zlib, bzip2, cJSON, sqlite, gzip, sed).
-
-The cache trick generalizes across leopard.sh's catalog. Programs
-that fail with "`stdio_ext.h` not found" or "implicit declaration
-of `__freading`" need a config.cache that pre-records the absent
-glibc-isms as `=no`. The leopard.sh `tiger.cache` +
-`tiger.32.cache` base caches give optimistic `=yes` defaults that
-gcc-4.0's `-Werror=implicit-function-declaration` corrects during
-the AC_CHECK_FUNC re-probe; tcc's permissive implicit-decl
-handling accepts the cached `=yes` and the build breaks at compile
-time when gnulib's `fseterr.h` tries to include the missing
-`stdio_ext.h`. Each leopard.sh binpkg bundles a `config.cache`
-with the corrected values baked in; pulling that cache out of the
-binpkg via `tar xzf <pkg>.tiger.g3.tar.gz <pkg>/share/tiger.sh/<pkg>/config.cache.gz`,
-gunzipping, and stripping env-locked entries
-(`grep -v -E "^ac_cv_env_|..."`) gives a tcc-friendly cache. The
-demo scripts for gzip and sed both follow this pattern — easy to
-clone for the next real-world program demo.
+hit gnulib/autoconf header-shim bugs unrelated to tcc. We then
+tried gzip 1.11, sed 4.8, and Python 2.7.18 from leopard.sh, all
+of which initially appeared to "build with tcc" — but they were
+silently using gcc due to an incomplete config.cache strip
+pattern (kept `ac_cv_prog_ac_ct_CC=gcc` from the binpkg). With
+strict tcc-only enforcement, all three hit distinct codegen / link
+bugs. Two small wins did land: tcc now predefines `__VERSION__`
+for Apple builds, and `lib-ppc.c` grew `__builtin_{isnan,isinf,
+isfinite}` stubs (Tiger's `<math.h>` `isnan(x)` macro expands to
+`__builtin_isnan(x)`, breaks at link time without the stub). The
+misleading demos were removed; full investigation including bug
+queue is in
+[REAL_WORLD_FINDINGS.md](REAL_WORLD_FINDINGS.md).
 
 ## Open work
 
@@ -114,6 +100,39 @@ Either path requires non-trivial scaffolding:
 
 Either is the obvious next session pickup if step-debugging on
 Tiger is desired.
+
+### Concrete tcc bugs surfaced (queued for next session)
+
+From the real-world program investigation:
+
+1. **Strict implicit-decl warning level.** tcc's permissive
+   handling of `int (*)()` for undeclared names makes
+   AC_CHECK_FUNC mis-detect glibc-isms (`__freading`,
+   `__fseterr`, `fdopendir`, ...) as available on Tiger, which
+   silently breaks downstream gnulib shim selection. A
+   `-Werror=implicit-function-declaration` analog (or a
+   strict-checking flag tcc honors during AC_CHECK_FUNC's
+   `int main() { foo(); }` test program) would fix the entire
+   class. See REAL_WORLD_FINDINGS.md.
+
+2. **`ppc-gen.c::store()` LDOUBLE-via-GPR-pair handling.** When
+   a struct copy moves a `long double` field through GPR pairs
+   (rather than via FP regs), `store()`'s GPR branch aborts with
+   `ppc-gen: store via ptr of bt 0xb (VT_LDOUBLE) not yet
+   supported`. Hits sed 4.8 via gnulib's `lib/stddef.h`
+   max_align_t struct. Local fix in `ppc-gen.c::store()`.
+
+3. **gzip 1.11 large-input DEFLATE codegen bug.** With genuine
+   tcc-built gzip 1.11, round-trip works for inputs up to ~4 KB
+   but breaks at 64 KB+ with CRC and length errors. Some path
+   inside `bits.c`/`trees.c`/`deflate.c` hits a tcc PPC codegen
+   bug. Bisect by switching individual .o's between gcc and tcc.
+
+4. **Python 2.7.18 `PyType_Ready` codegen bug.** With genuine
+   tcc-built python.exe, the binary links cleanly but startup
+   fatals with "Can't initialize type type" — `PyType_Ready` on
+   the metaclass fails. Deep tcc codegen bug somewhere in
+   `Objects/typeobject.c`. Same bisection methodology.
 
 ### Other open items
 
