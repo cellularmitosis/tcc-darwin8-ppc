@@ -110,16 +110,10 @@ fi
 echo "  $CC_LINE"
 
 # Strip Mac-framework bits (we only want the bare interpreter).
-# Also strip `-g` from CFLAGS — there's a known tcc -g bug when
-# emitting DWARF for a static-init struct array with an
-# extern-function-pointer field (Modules/config.c). Filed as a
-# follow-up; for now build without debug info.
 sed -i.bak \
     -e 's|Python/mactoolboxglue\.o||g' \
     -e 's|-u _PyMac_Error||g' \
     -e 's|-framework CoreFoundation||g' \
-    -e 's| -g | |g' \
-    -e 's|^OPT=\(.*\) -g\(.*\)|OPT=\1\2|' \
     Makefile
 
 echo "==> Building python.exe (this takes a few minutes on a G3)..."
