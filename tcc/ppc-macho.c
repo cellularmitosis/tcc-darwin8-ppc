@@ -5543,24 +5543,51 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
             }
             if (target_sect_idx < 0)
                 goto skip_pair_after;
-            /* Only resolve if the target section was discarded
-             * (stub / la_ptr / nl_symbol_ptr). For other targets
-             * we'd need a different handling, but in practice our
-             * own .o emissions only point at __nl_symbol_ptr. */
-            if (ctx->sec_to_tcc[target_sect_idx])
-                goto skip_pair_after;
-            und_sym = macho_resolve_stub_slot(ctx, target_sect_idx,
-                                               sc_value);
-            if (und_sym < 0)
-                goto skip_pair_after;
+            /* Two cases for the SECTDIFF target:
+             *
+             * (a) target_sect was discarded (stub / la_ptr /
+             *     nl_symbol_ptr). Resolve via the indirect symtab to
+             *     the underlying extern symbol; emit PIC reloc
+             *     against that.
+             *
+             * (b) target_sect is a real merged tcc section (text /
+             *     data / bss / const). The reloc was emitted by tcc
+             *     when the symbol was thought to be extern, then the
+             *     symbol got tentatively defined in the same TU.
+             *     The .o writer baked the .o-internal SECTDIFF
+             *     displacement into the addis/addi immediates; if
+             *     we don't translate the reloc, those displacements
+             *     are wrong in the linked binary. Synthesize an
+             *     anonymous local "anchor" sym pointing at the
+             *     target offset within the merged section and emit
+             *     R_PPC_*_PIC against it; the linker's PIC fallback
+             *     resolves correctly via SECTDIFF from the runtime
+             *     PIC anchor.
+             */
+            if (ctx->sec_to_tcc[target_sect_idx]) {
+                /* Case (b). */
+                Section *target_tcc = ctx->sec_to_tcc[target_sect_idx];
+                uint32_t merged_off =
+                    ctx->sec_to_off[target_sect_idx]
+                    + (sc_value - ctx->sects[target_sect_idx].addr);
+                new_sym = put_elf_sym(s1->symtab, merged_off, 0,
+                                       ELFW(ST_INFO)(STB_LOCAL, STT_NOTYPE),
+                                       0, target_tcc->sh_num, NULL);
+            } else {
+                /* Case (a). */
+                und_sym = macho_resolve_stub_slot(ctx, target_sect_idx,
+                                                   sc_value);
+                if (und_sym < 0)
+                    goto skip_pair_after;
 
-            new_sym = ctx->sym_old_to_new[und_sym];
-            if (new_sym == 0) {
-                new_sym = macho_translate_sym(s1, ctx, und_sym);
-                ctx->sym_old_to_new[und_sym] = new_sym;
+                new_sym = ctx->sym_old_to_new[und_sym];
+                if (new_sym == 0) {
+                    new_sym = macho_translate_sym(s1, ctx, und_sym);
+                    ctx->sym_old_to_new[und_sym] = new_sym;
+                }
+                if (new_sym == 0)
+                    goto skip_pair_after;
             }
-            if (new_sym == 0)
-                goto skip_pair_after;
 
             elf_type = (sc_type == PPC_RELOC_HA16_SECTDIFF)
                        ? R_PPC_HA16_PIC : R_PPC_LO16_PIC;
@@ -5575,6 +5602,20 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
                     sec_off + (pair_value - sec->addr);
                 ppc_pic_pair_record((int)(sec_off + sc_addr),
                                     (int)anchor_in_merged);
+            }
+            /* For case (b), the addis/addi immediates already hold
+             * the .o-internal displacement (sc_value - pair_value).
+             * Zero them so the linker's reloc handler writes a
+             * fresh delta rather than ORing with stale bits. */
+            if (ctx->sec_to_tcc[target_sect_idx]) {
+                uint32_t off = sec_off + sc_addr;
+                if (s->data && off + 4 <= s->data_offset) {
+                    /* The instruction is 4 bytes at `off`; we want to
+                     * zero only the low 16 bits (the immediate
+                     * field). Bytes 2 and 3 hold those. */
+                    s->data[off + 2] = 0;
+                    s->data[off + 3] = 0;
+                }
             }
 
 skip_pair_after:
