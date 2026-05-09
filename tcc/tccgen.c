@@ -3532,6 +3532,34 @@ error:
                 vtop->c.i = (vtop->c.ld != 0);
             } else {
                 if(sf) {
+#if defined(TCC_TARGET_PPC) && !defined(TCC_TARGET_PPC64)
+                    /* PPC fctiwz saturates float-to-int32 to
+                     * INT_MAX/INT_MIN and produces 0x80000000 for NaN.
+                     * The host's (int64_t)/(uint64_t) long-double cast
+                     * (via libgcc __fix*di) does not saturate to int32
+                     * range -- so a plain cast leaves the const-fold
+                     * result disagreeing with the runtime fctiwz path
+                     * for any out-of-range float. Emulate fctiwz here
+                     * for the int/short/byte targets so the const-fold
+                     * matches gen_cvt_ftoi at runtime. The VT_LLONG
+                     * target keeps the existing path because the
+                     * runtime there goes through __fixsfdi/__fixdfdi
+                     * (libtcc1 lib-ppc.c), whose overflow result
+                     * already matches the host helper. */
+                    if (dbt_bt != VT_LLONG) {
+                        long double ld = vtop->c.ld;
+                        if (ld != ld) {
+                            /* NaN -> 0x80000000 sign-extended */
+                            vtop->c.i = (int64_t)(int32_t)0x80000000;
+                        } else if (ld >= 2147483648.0L) {
+                            vtop->c.i = 0x7FFFFFFF;
+                        } else if (ld < -2147483648.0L) {
+                            vtop->c.i = (int64_t)(int32_t)0x80000000;
+                        } else {
+                            vtop->c.i = (int64_t)ld;
+                        }
+                    } else
+#endif
                     if (dbt & VT_UNSIGNED)
                         vtop->c.i = (uint64_t)vtop->c.ld;
                     else
