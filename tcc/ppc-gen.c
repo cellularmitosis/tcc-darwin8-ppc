@@ -1339,20 +1339,10 @@ ST_FUNC void store(int r, SValue *sv)
             case VT_INT:
             case VT_PTR:
             case VT_FUNC:  store_op = 0x90000000; break;
-            case VT_LLONG:
-                if (sv->r2 >= VT_CONST) {
-                    tcc_error("ppc-gen: PIC store VT_LLONG to global with no r2");
-                    return;
-                }
-                {
-                    int hi_gpr = TREG_TO_GPR(sv->r2);
-                    o(0x90000000 | (hi_gpr << 21) | (tmp_gpr << 16)
-                                 | (((int32_t)addend) & 0xffff));
-                    o(0x90000000 | (gpr << 21) | (tmp_gpr << 16)
-                                 | (((int32_t)(addend + 4)) & 0xffff));
-                    return;
-                }
             default:
+                /* VT_LLONG/VT_LDOUBLE never reach here: vstore() rewrites
+                 * the type to VT_INT/VT_DOUBLE and emits two single-word
+                 * stores before calling store(). */
                 tcc_error("ppc-gen: PIC store global of bt 0x%x not yet supported", bt);
                 return;
             }
@@ -1398,18 +1388,9 @@ ST_FUNC void store(int r, SValue *sv)
             case VT_INT:
             case VT_PTR:
             case VT_FUNC:  store_op = 0x90000000; break;
-            case VT_LLONG: {
-                int hi_gpr;
-                if (sv->r2 >= VT_CONST)
-                    tcc_error("ppc-gen: store VT_LLONG to global with no r2");
-                hi_gpr = TREG_TO_GPR(sv->r2);
-                o(0x90000000 | (hi_gpr << 21) | (tmp_gpr << 16)
-                             | (((int32_t)addend) & 0xffff));
-                o(0x90000000 | (gpr << 21) | (tmp_gpr << 16)
-                             | (((int32_t)(addend + 4)) & 0xffff));
-                return;
-            }
             default:
+                /* VT_LLONG/VT_LDOUBLE never reach here — see comment in
+                 * the PIC branch above. */
                 tcc_error("ppc-gen: store global+off of bt 0x%x not yet supported", bt);
             }
             o(store_op | (gpr << 21) | (tmp_gpr << 16)
@@ -1438,22 +1419,9 @@ ST_FUNC void store(int r, SValue *sv)
         case VT_INT:
         case VT_PTR:
         case VT_FUNC:  store_op = 0x90000000; break;  /* stw */
-        case VT_LLONG: {
-            /* High half then low half. Two stws with two relocs;
-             * the second uses addend+4 (= 4 here). Per upstream
-             * PowerPC ABI: works as long as (addend+4)'s sign bit
-             * matches addend's; for addend=0, +4 still has bit15=0. */
-            int hi_gpr;
-            if (sv->r2 >= VT_CONST)
-                tcc_error("ppc-gen: store VT_LLONG to global with no r2");
-            hi_gpr = TREG_TO_GPR(sv->r2);
-            greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
-            o(0x90000000 | (hi_gpr << 21) | (tmp_gpr << 16));
-            greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
-            o(0x90000000 | (gpr << 21) | (tmp_gpr << 16) | (4 & 0xffff));
-            return;
-        }
         default:
+            /* VT_LLONG/VT_LDOUBLE never reach here — see comment in
+             * the PIC branch above. */
             tcc_error("ppc-gen: store global of bt 0x%x not yet supported", bt);
         }
         greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
