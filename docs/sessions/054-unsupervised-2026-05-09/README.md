@@ -168,6 +168,123 @@ backrefs / intervals / line delete / append. PASS.
 * All v0.2.32–v0.2.39 demos still pass. Real-world demos
   (lua, bzip2, cJSON) still pass.
 
+### v0.2.41-g3 — gzip 1.11 round-trips at all sizes
+
+While trying to extend real-world program coverage to gzip
+1.11, found that tcc-built gzip produced corrupt deflate
+streams at inputs >= 64 KB. Self-decompression and system
+`/usr/bin/gunzip` both reported CRC errors. Smaller inputs
+(under ~63 KB) round-tripped fine.
+
+#### Bisection
+
+Per-`.o` swap test (replace one tcc-built `.o` with a
+gcc-4.0-built version, re-link, retest): isolated the bug to
+`deflate.o`.
+
+Within `deflate.c`, the bug only triggered at input sizes
+that crossed `WSIZE + MAX_DIST = 65274`, i.e. input >= 64 KB.
+`fill_window`'s slide path runs only when `strstart` reaches
+that threshold; under that threshold, the function only
+computes `more` and calls `read_buf`. Compressible-data
+test (`yes "abcdefgh" | dd bs=1024 count=N`) gave exactly:
+input 63 KB and below → OK; 64 KB and above → CRC error.
+
+Per-function swap (extracted `fill_window` into a separate
+`gcc_fw.c` rebuilt with gcc-4.0, made `static ulg
+window_size` non-static so the gcc copy could `extern` it,
+linked the gcc fill_window in place of tcc's): bug
+disappeared. So fill_window's tcc compilation was the
+culprit.
+
+#### Diagnosis
+
+Reading the asm of `fill_window`'s slide loop revealed:
+
+```
+00000a18  lwz r3, 0xfff4(r31)   ; r3 = n
+00000a1c  li  r4, 0x1
+00000a20  slw r3, r3, r4         ; r3 = n*2
+00000a24  addis r12, r30, 0x0
+00000a28  lwz r12, 0x1820(r12)    ; r12 = &prev (PIC slot deref)
+00000a2c  addi r4, r12, 0x0       ; r4 = &prev + 0  (!!!)
+00000a30  add  r4, r4, r3         ; r4 = &prev + n*2
+00000a34  lhz  r4, 0x0(r4)        ; r4 = prev[n] (NOT head[n])
+00000a38  stw  r4, 0xfff0(r31)    ; m = r4
+```
+
+For `head[n]` where `head` is `#define head (prev+WSIZE)`,
+the C expression decomposes to `*(prev + WSIZE + n)` —
+pointer = prev, byte offset = `WSIZE * sizeof(Pos)` =
+`32768 * 2` = `0x10000`, plus `n*2` runtime. tcc's load()
+PIC path used `(extra_off & 0xffff)` to encode the D-form
+immediate. With `extra_off = 0x10000`, this masked to 0 —
+the high half disappeared. The `addi r4, r12, 0x0`
+instruction added zero offset, leaving r4 pointing at
+prev[0] instead of head[0]. The slide loop then iterated
+over prev[] (not head[]) for both halves of the slide, so
+head[] was never updated and prev[] got partial correct +
+partial garbage updates. Subsequent hash lookups returned
+stale offsets pointing into the post-slide window's lower
+half, deflate emitted invalid back-references, gunzip
+detected the corruption.
+
+#### Fix
+
+`ppc_adjust_extra_off(int addr_gpr, int extra_off)` helper:
+when `extra_off` doesn't fit in 15-bit-signed (the D-form
+immediate range), emit `addis addr_gpr, addr_gpr,
+ha16(extra_off)` and return the lo16 portion. The caller
+uses the returned (smaller) lo16 in the load/store
+displacement, addr_gpr having been pre-adjusted.
+
+Applied at the top of all four PIC paths in `ppc-gen.c`:
+
+* `load()`'s extern-data PIC path (the `head[n]` read).
+* `load()`'s `lis/addi`-with-LO-reloc path (when
+  `extra_off != 0`, an addi materializes the full sym
+  address; the typed load that follows uses `extra_off`).
+* `load()`'s `!want_load` `lis/addi`-with-LO-reloc path
+  (also computes a sym+off address for store-target use).
+* `store()`'s extern-data PIC path (the `head[n] = ...`
+  write). Plus `store()`'s `lis/addi`-with-LO-reloc path
+  for completeness.
+
+Net: gzip 1.11 round-trips at all input sizes, including
+500 KB and `/etc/services` (~570 KB). System `/usr/bin/
+gunzip` accepts tcc-built gzip's output.
+
+#### Demo
+
+`demos/v0.2.41-gzip.sh` builds gzip 1.11 with strict tcc
+enforcement (same `leopard.sh-binpkg-cache` + env-pin
+pattern as the sed demo, minus `--disable-acl` since gzip
+doesn't use ACLs), confirms `CC=tcc` and `libSystem`-only
+linkage, and runs round-trips at 10 sizes from 1 KB to
+500 KB plus a real-world `/etc/services` round-trip,
+verifying both self-decompression AND system gunzip
+acceptance.
+
+#### Regression
+
+* Bootstrap fixpoint holds.
+* tests2 111/111.
+* abitest-cc 24/24, abitest-tcc 24/24, libtest, dlltest:
+  all pass.
+* All v0.2.32–v0.2.40 demos still pass. Real-world demos
+  (lua, bzip2, cJSON, sed): all pass.
+
+#### Notes for future work
+
+The PIC load/store paths still have other places where
+`extra_off & 0xffff` could be problematic if used at
+extremes (LLONG `+4` offset added on top of a lo16-fitting
+base; constant-propagated 32-bit offsets). The current fix
+covers the cases gzip exposes; extending it to LLONG
+high-half access and the `addend + 4` pattern in the
+LLONG-store paths is a straightforward follow-up if a
+real-world program surfaces it.
+
 ## Exit state
 
 HEAD: TBD on commit. Tag `v0.2.40-g3` to be created.
