@@ -1808,6 +1808,45 @@ static void load_packed_bf(CType *type, int bit_pos, int bit_size)
     int n, o, bits;
     save_reg_upstack(vtop->r, 1);
     vpush64(type->t & VT_BTYPE, 0); // B X
+#if defined(TCC_TARGET_PPC) && !defined(TCC_TARGET_PPC64)
+    /* On 32-bit BE PowerPC, the bitfield occupies bits MSB-first within
+     * its storage container per the SysV/AIX PowerPC ABI. tcc's struct
+     * layout assigns bit_pos as a running counter from 0; we interpret
+     * that counter MSB-first on BE so the layout matches gcc's. Walk
+     * bytes from the container's MSB end (low memory address on BE)
+     * toward the LSB end, accumulating bits MSB-first into the result.
+     *
+     * Inside each byte, "MSB position bit_pos" means the bit at
+     * machine bit (7 - bit_pos). The n bits at MSB positions
+     * [bit_pos, bit_pos+n) are at machine bits [8-bit_pos-n .. 7-bit_pos];
+     * a SHR by (8 - bit_pos - n) brings them to the LSB end. */
+    bits = bit_size;  /* save total for sign extension below */
+    o = bit_pos >> 3, bit_pos &= 7;
+    do {
+        vswap(); // X B
+        incr_bf_adr(o);
+        vdup(); // X B B
+        n = 8 - bit_pos;
+        if (n > bit_size)
+            n = bit_size;
+        if (8 - bit_pos - n > 0)
+            vpushi(8 - bit_pos - n), gen_op(TOK_SHR);
+        if (n < 8)
+            vpushi((1 << n) - 1), gen_op('&');
+        gen_cast(type);
+        /* X' = (X << n) | chunk */
+        vrotb(3); // B Y X
+        vpushi(n), gen_op(TOK_SHL);
+        gen_op('|'); // B X'
+        bit_size -= n, bit_pos = 0, o = 1;
+    } while (bit_size);
+    vswap(), vpop();
+    if (!(type->t & VT_UNSIGNED)) {
+        n = ((type->t & VT_BTYPE) == VT_LLONG ? 64 : 32) - bits;
+        vpushi(n), gen_op(TOK_SHL);
+        vpushi(n), gen_op(TOK_SAR);
+    }
+#else
     bits = 0, o = bit_pos >> 3, bit_pos &= 7;
     do {
         vswap(); // X B
@@ -1833,6 +1872,7 @@ static void load_packed_bf(CType *type, int bit_pos, int bit_size)
         vpushi(n), gen_op(TOK_SHL);
         vpushi(n), gen_op(TOK_SAR);
     }
+#endif
 }
 
 /* single-byte store mode for packed or otherwise unaligned bitfields */
@@ -1842,6 +1882,45 @@ static void store_packed_bf(int bit_pos, int bit_size)
     c = (vtop->r & (VT_VALMASK | VT_LVAL | VT_SYM)) == VT_CONST;
     vswap(); // X B
     save_reg_upstack(vtop->r, 1);
+#if defined(TCC_TARGET_PPC) && !defined(TCC_TARGET_PPC64)
+    /* BE PPC store: see comment on load_packed_bf for the layout
+     * convention. The next n bits we are writing into byte k are the
+     * bits of the value at LSB positions [total - written - n,
+     * total - written), and they go to MSB positions [bit_pos,
+     * bit_pos+n) of the byte (= machine bits [8-bit_pos-n .. 7-bit_pos]). */
+    {
+        int total = bit_size;
+        int written = 0;
+        o = bit_pos >> 3, bit_pos &= 7;
+        do {
+            incr_bf_adr(o); // X B
+            vswap(); //B X
+            c ? vdup() : gv_dup(); // B V X
+            vrott(3); // X B V
+            n = 8 - bit_pos;
+            if (n > bit_size)
+                n = bit_size;
+            if (total - written - n > 0)
+                vpushi(total - written - n), gen_op(TOK_SHR);
+            if (8 - bit_pos - n > 0)
+                vpushi(8 - bit_pos - n), gen_op(TOK_SHL);
+            if (n < 8) {
+                m = ((1 << n) - 1) << (8 - bit_pos - n);
+                vpushi(m), gen_op('&'); // X B V1
+                vpushv(vtop-1); // X B V1 B
+                vpushi(m & 0x80 ? ~m & 0x7f : ~m);
+                gen_op('&'); // X B V1 B1
+                gen_op('|'); // X B V2
+            }
+            vdup(), vtop[-1] = vtop[-2]; // X B B V2
+            vstore(), vpop(); // X B
+            written += n;
+            bit_size -= n, bit_pos = 0, o = 1;
+        } while (bit_size);
+    }
+    (void)bits;  /* unused on this branch */
+    vpop(), vpop();
+#else
     bits = 0, o = bit_pos >> 3, bit_pos &= 7;
     do {
         incr_bf_adr(o); // X B
@@ -1868,6 +1947,7 @@ static void store_packed_bf(int bit_pos, int bit_size)
         bits += n, bit_size -= n, bit_pos = 0, o = 1;
     } while (bit_size);
     vpop(), vpop();
+#endif
 }
 
 static int adjust_bf(SValue *sv, int bit_pos, int bit_size)
@@ -8110,6 +8190,23 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
                 bit_size = BIT_SIZE(vtop->type.t);
                 p = (unsigned char*)ptr + (bit_pos >> 3);
                 bit_pos &= 7, bits = 0;
+#if defined(TCC_TARGET_PPC) && !defined(TCC_TARGET_PPC64)
+                /* BE PPC: bit_pos is MSB-first within container; bytes
+                 * walked from MSB end (low addr) toward LSB end. Each
+                 * byte gets the next n MSB-most bits of val. */
+                {
+                    int total = bit_size;
+                    while (bit_size) {
+                        n = 8 - bit_pos;
+                        if (n > bit_size)
+                            n = bit_size;
+                        v = (val >> (total - bits - n)) << (8 - bit_pos - n);
+                        m = ((1 << n) - 1) << (8 - bit_pos - n);
+                        *p = (*p & ~m) | (v & m);
+                        bits += n, bit_size -= n, bit_pos = 0, ++p;
+                    }
+                }
+#else
                 while (bit_size) {
                     n = 8 - bit_pos;
                     if (n > bit_size)
@@ -8119,6 +8216,7 @@ static void init_putv(init_params *p, CType *type, unsigned long c)
                     *p = (*p & ~m) | (v & m);
                     bits += n, bit_size -= n, bit_pos = 0, ++p;
                 }
+#endif
             } else
             switch(bt) {
 	    case VT_BOOL:
