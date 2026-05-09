@@ -324,6 +324,32 @@ static inline int ppc_off_fits_d(int offset)
     return (int16_t)offset == offset;
 }
 
+/* Adjust `addr_gpr` so that the remaining displacement fits in a
+ * signed 16-bit immediate. If `extra_off` already fits, returns it
+ * unchanged. Otherwise emits `addis addr_gpr, addr_gpr, ha16(extra_off)`
+ * and returns the lo16 portion (signed 16-bit, may be negative).
+ *
+ * Used by the PIC load/store paths: when computing `head[n]` via the
+ * #define `head (prev+WSIZE)` pattern, the byte offset from prev is
+ * WSIZE * sizeof(Pos) = 0x10000, which doesn't fit in the D-form
+ * immediate. Without this adjustment, `extra_off & 0xffff` truncates
+ * to 0 and writes/reads land at prev[n] instead of head[n].
+ *
+ * Surfaced by gzip 1.11's fill_window: the slide path's
+ * `head[n] = (m >= WSIZE ? m-WSIZE : NIL)` updated prev[] (twice!)
+ * and never touched head[], corrupting the hash chains and producing
+ * gzip output with CRC errors at >= 64KB inputs. */
+static inline int ppc_adjust_extra_off(int addr_gpr, int extra_off)
+{
+    int ha;
+    if (ppc_off_fits_d(extra_off))
+        return extra_off;
+    ha = (((unsigned)extra_off + 0x8000u) >> 16) & 0xffff;
+    /* addis addr_gpr, addr_gpr, ha16 */
+    o(0x3c000000 | (addr_gpr << 21) | (addr_gpr << 16) | ha);
+    return (int16_t)(extra_off & 0xffff);
+}
+
 /* Materialize a 32-bit value into r0 via lis + ori. The pair
  * faithfully reconstructs the value (ori does not sign-extend), so
  * no +0x8000 fix-up is needed. */
@@ -788,7 +814,11 @@ ST_FUNC void load(int r, SValue *sv)
                 addr_gpr = 12;
             }
             ppc_emit_pic_addr_load(addr_gpr, sv->sym);
-            /* Now addr_gpr holds the *address* of the symbol. */
+            /* Now addr_gpr holds the *address* of the symbol. Fold
+             * any high bits of extra_off into addr_gpr via addis so
+             * the remaining displacement fits in the D-form
+             * immediate (signed 16-bit). */
+            extra_off = ppc_adjust_extra_off(addr_gpr, extra_off);
 
             if (!want_load) {
                 /* Address-of (with optional addend). */
@@ -878,6 +908,8 @@ ST_FUNC void load(int r, SValue *sv)
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
             o(0x38000000 | (dst_gpr << 21) | (addr_gpr << 16));
             if (extra_off != 0) {
+                /* Fold high bits via addis if extra_off > 15-bit signed. */
+                extra_off = ppc_adjust_extra_off(dst_gpr, extra_off);
                 /* addi dst_gpr, dst_gpr, extra_off */
                 o(0x38000000 | (dst_gpr << 21) | (dst_gpr << 16)
                              | (extra_off & 0xffff));
@@ -898,6 +930,8 @@ ST_FUNC void load(int r, SValue *sv)
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
             /* addi addr_gpr, addr_gpr, lo16(sym) */
             o(0x38000000 | (addr_gpr << 21) | (addr_gpr << 16));
+            /* Fold any high bits of extra_off into addr_gpr via addis. */
+            extra_off = ppc_adjust_extra_off(addr_gpr, extra_off);
             if (IS_FREG(r)) {
                 int fpr = TREG_TO_FPR(r);
                 if (bt == VT_FLOAT) {
@@ -1279,6 +1313,9 @@ ST_FUNC void store(int r, SValue *sv)
         if (need_pic) {
             tmp_gpr = 12;     /* scratch (not in tcc allocator) */
             ppc_emit_pic_addr_load(tmp_gpr, sv->sym);
+            /* Fold any high bits of addend into tmp_gpr via addis so
+             * the remaining displacement fits the D-form immediate. */
+            addend = ppc_adjust_extra_off(tmp_gpr, (int)addend);
             /* Now tmp_gpr holds the address of the symbol. Store
              * through it with addend as the byte offset. */
             if (IS_FREG(r)) {
@@ -1339,6 +1376,8 @@ ST_FUNC void store(int r, SValue *sv)
         if (addend != 0) {
             greloc(cur_text_section, sv->sym, ind, R_PPC_ADDR16_LO);
             o(0x38000000 | (tmp_gpr << 21) | (tmp_gpr << 16));
+            /* Fold any high bits of addend into tmp_gpr via addis. */
+            addend = ppc_adjust_extra_off(tmp_gpr, (int)addend);
             if (IS_FREG(r)) {
                 int fpr = TREG_TO_FPR(r);
                 if (bt == VT_FLOAT)
