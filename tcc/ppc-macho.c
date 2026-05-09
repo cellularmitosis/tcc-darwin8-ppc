@@ -1091,10 +1091,17 @@ static int classify_sym(TCCState *s1, ElfW(Sym) *sym,
         return 2;
     }
 
-    /* Defined in some section. Map elf section index to Mach-O. */
+    /* Defined in some section. Map elf section index to Mach-O.
+     * Skip synthesized sections (smap[j].elf == NULL): __picsymbolstub1,
+     * __la_symbol_ptr, __nl_symbol_ptr. They have no tcc-side Section
+     * counterpart so derefing .elf would crash. Surfaced when emitting
+     * DWARF info for an extern data symbol whose def we never saw —
+     * tccdbg.c emits a sym entry with a section-relative DW_OP_addr
+     * reloc, classify_sym walks the smap searching for the section. */
     *out_n_sect = NO_SECT;
     for (j = 0; j < nsec; j++) {
-        if (smap[j].elf->sh_num == sym->st_shndx) {
+        if (smap[j].elf
+            && smap[j].elf->sh_num == sym->st_shndx) {
             *out_n_sect = smap[j].msect_no;
             break;
         }
