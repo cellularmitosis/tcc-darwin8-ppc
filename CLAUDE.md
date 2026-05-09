@@ -86,6 +86,19 @@ End-of-session ritual: make sure the README captures the exit state
 clearly enough that the next session (you or a future Claude) can
 pick up cold without re-reading the diffs.
 
+If the session produced a `HANDOFF.md` in the session directory,
+**the very last line of the final summary message must be the
+relative path to it** so the user can paste it into the next
+session's prompt without scrolling. Format it as a markdown link
+on its own line, exactly like:
+
+```
+Next session: [docs/sessions/NNN-slug/HANDOFF.md](docs/sessions/NNN-slug/HANDOFF.md)
+```
+
+Don't bury the path in prose. One line, last line, copy-paste
+ready.
+
 ## Document everything
 
 Default to capturing liberally in the current session directory.
