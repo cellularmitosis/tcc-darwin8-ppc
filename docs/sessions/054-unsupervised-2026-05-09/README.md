@@ -285,6 +285,81 @@ high-half access and the `addend + 4` pattern in the
 LLONG-store paths is a straightforward follow-up if a
 real-world program surfaces it.
 
+### v0.2.42-g3 — Python 2.7.18 builds and runs
+
+After v0.2.41 landed, tested the previously-blocked Python
+2.7.18 build. The v0.2.40 + v0.2.41 fixes unblocked Python
+as a side effect — without any new code change.
+
+Pre-v0.2.41, tcc-built python.exe died at startup with
+`Fatal Python error: Can't initialize type type` somewhere
+in the `PyType_Ready` chain. v0.2.41's `extra_off`-
+truncation fix unblocks it: `PyTypeObject` is large
+(~220 bytes), with member offsets like `tp_basicsize` at
+~88, `tp_alloc` at ~140, `tp_iter` at ~160, etc. Many of
+these still fit in 15-bit signed (max 0x7fff = 32767), but
+some are at higher offsets when accessed via composite
+expressions or against nested type objects. The PIC
+load/store extra_off truncation was reading the wrong
+field values (low 16 bits of the offset), and PyType_Ready
+saw garbage where `tp_dict` / `tp_mro` / `tp_bases` should
+have been. The PyType_Ready check on metaclass slot
+inheritance bailed.
+
+After v0.2.41, the same Python source builds and runs the
+full interpreter loop: list comprehensions, recursion,
+class definition with methods, string operations, dict
+walks, exception handling, float formatting all work.
+
+#### -g regression discovered
+
+In the course of writing the demo, found that `tcc -g` on
+Python's `Modules/config.c` SIGBUSes. Minimized to:
+
+```c
+extern int v;
+int *p = &v;
+```
+
+— a global pointer initialized to the address of an extern
+(undef-in-this-TU) symbol. tccdbg.c crashes when emitting
+DWARF for `p`, likely in the location-info path that walks
+the symbol's reloc info for an UNDEF target.
+
+This is a regression from the v0.2.37–v0.2.39 DWARF arc.
+Filed in the open work queue. Workaround for the demo:
+strip `-g` from CFLAGS in the Python build (Python doesn't
+need debug info for the interpreter to work).
+
+#### Demo
+
+`demos/v0.2.42-python.sh`:
+- Downloads Python 2.7.18 source.
+- Pulls leopard.sh's binpkg config.cache and strips the
+  env-locked entries (same pattern as v0.2.40-sed and
+  v0.2.41-gzip).
+- Configures with `--without-pymalloc` (Python's custom
+  allocator interacts poorly with some Tiger malloc
+  patterns) and the gnulib AC_CHECK_FUNC env-pin set.
+- Strips `-g` from CFLAGS (workaround for the DWARF bug),
+  strips `Python/mactoolboxglue.o` from `MACHDEP_OBJS` and
+  `-u _PyMac_Error` / `-framework CoreFoundation` from
+  `LINKFORSHARED` (we're not building the Mac framework,
+  just the bare interpreter).
+- Builds python.exe (~150 .c files, several minutes on a
+  G3).
+- Verifies `python.exe -V` reports Python 2.7.18.
+- Runs a self-contained Python program exercising 6
+  feature areas, asserts each, prints "PASS".
+
+#### Regression
+
+* Bootstrap fixpoint holds (already verified at v0.2.41).
+* tests2 111/111 (already verified at v0.2.41).
+* abitest-cc 24/24, abitest-tcc 24/24, libtest, dlltest:
+  all pass.
+* All v0.2.32–v0.2.41 demos still pass.
+
 ## Exit state
 
 HEAD: TBD on commit. Tag `v0.2.40-g3` to be created.
