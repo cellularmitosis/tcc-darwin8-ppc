@@ -125,6 +125,14 @@
      * "]"`). gcc / clang both predefine it; tcc upstream doesn't. Set
      * it to a recognizable string so those programs compile. */
     #define __VERSION__ "4.0.1 (tcc-darwin8-ppc)"
+    /* gcc-4.0 (the system compiler we mimic) defaults to gnu89 inline
+     * semantics: `extern inline` provides the body for inlining only,
+     * with the canonical out-of-line definition supplied elsewhere.
+     * gnulib's c-ctype.h pattern relies on this — setting the macro
+     * makes _GL_INLINE expand to `extern inline __attribute__((__gnu_inline__))`
+     * (which tcc honours via TOK_GNU_INLINE), so each TU stops emitting
+     * its own strong copy of c_isspace etc. */
+    #define __GNUC_GNU_INLINE__ 1
     #define __APPLE_CC__ 1 /* for <TargetConditionals.h> */
     #define __LITTLE_ENDIAN__ 1
     #define _DONT_USE_CTYPE_INLINE_ 1

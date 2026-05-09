@@ -4139,6 +4139,8 @@ redo:
             break;
         case TOK_ALWAYS_INLINE1:
         case TOK_ALWAYS_INLINE2:
+        case TOK_GNU_INLINE1:
+        case TOK_GNU_INLINE2:
             ad->f.func_alwinl = 1;
             break;
         case TOK_SECTION1:
