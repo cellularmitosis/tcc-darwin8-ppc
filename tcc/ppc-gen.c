@@ -913,6 +913,10 @@ ST_FUNC void load(int r, SValue *sv)
             }
             gpr = TREG_TO_GPR(r);
             switch (bt) {
+            case VT_BOOL:
+                o(0x88000000 | (gpr << 21) | (addr_gpr << 16)
+                             | (extra_off & 0xffff));
+                return;
             case VT_BYTE:
                 o(0x88000000 | (gpr << 21) | (addr_gpr << 16)
                              | (extra_off & 0xffff));
@@ -1156,6 +1160,7 @@ ST_FUNC void store(int r, SValue *sv)
         }
         gpr = TREG_TO_GPR(r);
         switch (bt) {
+        case VT_BOOL:
         case VT_BYTE:
             o(0x98000000 | (gpr << 21) | (base_gpr << 16));
             return;
