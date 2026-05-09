@@ -5538,10 +5538,24 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
                 }
             }
 
-            /* Find the (discarded) section that contains sc_value. */
+            /* Find the section that contains sc_value. With -g,
+             * multiple debug sections (__debug_info, __debug_abbrev,
+             * etc.) all have addr=0 and combined sizes that overlap
+             * sc_value's address range — without filtering, the
+             * iteration picks the FIRST match, which is usually the
+             * wrong (debug) section. Limit the search to sections
+             * that can actually be SECTDIFF targets: real sections
+             * we merge (sec_to_tcc != NULL), or the discarded
+             * stub / la_ptr / nl_ptr sections. */
             target_sect_idx = -1;
             for (j = 0; j < ctx->nsec; j++) {
                 const struct mach_section *t = &ctx->sects[j];
+                int kind = t->flags & 0xff;
+                int is_stub_like = (kind == S_SYMBOL_STUBS
+                                    || kind == S_LAZY_SYMBOL_POINTERS
+                                    || kind == S_NON_LAZY_SYMBOL_POINTERS);
+                if (!ctx->sec_to_tcc[j] && !is_stub_like)
+                    continue;
                 if (sc_value >= t->addr
                  && sc_value <  t->addr + t->size) {
                     target_sect_idx = j;
