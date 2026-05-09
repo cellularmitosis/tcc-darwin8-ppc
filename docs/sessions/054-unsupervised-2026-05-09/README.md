@@ -396,6 +396,83 @@ defined check.
 Filed for next session — needs deeper bisection of the
 collect_extern_nlptrs / slot allocation path under -g.
 
+### v0.2.44-g3 — separate `-g` link bug fixed
+
+Stayed up another loop to chase the link-time bug. Bisected
+via debug printfs in `macho_translate_relocs`:
+
+```
+[XLT-DBG] sec='.text' sc_type=12 sc_addr=0x9c sc_value=0x180
+[XLT-DBG-A] target_sect=3 und_sym=-1
+```
+
+target_sect=3 with und_sym=-1 — meaning the SECTDIFF lookup
+matched section index 3, which then failed to resolve the
+stub. Section 3 in data_main.o (with -g) is `__debug_info`
+(addr=0, size=0x979). The real `__nl_symbol_ptr` is at addr
+0x180, size 4. The lookup loop:
+
+```c
+for (j = 0; j < ctx->nsec; j++) {
+    if (sc_value >= sects[j].addr
+     && sc_value < sects[j].addr + sects[j].size) {
+        target_sect_idx = j; break;
+    }
+}
+```
+
+took the FIRST section that contained sc_value=0x180. With
+-g, `__debug_info`'s [0, 0x979) range matched first (because
+debug sections come earlier in the section list and have
+addr=0); `__nl_symbol_ptr`'s [0x180, 0x184) was never
+reached.
+
+`macho_resolve_stub_slot(target_sect=3, sc_value=0x180)`
+then computed `entry_idx = (0x180 - 0) / 4 = 96` (way past
+the actual indirect table size of 3), returned -1.
+
+Without the matching reloc emitted into tcc's table, the
+linker had no record of these instruction sites — the
+`addis 0; lwz 0xec` immediates from the .o file remained,
+pointing at garbage addresses.
+
+Fix: in the section-search loop, only consider sections
+that can plausibly be SECTDIFF targets:
+- Real merged tcc sections (`sec_to_tcc[j] != NULL`).
+- Stub-like sections (S_SYMBOL_STUBS,
+  S_LAZY_SYMBOL_POINTERS, S_NON_LAZY_SYMBOL_POINTERS).
+
+Debug sections (and other discarded section types) are
+skipped, so their overlapping addr=0 ranges no longer
+shadow the real stub section.
+
+Side effect: tcc-built Python 2.7.18 with `-g` enabled now
+works (the v0.2.42 demo can drop its `-g`-stripping
+workaround). Verified.
+
+#### Demo
+
+`demos/v0.2.44-gdebug-link.sh`:
+- Compiles 3 .c files with -g (data.c, data_def.c,
+  data_main.c) — the `extern int v; int *p = &v;` cross-TU
+  pattern.
+- Links them into an exe with -g.
+- Runs the exe; verifies `*p == 42`.
+- Repeats with a function-pointer indirect-call test (3
+  TUs: extern function, function-pointer table init,
+  indirect call sequence with accumulator).
+- Prints `PASS`.
+
+#### Regression
+
+* Bootstrap fixpoint holds.
+* tests2 111/111.
+* abitest-cc 24/24, abitest-tcc 24/24, libtest, dlltest:
+  all pass.
+* All v0.2.32–v0.2.43 demos still pass.
+* Python 2.7.18 with -g enabled now works (v0.2.42 demo's
+  -g-strip workaround no longer needed).
+
 #### Demo
 
 `demos/v0.2.42-python.sh`:
