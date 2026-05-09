@@ -311,10 +311,10 @@ full interpreter loop: list comprehensions, recursion,
 class definition with methods, string operations, dict
 walks, exception handling, float formatting all work.
 
-#### -g regression discovered
+#### -g regression discovered (fixed in v0.2.43)
 
 In the course of writing the demo, found that `tcc -g` on
-Python's `Modules/config.c` SIGBUSes. Minimized to:
+Python's `Modules/config.c` SIGBUSed. Minimized to:
 
 ```c
 extern int v;
@@ -322,14 +322,79 @@ int *p = &v;
 ```
 
 — a global pointer initialized to the address of an extern
-(undef-in-this-TU) symbol. tccdbg.c crashes when emitting
-DWARF for `p`, likely in the location-info path that walks
-the symbol's reloc info for an UNDEF target.
+(undef-in-this-TU) symbol. The crash was in
+`ppc-macho.c::classify_sym`'s smap-walking loop, NULL-deref
+of `smap[j].elf->sh_num` when the smap entry was a
+synthesized __picsymbolstub1 / __la_symbol_ptr /
+__nl_symbol_ptr (which have `elf = NULL`).
 
-This is a regression from the v0.2.37–v0.2.39 DWARF arc.
-Filed in the open work queue. Workaround for the demo:
-strip `-g` from CFLAGS in the Python build (Python doesn't
-need debug info for the interpreter to work).
+Path: tccgen.c::init_putv emits R_DATA_PTR against the
+extern sym; put_extern_sym2 calls tcc_debug_extern_sym
+which emits a DWARF DW_TAG_variable entry with
+DW_AT_location pointing at v's runtime address. At OBJ
+write time, classify_sym needs to resolve v's section to
+fill the Mach-O nlist's n_sect — and walked smap[] doing
+`smap[j].elf->sh_num == sm->st_shndx` without checking
+for NULL elf.
+
+Fixed in v0.2.43 with a one-line NULL check matching the
+four other identical loops in the same file. Verified by
+`demos/v0.2.43-gdebug-extern.sh` — three patterns
+(extern data, extern function pointer, mixed struct
+array) compile cleanly with `-g`, all `dwarfdump`-clean.
+
+Workaround for the Python demo (still in v0.2.42):
+strip `-g` from CFLAGS — Python doesn't need debug info
+for the interpreter to work.
+
+#### Separate -g bug remaining
+
+After landing the v0.2.43 fix, found that `-g` linking
+across multiple .o files produces a binary that segfaults
+at runtime. Pre-v0.2.43, this case crashed at compile-time
+(due to the smap NULL deref); now it compiles but produces
+a buggy exe.
+
+Repro:
+```sh
+echo 'extern int v; int *p = &v;'      > data.c
+echo 'int v = 42;'                      > data_def.c
+echo 'extern int *p;
+#include <stdio.h>
+int main(void){ printf("*p = %d\n", *p); return *p == 42 ? 0 : 1; }' > data_main.c
+tcc -g -c data.c -o data.o
+tcc -g -c data_def.c -o data_def.o
+tcc -g -c data_main.c -o data_main.o
+tcc -g -o exe data.o data_def.o data_main.o
+./exe   # SIGSEGV
+```
+
+Single-source `tcc -g all.c -o exe` works. Compile-and-link
+in one pass works. Multi-`.o`-then-link fails.
+
+The asm difference: in the working case, `*p` is accessed
+via `addis r12, r30, 0x0; addi r12, r12, 0xae8` — direct
+address of `_p` (because by the time codegen sees the
+ref, p is already locally defined). In the broken case
+(separate compile), `*p` is `addis r12, r30, 0x0; lwz r12,
+0xec(r12)` — a PIC slot-deref pattern, but the slot
+displacement (0xec) points into __text, not into
+__nl_symbol_ptr. The slot-path resolver is taking
+nlptrs[slot_idx].slot_addr, but slot_addr is somehow
+pointing into __text.
+
+Hypothesis: with -g, the dwarf_info_section emits an
+R_PPC_ADDR32 reloc against `p` (for the DW_OP_addr). At
+link time, collect_extern_nlptrs walks all sections
+looking for relocs against UNDEF syms; though `p` is now
+defined (data.o brought it), some path is still
+allocating a slot for it (or the slot_addr calculation
+is using the wrong base section vmaddr). Possibly the
+dwarf reloc IS triggering a slot allocation despite the
+defined check.
+
+Filed for next session — needs deeper bisection of the
+collect_extern_nlptrs / slot allocation path under -g.
 
 #### Demo
 
