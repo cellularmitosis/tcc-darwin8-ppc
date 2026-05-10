@@ -1600,6 +1600,22 @@ ST_FUNC void gfunc_call(int nb_args)
             int gslot = gpr_alloc[src_index];
             int addr_gpr;
             int w;
+            /* Spill any vstack entries living in the ABI target slots
+             * we're about to overwrite with struct words. Without this,
+             * an earlier-allocated arg whose value lives in r{slot+3}
+             * gets clobbered by the struct word load, and pass 2's
+             * later arg setup reads from the corrupted reg.
+             *
+             * Mirrors the analogous save_reg() in the LL-in-GPR-pair
+             * path below. csmith --default-opts seed 1536 surfaced
+             * this with f(ptr, int, union8): the union went into
+             * r5+r6, clobbering arg1's pointer that regalloc had
+             * placed in r5 — final mr r3,r5 then put union-high
+             * into r3 instead of the pointer. */
+            for (w = 0; w < swords; w++) {
+                int slot = gslot + w;
+                if (slot < 8) save_reg(slot);
+            }
             gv(RC_INT);
             addr_gpr = TREG_TO_GPR(vtop->r & VT_VALMASK);
             /* mr r12, addr_gpr  (or rA, rS, rA == ori-form: or rA,rS,rS) */
