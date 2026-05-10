@@ -1714,10 +1714,22 @@ ST_FUNC void gfunc_call(int nb_args)
              * call), reload as int register(s) into the shadow GPRs. */
             if (gslot >= 0) {
                 int fpr = fslot + 1;           /* PPC reg number f1..f8 */
+                /* Spill any vstack entries living in the GPR-shadow
+                 * registers we're about to clobber. Without this, an
+                 * earlier-computed arg whose value happens to live in
+                 * r{gslot+3}.. gets overwritten by the shadow lwz, and
+                 * arg setup later in pass 2 reads the corrupted value
+                 * (see the LL straddle path for the analogous fix).
+                 *
+                 * csmith --float seed 3228 surfaced this with
+                 * `f((x &= helper(...)), 5.0f)`: the `&=` result lands
+                 * in r4, then arg2's float shadow does `lwz r4,16(r1)`
+                 * and clobbers it. */
                 if (bt == VT_FLOAT) {
                     if (gslot < 8) {
                         /* shadow in GPR: stfs fS, 16(r1); lwz rT, 16(r1) */
                         int target_lo = gslot + 3;
+                        save_reg(gslot);
                         o(0xd0010010 | (fpr << 21));
                         o(0x80010010 | (target_lo << 21));
                     } else {
@@ -1729,6 +1741,8 @@ ST_FUNC void gfunc_call(int nb_args)
                     /* both halves of double in GPR shadow:
                      * stfd fS,16(r1) ; lwz rT,16(r1) ; lwz rT+1,20(r1) */
                     int target_lo = gslot + 3;
+                    save_reg(gslot);
+                    save_reg(gslot + 1);
                     o(0xd8010010 | (fpr << 21));
                     o(0x80010010 | (target_lo << 21));
                     o(0x80010014 | ((target_lo+1) << 21));
@@ -1739,6 +1753,7 @@ ST_FUNC void gfunc_call(int nb_args)
                      * separately so the GPR and stack writes use a
                      * common source. */
                     int target_lo = gslot + 3;
+                    save_reg(gslot);
                     o(0xd8010010 | (fpr << 21));   /* stfd fS, 16(r1) */
                     o(0x80010010 | (target_lo << 21)); /* lwz r10, 16(r1) */
                     /* lwz r0, 20(r1) ; stw r0, 24+(gslot+1)*4 (r1) */
