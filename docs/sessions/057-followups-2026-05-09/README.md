@@ -54,31 +54,70 @@ the same box — rebuild was clean despite shared CPU):**
 Diff: 7 insertions, 39 deletions. No semantic change to
 reachable code.
 
+### Lua testes investigation on ibookg33 (handoff item #4)
+
+User suggested ibookg33 as a second Tiger PPC host. Set it
+up: tiger.sh installed `make-4.3` and `git-2.35.1`, rsync'd
+the repo from uranium, built tcc cleanly. One workaround:
+`/usr/local/bin/ar` → `/opt/cctools-667.3/bin/ar` errors
+with `dyld: incompatible cpu-subtype` on this iBook G3
+(probably a G4/AltiVec build of cctools). Passed
+`AR=/usr/bin/ar` to make instead. tests2 111/111 PASS.
+The `git` binary is broken (libiconv version mismatch);
+not blocking — uranium remains the source of truth and
+rsync handles transport.
+
+Then ran `docs/sessions/055-bughunt-2026-05-09/lua_testes.sh`
+end-to-end on ibookg33.
+
+**Finding: handoff item #4 was a phantom.** `files.lua`
+line 84 (`assert(io.output():seek() == 0)`) passes under
+*both* tcc-built and gcc-4.0-built lua on Tiger PPC. The
+actual failure in files.lua is at line 762 — the
+popen/pclose comparison test — and it fails the same way
+under *both* compilers because Tiger 10.4's `popen` /
+`pclose` semantics don't return the signal-exit metadata
+lua's test expects. The script's existing
+`if [ "$g_exit" != "0" ]; then SKIP` arm correctly classifies
+this as SKIP ("test infra issue not tcc"). Not a tcc bug.
+
+The first run also flagged `math.lua` and `sort.lua` as
+"FAIL (output diff)", but inspection shows pure
+non-determinism:
+
+* `math.lua`: prints `random seeds: <os.time()>, ...` and
+  statistical samples from `math.random`.
+* `sort.lua`: prints wall-clock `msec` timings and
+  `comparisons` counts (quicksort with a randomized pivot).
+* `constructs.lua`: prints `testing short-circuit
+  optimizations (X)` where `X = math.random(0, 1)`
+  (this is the non-determinism session 055's handoff
+  flagged).
+
+**Patch:** small per-test `diff -I` ignore-pattern map in
+`lua_testes.sh`'s compare phase. Re-run after the patch:
+**21 PASS, 0 FAIL, 1 SKIP** (files.lua infra issue). Clean
+signal.
+
+Net: lua-5.4.7's official testes suite (22 selected
+language tests) passes against tcc-built lua to the same
+fidelity as gcc-4.0-built lua, modulo Tiger's popen
+quirks. **Item #4 closed.**
+
 ## What's still open
 
-Same items as session 056's handoff except #5:
-
-1. **Push tags to origin** — `v0.2.46-g3` and now whatever
-   tag (if any) we'd cut from `3fd2e0a`. **Needs user OK**
-   before pushing per CLAUDE.md.
-2. **Triage csmith campaigns A/B/C** — campaigns running
-   throughout this session, expected to finish late evening
-   (started 18:33, 4-6h ETA). Look for `QUEUE_DONE`.
-3. **`--enable-builtin-kinds`** — needs imacg3 free.
-4. **Lua `files.lua` line 84** — needs imacg3 free.
-6. **Docs/STAB/AltiVec/bcheck** — out of scope for this
+1. **Push tags to origin** — `v0.2.46-g3` plus 4 unpushed
+   commits on main. **Needs user OK** per CLAUDE.md.
+2. **Triage csmith campaigns A/B/C** — running on imacg3
+   (started 18:33, 4-6h ETA), look for `QUEUE_DONE` flag at
+   `/Users/macuser/tmp/campaigns-056/`.
+3. **`--enable-builtin-kinds`** — needs csmith binary; not
+   installed on either PPC host (only pre-generated seed
+   files are). Deferred until csmith is built.
+4. ~~Lua testes~~ — closed this session.
+5. ~~Dead VT_LLONG store path~~ — closed earlier this
    session.
-
-## Why this session was short
-
-Three of four open items needed imacg3, and imacg3 was
-saturated by the campaigns. Item #5 (this session's
-contribution) was the only one I could verify cleanly
-without disrupting them — incremental ppc-gen.o rebuild
-fits in CPU-shared mode without affecting csmith throughput.
-
-The tag-pushing item needs explicit user authorization, so
-deferred to next interactive session.
+6. **Docs/STAB/AltiVec/bcheck** — out of scope.
 
 ## Notes for future sessions
 

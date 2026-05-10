@@ -131,7 +131,17 @@ for t in $TESTS; do
     if [ "$t_exit" != "$g_exit" ]; then
         FAIL=$((FAIL+1)); echo "FAIL $t (exit: gcc=$g_exit tcc=$t_exit)"; continue
     fi
-    if ! diff -q "$g_out" "$t_out" > /dev/null 2>&1; then
+    # Per-test ignore patterns for non-deterministic output:
+    # math.lua prints `os.time()`-derived random seeds and stat
+    # samples; sort.lua prints wall-clock msec timings and quicksort
+    # comparison counts (uses a randomized pivot).
+    case "$t" in
+        math.lua)       DIFF_OPTS=(-I "random seeds" -I "random range") ;;
+        sort.lua)       DIFF_OPTS=(-I "msec" -I "comparisons") ;;
+        constructs.lua) DIFF_OPTS=(-I "short-circuit optimizations") ;;
+        *)              DIFF_OPTS=() ;;
+    esac
+    if ! diff "${DIFF_OPTS[@]}" -q "$g_out" "$t_out" > /dev/null 2>&1; then
         FAIL=$((FAIL+1)); echo "FAIL $t (output diff)"; continue
     fi
     PASS=$((PASS+1)); echo "PASS $t"
