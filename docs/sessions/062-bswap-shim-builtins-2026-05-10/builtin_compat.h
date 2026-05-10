@@ -36,6 +36,21 @@
 #ifndef __BUILTIN_COMPAT_H_
 #define __BUILTIN_COMPAT_H_
 
+/*
+ * Prototypes for the bswap_compat.c shim functions. Without these,
+ * csmith-emitted calls to __builtin_bswap{32,64} / __builtin_ia32_crc32qi
+ * fall back to K&R implicit declaration (return int, args promoted),
+ * which is ABI-incompatible with the actual `unsigned long long` /
+ * `unsigned int` signatures on PPC32 (64-bit args/returns use r3:r4,
+ * 32-bit uses r3 only). The ABI mismatch is undefined behavior — both
+ * gcc and tcc happen to leave matching garbage in r4 in many cases, but
+ * not always (seed-8255 hits a case where they diverge). Declaring the
+ * prototypes here forces both compilers to use the correct 64-bit ABI.
+ */
+extern unsigned int __builtin_bswap32(unsigned int x);
+extern unsigned long long __builtin_bswap64(unsigned long long x);
+extern unsigned int __builtin_ia32_crc32qi(unsigned int crc, unsigned char data);
+
 static inline int __compat_clz(unsigned int x) {
     return x ? __builtin_clz(x) : 32;
 }
