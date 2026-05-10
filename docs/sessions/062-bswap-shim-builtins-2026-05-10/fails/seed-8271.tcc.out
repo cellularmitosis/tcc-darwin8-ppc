@@ -1,0 +1,5 @@
+/Users/macuser/tmp/csmith_campaign.sh: line 35:  8720 Segmentation fault      perl -e '
+        $SIG{ALRM} = sub { kill 9, -$$; exit 124 };
+        alarm shift @ARGV;
+        exec @ARGV;
+    ' "$timeout" "$@"

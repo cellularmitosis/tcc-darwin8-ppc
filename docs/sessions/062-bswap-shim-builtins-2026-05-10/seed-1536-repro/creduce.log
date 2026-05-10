@@ -1,0 +1,27 @@
+===< 72153 >===
+running 1 interestingness test in parallel
+===< pass_blank :: 0 >===
+(0.2 %, 24618 bytes)
+===< pass_lines :: 0 >===
+(0.1 %, 24641 bytes)
+(2.6 %, 24016 bytes)
+(4.8 %, 23460 bytes)
+(5.7 %, 23239 bytes)
+(6.7 %, 23012 bytes)
+(7.7 %, 22762 bytes)
+(8.1 %, 22650 bytes)
+(8.5 %, 22549 bytes)
+(9.3 %, 22357 bytes)
+(10.5 %, 22055 bytes)
+(10.9 %, 21959 bytes)
+(11.2 %, 21885 bytes)
+(11.7 %, 21781 bytes)
+(11.9 %, 21733 bytes)
+(12.0 %, 21703 bytes)
+(12.2 %, 21653 bytes)
+(12.4 %, 21608 bytes)
+(12.6 %, 21558 bytes)
+(13.8 %, 21264 bytes)
+(13.9 %, 21235 bytes)
+(14.0 %, 21199 bytes)
+(14.2 %, 21156 bytes)

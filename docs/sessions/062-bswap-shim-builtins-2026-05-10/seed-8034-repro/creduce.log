@@ -1,0 +1,33 @@
+===< 58627 >===
+running 1 interestingness test in parallel
+===< pass_blank :: 0 >===
+(0.1 %, 51142 bytes)
+===< pass_lines :: 0 >===
+(0.1 %, 51117 bytes)
+(1.6 %, 50388 bytes)
+(2.7 %, 49831 bytes)
+(3.2 %, 49551 bytes)
+(3.7 %, 49300 bytes)
+(4.2 %, 49021 bytes)
+(4.5 %, 48909 bytes)
+(32.4 %, 34608 bytes)
+(32.6 %, 34507 bytes)
+(51.0 %, 25091 bytes)
+(51.3 %, 24947 bytes)
+(52.1 %, 24494 bytes)
+(52.5 %, 24299 bytes)
+(52.7 %, 24233 bytes)
+(52.8 %, 24167 bytes)
+(53.0 %, 24063 bytes)
+(53.0 %, 24052 bytes)
+TERM caught, terminating 58627
+ at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 35.
+	main::__ANON__("TERM caught, terminating 58627\x{a}") called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 1003
+	main::sigHandler("TERM") called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 492
+	eval {...} called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 492
+	main::wait_helper() called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 665
+	main::delta_pass(HASH(0x11d80cc98)) called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 1080
+ at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 35.
+	main::__ANON__("TERM caught, terminating 58627\x{a} at /opt/homebrew/Cellar/credu"...) called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 492
+	main::wait_helper() called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 665
+	main::delta_pass(HASH(0x11d80cc98)) called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 1080
