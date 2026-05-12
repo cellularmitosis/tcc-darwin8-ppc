@@ -21,11 +21,14 @@ instead of `RC_INT | RC_R(9)`. Tcc's int pool drops from 10 slots
 **Regression suite:** all green (fixpoint, tests2 111/111, abitest
 24/24, demos/v0.2.47).
 
-**Csmith re-sweep:** 1000-seed default-opts on ibookg37 against
-the post-fix tcc — **873 PASS / 0 FAIL / 127 SKIP**, clean. Better
-than session 065's run (872 PASS / 1 FAIL / 127 SKIP) by exactly
-the one fix. Summary on host:
-`/Users/macuser/tmp/csmith-out-066-default/SUMMARY.txt`.
+**Csmith re-sweep (two hosts, parallel):**
+* ibookg37 default-opts 1-1000: **873 PASS / 0 FAIL / 127 SKIP**,
+  clean. Better than session 065's run (872 / 1 / 127) by exactly
+  the one fix. Summary:
+  `/Users/macuser/tmp/csmith-out-066-default/SUMMARY.txt`.
+* imacg3 --builtins+bitfields 8020-8419: **352 PASS / 0 FAIL /
+  48 SKIP**, matches session 065 byte-for-byte. Summary:
+  `/Users/macuser/tmp/csmith-out-066-builtins/SUMMARY.txt`.
 
 **v0.2.48-g3 tag:** **created (local only, not pushed)** on
 commit `1f32055`. Subject:

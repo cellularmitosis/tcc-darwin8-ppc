@@ -33,6 +33,7 @@ ended up `0x07` instead of `0xA7` (= `0xA4 | 7`).
 | Regression suite | fixpoint HOLDS, tests2 111/111, abitest 24/24, demos/v0.2.47 All PASS |
 | seed-732 closes | gcc/tcc match `76F5DB56` byte-identical |
 | 1000-seed default-opts re-sweep (ibookg37) | **873 PASS / 0 FAIL / 127 SKIP** (1 better than session 065) |
+| 400-seed builtins+bitfields re-sweep (imacg3) | **352 PASS / 0 FAIL / 48 SKIP** (matches session 065) |
 | v0.2.48-g3 tag | created locally on commit `1f32055`; push pending user sign-off |
 
 ## Investigation flow
