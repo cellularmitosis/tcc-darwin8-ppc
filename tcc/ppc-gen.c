@@ -154,8 +154,18 @@ ST_DATA const int reg_classes[NB_REGS] = {
     RC_INT | RC_R(7),
     /* 8: r11 (scratch) */
     RC_INT | RC_R(8),
-    /* 9: r12 (scratch) */
-    RC_INT | RC_R(9),
+    /* 9: r12 — NOT allocatable. Hardcoded as scratch by many
+     * codegen paths (lis r12, ha(sym); D-form ld/st via r12;
+     * gfunc_call struct-arg base; ppc_load_fp_const) that don't
+     * go through the register allocator. Leaving r12 in the pool
+     * lets get_reg() place a live vstack value in r12, which
+     * then gets silently overwritten by the next `lis r12, ha`
+     * — surfaced by csmith default-opts seed 732 as a g_359.f0
+     * miscompile (high register pressure pushed *l_505 into r12,
+     * then `*l_505 |= g_26.f0`'s load of g_26 clobbered the
+     * just-read byte). Keeping r12 reserved costs one int slot
+     * but eliminates the whole class. */
+    0,
     /* 10..22: f1..f13 */
     RC_FLOAT | RC_F(0),
     RC_FLOAT | RC_F(1),
