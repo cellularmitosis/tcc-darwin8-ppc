@@ -11,8 +11,9 @@ pressure the allocator parked a live vstack value in r12, then the
 next `lis r12, ha` silently destroyed it.
 
 * HEAD at session start: `05544a4` (session 065 validation docs).
-* HEAD at session end: `1f32055` (this session's ppc-gen.c fix) +
-  session 066 docs commit.
+* HEAD at session end: `4bb47be` (creduce-post setup). Session
+  commits in order: `1f32055` (the fix), `1d5c818` (docs), then
+  three follow-ups (`dc50403`, `90abcf1`, `cefea61`, `4bb47be`).
 
 **Fix:** one-line change in `tcc/ppc-gen.c` — set `reg_classes[9] = 0`
 instead of `RC_INT | RC_R(9)`. Tcc's int pool drops from 10 slots
@@ -53,11 +54,27 @@ commit `1f32055`. Subject:
     allocation order that csmith produced but I couldn't
     reverse-engineer by hand. Kept for the record; future
     creduce passes can start from seed-732 itself.
-  * `creduce/` — a creduce setup using a remote-imacg3 predicate.
-    Stopped at 73 lines / 39 KB when the fix landed and the
-    predicate stopped reproducing. `test.c` is the partial
-    reduction at kill-time (~13% smaller than the 922-line
-    original `test.c.orig`); `test.sh` is the predicate.
+  * `creduce/` — first-attempt creduce setup with a single-tcc
+    predicate (gcc-vs-tcc disagrees). Stopped at 73 lines / 39 KB
+    when the fix landed and the predicate stopped reproducing.
+    `test.c` is the partial reduction at kill-time (~13% smaller
+    than the 922-line original `test.c.orig`); `test.sh` is the
+    predicate.
+  * `creduce-post/` — second-attempt creduce with a strict 3-way
+    predicate (gcc-and-post-fix-tcc agree AND pre-fix-tcc
+    disagrees). Stalled at 735 lines / 39 KB (~14% reduction)
+    — every meaningful reduction killed the register-pressure
+    that triggers the bug. Setup kept for future reduction
+    attempts; `test.c` reset to the 922-line starting point.
+
+* `demos/v0.2.48-r12-clobber.{c,sh}` — the v0.2.48 milestone
+  demo. The .c is the unmodified seed-732 program; the .sh
+  compiles + runs it and asserts the end-of-run checksum is
+  `76F5DB56` (gcc-4.0 -O0 reference). Verified on imacg3 and
+  ibookg37; both PASS. Requires the csmith runtime headers
+  at `CSMITH_INC` (default `/Users/macuser/tmp/csmith`).
+
+* `demos/README.md` — table row for v0.2.48-r12-clobber.
 
 ## Status of session 065's open items
 
@@ -65,7 +82,7 @@ commit `1f32055`. Subject:
 |---|---|---|
 | 1 | seed-732 fix | landed (this session) |
 | 2 | v0.2.48-g3 tag | **created locally**; push pending user sign-off |
-| 3 | (optional) v0.2.48 demo | pending — see "Open work" #2 |
+| 3 | (optional) v0.2.48 demo | **landed** (demos/v0.2.48-r12-clobber.{c,sh}) — seed-732 vendored verbatim |
 | 4 | libtcc1.a clz/ctz to match gcc-PPC | unchanged |
 | 5 | csmith building on a PPC host | unchanged |
 | 6 | ibookg38 — back online or written off | unchanged |
@@ -86,27 +103,29 @@ Per session convention, **do not push without explicit user
 sign-off**. The HANDOFF for session 065 (and prior sessions) all
 explicitly say so.
 
-### 2. Build a v0.2.48 demo
+### 2. (LANDED) v0.2.48 demo
 
-The natural shape is a tiny self-contained program in `demos/`
-that exhibits the bug-class (high register pressure + global byte
-load) and verifies post-fix tcc produces gcc-identical output.
-But the bug is sensitive enough to register allocation that none
-of `repro_v1.c .. repro_v7.c` actually triggers it pre-fix.
+Shipped this session: `demos/v0.2.48-r12-clobber.{c,sh}`. The .c
+is seed-732 verbatim. The .sh compiles + runs it and asserts
+the end-of-run checksum is `76F5DB56` (gcc-4.0 -O0 reference).
+Verified on imacg3 and ibookg37.
 
-Approach for the demo:
-* Use a (re-run) creduce against a frozen pre-fix tcc as oracle:
-  `/tmp/tcc-prefix` exists on ibookg37 (copy of `tcc.pre-065.bak`,
-  which is May-6 / pre-064 — the bug exists there too). Predicate
-  = "gcc and the FROZEN pre-fix tcc disagree at g_359.f0". This
-  isolates the bug-class without requiring the user's current
-  tcc to have the bug.
-* Once reduced, paste into `demos/v0.2.48-r12-clobber.c` with a
-  `demos/v0.2.48-r12-clobber.sh` that compiles + runs against the
-  user's tcc and asserts the output matches gcc-4.0 -O0's.
+Two creduce attempts ran during the session; neither produced
+a minimal hand-built repro:
+* First attempt (`creduce/`): reduced 922 → 73 lines under a
+  loose "gcc-vs-tcc disagree" predicate, but the result was
+  still essentially seed-732 minus comments + unused globals,
+  not a different shape.
+* Second attempt (`creduce-post/`): strict 3-way predicate
+  (`gcc=post-fix-tcc AND pre-fix-tcc disagrees`). Stalled at
+  735 lines — every meaningful reduction killed the
+  register-pressure trigger. The bug is genuinely sensitive
+  enough to the specific allocation order csmith produces that
+  it doesn't shrink usefully.
 
-Skipped this session because the fix takes priority and the
-1000-seed re-sweep is the primary correctness signal.
+A reduced repro is no longer blocking. If a future session
+wants one, restart creduce-post/ from `test.c.orig` and give it
+hours, not minutes.
 
 ### 3. Sibling r11 — keep an eye on it
 
