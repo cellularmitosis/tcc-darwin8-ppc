@@ -84,9 +84,13 @@ int BUILTIN(ffsl) (long x) __attribute__((alias(BUILTINN(ffsll))));
 #endif
 
 /* Returns the number of leading 0-bits in x, starting at the most significant
-   bit position. If x is 0, the result is undefined.  */
-int BUILTIN(clz) (unsigned int x) { CLZI(x) }
-int BUILTIN(clzll) (unsigned long long x) { CLZL(x) }
+   bit position. If x is 0, the result is undefined per the gcc spec, but
+   tcc-darwin8-ppc deliberately matches gcc-4.0-on-PPC's observed value
+   (32/64) so csmith differential testing doesn't need a UB shim. clrsb()
+   below still uses the bare CLZI/CLZL macros — clrsb(0) must return 31/63
+   per the gcc spec (no UB), and the de-Bruijn fallback gives exactly that. */
+int BUILTIN(clz) (unsigned int x) { if (!x) return 32; CLZI(x) }
+int BUILTIN(clzll) (unsigned long long x) { if (!x) return 64; CLZL(x) }
 #if __SIZEOF_LONG__ == 4
 int BUILTIN(clzl) (unsigned long x) __attribute__((alias(BUILTINN(clz))));
 #else
@@ -94,9 +98,13 @@ int BUILTIN(clzl) (unsigned long x) __attribute__((alias(BUILTINN(clzll))));
 #endif
 
 /* Returns the number of trailing 0-bits in x, starting at the least
-   significant bit position. If x is 0, the result is undefined. */
-int BUILTIN(ctz) (unsigned int x) { CTZI(x) }
-int BUILTIN(ctzll) (unsigned long long x) { CTZL(x) }
+   significant bit position. If x is 0, the result is undefined per the
+   gcc spec. tcc-darwin8-ppc matches gcc-4.0-on-PPC's observed values:
+   ctz(0) = -1 (== 31 - cntlzw(0), which is gcc's inline pattern); and
+   ctzll(0) = 31 (== gcc-4.0's libgcc __ctzdi2 returning ctz(lo) + 32 with
+   lo == 0). Matches builtin_compat.h's documented reference. */
+int BUILTIN(ctz) (unsigned int x) { if (!x) return -1; CTZI(x) }
+int BUILTIN(ctzll) (unsigned long long x) { if (!x) return 31; CTZL(x) }
 #if __SIZEOF_LONG__ == 4
 int BUILTIN(ctzl) (unsigned long x) __attribute__((alias(BUILTINN(ctz))));
 #else
