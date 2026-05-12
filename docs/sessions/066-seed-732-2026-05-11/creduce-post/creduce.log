@@ -1,0 +1,28 @@
+===< 11015 >===
+running 4 interestingness tests in parallel
+===< pass_unifdef :: 0 >===
+===< pass_comments :: 0 >===
+(13.2 %, 39459 bytes)
+timestamp 14 size 39459
+===< pass_ifs :: 0 >===
+===< pass_includes :: 0 >===
+===< pass_line_markers :: 0 >===
+===< pass_blank :: 0 >===
+(13.3 %, 39406 bytes)
+timestamp 26 size 39406
+===< pass_clang_binsrch :: replace-function-def-with-decl >===
+===< pass_clang_binsrch :: remove-unused-function >===
+===< pass_lines :: 0 >===
+(14.1 %, 39049 bytes)
+timestamp 436 size 39049
+TERM caught, terminating 11015
+ at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 35.
+	main::__ANON__("TERM caught, terminating 11015\x{a}") called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 1003
+	main::sigHandler("TERM") called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 492
+	eval {...} called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 492
+	main::wait_helper() called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 665
+	main::delta_pass(HASH(0x143563450)) called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 1080
+ at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 35.
+	main::__ANON__("TERM caught, terminating 11015\x{a} at /opt/homebrew/Cellar/credu"...) called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 492
+	main::wait_helper() called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 665
+	main::delta_pass(HASH(0x143563450)) called at /opt/homebrew/Cellar/creduce/2.10.0_5/libexec/creduce line 1080
