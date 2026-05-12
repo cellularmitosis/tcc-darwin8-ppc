@@ -30,9 +30,10 @@ ended up `0x07` instead of `0xA7` (= `0xA4 | 7`).
 | Hand-instrumented seed-732 to pinpoint the failing site | line 467: `(*l_505) |= g_26.f0` inside func_8 |
 | Added sentinel `volatile int __sentinel = 0x7320/0x7321` to bracket the statement and disassembled the resulting tcc-produced .tcc with `otool -tV` | r12-clobber visible in 9 instructions |
 | Fix: removed r12 from `reg_classes[]` (slot 9 → `0` instead of `RC_INT \| RC_R(9)`) | r12 is now reserved as pure scratch |
-| Regression suite | pending (this README updates as runs land) |
-| seed-732 closes | pending |
-| 1000-seed default-opts re-sweep | pending |
+| Regression suite | fixpoint HOLDS, tests2 111/111, abitest 24/24, demos/v0.2.47 All PASS |
+| seed-732 closes | gcc/tcc match `76F5DB56` byte-identical |
+| 1000-seed default-opts re-sweep (ibookg37) | **873 PASS / 0 FAIL / 127 SKIP** (1 better than session 065) |
+| v0.2.48-g3 tag | created locally on commit `1f32055`; push pending user sign-off |
 
 ## Investigation flow
 

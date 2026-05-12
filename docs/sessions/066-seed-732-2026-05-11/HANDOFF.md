@@ -21,14 +21,15 @@ instead of `RC_INT | RC_R(9)`. Tcc's int pool drops from 10 slots
 **Regression suite:** all green (fixpoint, tests2 111/111, abitest
 24/24, demos/v0.2.47).
 
-**Csmith re-sweep:** 1000-seed default-opts on ibookg37 launched
-with the post-fix tcc; in progress as of session close. See
-"How to pick up" for the SUMMARY.txt path and the watch command.
+**Csmith re-sweep:** 1000-seed default-opts on ibookg37 against
+the post-fix tcc — **873 PASS / 0 FAIL / 127 SKIP**, clean. Better
+than session 065's run (872 PASS / 1 FAIL / 127 SKIP) by exactly
+the one fix. Summary on host:
+`/Users/macuser/tmp/csmith-out-066-default/SUMMARY.txt`.
 
-**v0.2.48-g3 tag:** **pending** until the re-sweep confirms clean.
-The tag SHOULD land on `1f32055` (the ppc-gen.c fix commit, not
-the docs commit) — tag subject: `v0.2.48-g3: close seed-732
-(r12 reg-allocator clobber)`.
+**v0.2.48-g3 tag:** **created (local only, not pushed)** on
+commit `1f32055`. Subject:
+`v0.2.48-g3: r12 reg-allocator clobber fix (closes seed-732)`.
 
 ## What landed
 
@@ -60,7 +61,7 @@ the docs commit) — tag subject: `v0.2.48-g3: close seed-732
 | # | Item | Status |
 |---|---|---|
 | 1 | seed-732 fix | landed (this session) |
-| 2 | v0.2.48-g3 tag | pending — see "Open work" #1 |
+| 2 | v0.2.48-g3 tag | **created locally**; push pending user sign-off |
 | 3 | (optional) v0.2.48 demo | pending — see "Open work" #2 |
 | 4 | libtcc1.a clz/ctz to match gcc-PPC | unchanged |
 | 5 | csmith building on a PPC host | unchanged |
@@ -69,33 +70,18 @@ the docs commit) — tag subject: `v0.2.48-g3: close seed-732
 
 ## Open work for next session
 
-### 1. Confirm clean 1000-seed re-sweep, then tag v0.2.48-g3
+### 1. Push v0.2.48-g3 tag (user confirmation required)
 
-In progress at session close. Check ibookg37:
-
-```sh
-ssh ibookg37 'wc -l /Users/macuser/tmp/csmith-out-066-default/SUMMARY.txt
-grep -c "^FAIL " /Users/macuser/tmp/csmith-out-066-default/SUMMARY.txt
-tail -3 /Users/macuser/tmp/csmith-out-066-default/SUMMARY.txt'
-```
-
-Once the line count reaches 1000+ and FAIL count is 0:
+The tag exists locally on `1f32055`. Pushing it makes the release
+public:
 
 ```sh
-# Tag the fix commit (NOT the docs commit). Suggested subject:
-git tag -a v0.2.48-g3 1f32055 -m \
-  'v0.2.48-g3: close seed-732 (r12 reg-allocator clobber)
-
-   Removes r12 from tcc'\''s PPC int register allocator pool. r12
-   was both allocatable AND hardcoded as scratch by load(),
-   store(), ppc_load_fp_const(), and gfunc_call'\''s struct-arg
-   base; under high pressure the allocator placed a live vstack
-   value in r12 that the next lis r12, ha clobbered. Closes the
-   lone fail from session 065'\''s 1000-seed default-opts campaign.'
-# Don't push the tag without user confirmation.
+git push origin v0.2.48-g3
 ```
 
-For the tag pattern, see `git tag -l --format='%(refname:short)|%(subject)' v0.2.4[5-7]-g3`.
+Per session convention, **do not push without explicit user
+sign-off**. The HANDOFF for session 065 (and prior sessions) all
+explicitly say so.
 
 ### 2. Build a v0.2.48 demo
 
