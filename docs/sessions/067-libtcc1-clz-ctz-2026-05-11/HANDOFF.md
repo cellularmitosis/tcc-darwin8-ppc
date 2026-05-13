@@ -7,10 +7,11 @@ Closed open item #4 from session 066's HANDOFF: tcc's libtcc1.a
 now match gcc-4.0 on PPC at the UB input `x == 0`.
 
 * **HEAD at session start:** `5a80c8f` (session 066 roadmap update).
-* **HEAD at session end:** `<docs commit, see below>`.
-* **v0.2.49-g3 tag:** created locally on `e6d435a` (the
-  `tcc/lib/builtin.c` source fix commit). **Not pushed** — per
-  session convention, awaits explicit user sign-off.
+* **HEAD at session end:** `df31e67` (csmith build script + post-
+  session addendum).
+* **v0.2.49-g3 tag:** on origin, pointing at `e6d435a` (the
+  `tcc/lib/builtin.c` source fix commit). Pushed 2026-05-12 with
+  user sign-off.
 
 **Fix:** four `if (!x) return XX;` short-circuits in
 `tcc/lib/builtin.c`'s `BUILTIN(clz)` / `BUILTIN(clzll)` /
@@ -34,9 +35,13 @@ on imacg3.
 updated (`host_ibookg38.md`, `MEMORY.md`); future sessions should
 treat the fleet as `uranium + imacg3 + ibookg37`.
 
-**csmith binary location captured:** uranium is the only fleet
-host with a csmith binary — `/opt/homebrew/bin/csmith` (Homebrew
-2.3.0). `host_ibookg37.md` updated to reflect this.
+**csmith now on a PPC host:** built csmith 2.3.0 from source on
+ibookg37 at `/Users/macuser/csmith-2.3.0/bin/csmith` via the new
+`scripts/build-csmith-on-ppc.sh`. Closes session 066/067 open
+item #5. uranium retains `/opt/homebrew/bin/csmith` (Homebrew
+2.3.0) for generation; ibookg37 is the first PPC host with its
+own csmith. See the post-session addendum in the README for the
+full story.
 
 ## What landed
 
@@ -56,8 +61,12 @@ host with a csmith binary — `/opt/homebrew/bin/csmith` (Homebrew
 
 Memory updates (uranium-side, not in git):
 * `host_ibookg38.md` — marked **WRITTEN OFF**.
-* `host_ibookg37.md` — csmith binary note narrowed to uranium-only.
+* `host_ibookg37.md` — csmith binary install captured
+  (`/Users/macuser/csmith-2.3.0/bin/csmith`, otool deps recorded).
 * `MEMORY.md` — index lines re-flowed to match.
+
+Also added this session: [`scripts/build-csmith-on-ppc.sh`](../../../scripts/build-csmith-on-ppc.sh)
+— a one-shot csmith builder used to produce the ibookg37 install.
 
 ## Build-infra gotcha captured
 
@@ -89,17 +98,10 @@ failure mode is silent.
 
 ## Open work for next session
 
-### 1. Push v0.2.49-g3 tag (user confirmation required)
+### 1. (LANDED) v0.2.49-g3 tag pushed
 
-Tag exists locally on `e6d435a` (the source fix commit, not the
-docs commit). Pushing it makes the release public:
-
-```sh
-git push origin v0.2.49-g3
-```
-
-Per session convention, **do not push without explicit user
-sign-off**.
+Pushed to origin on 2026-05-12 with user sign-off. Tag points at
+`e6d435a` (the source-fix commit, not the docs commit).
 
 ### 2. (LANDED) csmith building on a PPC host
 
