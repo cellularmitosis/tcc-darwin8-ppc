@@ -83,7 +83,7 @@ failure mode is silent.
 | 2 | v0.2.48 demo | landed in 066 |
 | 3 | Sibling r11 watch | unchanged (no surface yet) |
 | 4 | **libtcc1.a clz/ctz to match gcc-PPC** | **landed (this session)** |
-| 5 | csmith building on a PPC host | unchanged (still uranium-only) |
+| 5 | **csmith building on a PPC host** | **landed.** Built csmith 2.3.0 from source on ibookg37 (`/Users/macuser/csmith-2.3.0/bin/csmith`) via `scripts/build-csmith-on-ppc.sh`. Verified: `csmith --seed 1` output compiles + runs identically under gcc-4.0 and post-067 tcc (checksum `69F30756`) |
 | 6 | ibookg38 — back online or written off | **written off** (bad hardware) |
 | 7 | OSO STAB / self-link / AltiVec / bcheck | unchanged |
 
@@ -101,13 +101,23 @@ git push origin v0.2.49-g3
 Per session convention, **do not push without explicit user
 sign-off**.
 
-### 2. (carried) csmith building on at least one PPC host
+### 2. (LANDED) csmith building on a PPC host
 
-Uranium remains the only host with a csmith binary. Building csmith
-on Tiger PPC is non-trivial (C++, libstdc++ on PPC32). If we want
-independent corpus generation, this is a half-day to one-day lift
-(probably gcc-4.9 from `/opt`, plus working around csmith's
-configure assumptions). Not blocking — `scp` from uranium is fine.
+Closed in the post-session cleanup pass on 2026-05-12. ibookg38 came
+briefly back up but a `find / -name csmith` came up empty (the binary
+was probably in `/tmp` or somewhere reboot-wiped). Rebuilt from source
+on ibookg37 via the new `scripts/build-csmith-on-ppc.sh` — a
+self-contained one-shot bash script that downloads csmith-2.3.0 from
+GitHub (sha256-verified against the Homebrew formula), builds with
+`/opt/gcc-4.9.4`, and installs to `$HOME/csmith-2.3.0/`. Idempotent
+(re-runs short-circuit if already installed) so it's safe to re-invoke
+on any G3 host that needs a copy.
+
+ibookg37 now has both csmith **runtime headers** (legacy at
+`/Users/macuser/tmp/csmith/`) and the **csmith binary**
+(`/Users/macuser/csmith-2.3.0/bin/csmith`). End-to-end smoke
+verified: `csmith --seed 1` output compiles+runs identically under
+gcc-4.0 and post-067 tcc (checksum `69F30756`).
 
 ### 3. (carried) OSO STAB / self-link diagnostics / AltiVec / bcheck
 

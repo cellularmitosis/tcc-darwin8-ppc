@@ -202,7 +202,7 @@ on the first link against the broken libtcc1.a.
 | 2 | v0.2.48 demo | landed in session 066 |
 | 3 | Sibling r11 watch | unchanged (no surface yet) |
 | 4 | **libtcc1.a clz/ctz to match gcc-PPC** | **landed (this session)** |
-| 5 | csmith building on a PPC host | unchanged (uranium remains the only host with the csmith binary; ibookg38 written off as bad hardware this session) |
+| 5 | **csmith building on a PPC host** | **landed (post-session cleanup, 2026-05-12).** See "Post-session addendum" below. |
 | 6 | ibookg38 — back online or written off | **written off** (bad hardware; memory updated) |
 | 7 | OSO STAB / self-link / AltiVec / bcheck | unchanged |
 
@@ -219,6 +219,49 @@ on the first link against the broken libtcc1.a.
 
 Memory updates (uranium-side):
 * `host_ibookg38.md` — marked **WRITTEN OFF** (bad hardware).
-* `host_ibookg37.md` — narrowed the csmith binary note: uranium is
-  now the only host with a csmith binary in the fleet.
+* `host_ibookg37.md` — initially narrowed to "uranium is the only
+  csmith binary"; subsequently updated by the post-session addendum
+  below to reflect the new in-fleet build.
 * `MEMORY.md` — both index entries updated to match.
+
+## Post-session addendum (2026-05-12) — open item #5 closed
+
+After the session shipped, ibookg38 came back up briefly. A targeted
+disk dump (`/Users/macuser/tmp/` only — that's all that was reachable
+before the host fell off again) recovered the campaign script, the
+runtime headers, and seven seed corpora, but **no csmith binary** —
+likely it lived in `/tmp/` and was reboot-wiped, or in `/Users/macuser/`
+and the dump didn't reach it. Probes against ibookg38 while it was up
+(`which csmith`, all-of-disk `find`, shell history) all came up empty.
+
+Decision: stop trying to recover and rebuild. Wrote
+[`scripts/build-csmith-on-ppc.sh`](../../../scripts/build-csmith-on-ppc.sh)
+— a one-shot bash script that downloads csmith-2.3.0 from GitHub
+(sha256-verified against the Homebrew formula on uranium), builds
+with `/opt/gcc-4.9.4` + `/opt/make-4.3`, and installs to
+`$HOME/csmith-2.3.0`. Run on ibookg37; built cleanly in ~15 minutes;
+final binary at `/Users/macuser/csmith-2.3.0/bin/csmith` reports
+`csmith 2.3.0` (git `30dccd73b`).
+
+End-to-end verification: `csmith --seed 1` on ibookg37 produces a
+1607-line program; both gcc-4.0 and the post-067 tcc compile and
+run it, both produce `checksum = 69F30756`, byte-for-byte agreement.
+
+The build script's structure is recorded in the script itself
+(header comment, ~200 lines). Three notes worth surfacing:
+
+* `/opt/gcc-4.9.4`'s binaries are suffixed `-4.9` (i.e. `gcc-4.9`,
+  `g++-4.9`), not unsuffixed. The script sets `CC` / `CXX` explicitly.
+* csmith's release tarball includes a pre-generated `./configure`,
+  so no autotools (autogen.sh) regeneration is needed.
+* The resulting binary dynamically links `/opt/gcc-4.9.4/lib/
+  libstdc++.6.dylib`; to copy the binary to a sibling G3 host the
+  libstdc++ must come along too (or rebuild via the script).
+
+Memory updates (post-addendum):
+* `host_ibookg37.md` — re-flowed: csmith binary path captured, dylib
+  deps recorded, "first PPC host with native csmith" noted.
+* `MEMORY.md` — ibookg37 line updated to reflect the new binary.
+
+This closes session 066/067's carried open item #5 — uranium is no
+longer the only csmith host in the fleet.
