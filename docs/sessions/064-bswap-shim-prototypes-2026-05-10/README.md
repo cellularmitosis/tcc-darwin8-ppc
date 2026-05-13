@@ -1,5 +1,15 @@
 # Session 064 — bswap shim prototypes (2026-05-10)
 
+> **Note (session 071):** the `bswap_compat.c` and `csmith_campaign.sh`
+> files this session worked with were moved to
+> [`scripts/csmith/`](../../../scripts/csmith/) in session 070; markdown
+> link targets below have been redirected to the new location.
+> `builtin_compat.h` (which this session added the three `extern`
+> prototypes to) was retired by session 069 in favour of the trimmed
+> [`bswap_compat.h`](../../../scripts/csmith/bswap_compat.h), but the
+> original file stays in session 062's dir as a historical artifact.
+> The narrative below is unchanged from session-064's exit state.
+
 ## Arrival state
 
 Session 063 closed 4 of 5 csmith bugs from session 062 with a single
@@ -22,7 +32,9 @@ harness, not in tcc**.
 
 ### #2 — Shipped updated harness (warmup)
 
-`scp` of [`docs/sessions/062-bswap-shim-builtins-2026-05-10/csmith_campaign.sh`](../062-bswap-shim-builtins-2026-05-10/csmith_campaign.sh)
+`scp` of [`csmith_campaign.sh`](../../../scripts/csmith/csmith_campaign.sh)
+(at the time of this session it lived in `docs/sessions/062-bswap-shim-builtins-2026-05-10/`;
+promoted to `scripts/csmith/` in session 070)
 to both `imacg3:/Users/macuser/tmp/csmith_campaign.sh` and
 `ibookg38:/Users/macuser/tmp/csmith_campaign.sh`. The local copy
 gained `EXTRA_CC_HDR` support during session 062; hosts were
@@ -55,7 +67,7 @@ tcc's compile log shows `warning: implicit declaration of function
 [`builtin_compat.h`](../062-bswap-shim-builtins-2026-05-10/builtin_compat.h)
 provides clz/ctz UB-guard wrappers but no prototypes for the
 companion shim's functions in
-[`bswap_compat.c`](../062-bswap-shim-builtins-2026-05-10/bswap_compat.c):
+[`bswap_compat.c`](../../../scripts/csmith/bswap_compat.c):
 
 ```c
 unsigned int       __builtin_bswap32(unsigned int x);

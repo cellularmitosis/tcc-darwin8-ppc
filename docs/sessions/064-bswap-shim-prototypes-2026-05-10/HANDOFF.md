@@ -1,10 +1,16 @@
 # Handoff — end of session 064 (2026-05-10)
 
+> **Note (session 071):** the `bswap_compat.c` and `csmith_campaign.sh`
+> referenced below moved to [`scripts/csmith/`](../../../scripts/csmith/)
+> in session 070; markdown link targets in this file have been
+> redirected to the new location. The narrative is unchanged from
+> session-064's exit state.
+
 ## TL;DR
 
 The remaining csmith bug from session 062/063 (**seed-8255**) was
 **not a tcc codegen bug** — it was a UB issue in the test harness's
-[`bswap_compat.c`](../062-bswap-shim-builtins-2026-05-10/bswap_compat.c)
+[`bswap_compat.c`](../../../scripts/csmith/bswap_compat.c)
 shim, exposed because [`builtin_compat.h`](../062-bswap-shim-builtins-2026-05-10/builtin_compat.h)
 was missing prototypes for the bswap/crc32 functions. K&R implicit
 declaration was mis-typing the call as `int(int)`, which is
