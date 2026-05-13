@@ -2818,6 +2818,309 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         dwarf_seg_filesize = dcur - dwarf_seg_file_off;
     }
 
+    /* ---- Pre-serialize sanity checks (roadmap #7).
+     *
+     * Catch broken-image classes that historically surfaced only as
+     * cryptic dyld errors at run time (Cannot allocate memory, Symbol
+     * not found: __mh_execute_header, SIGBUS during crt1 startup) so
+     * the user gets a tcc-level error message instead. Each block
+     * below corresponds to a failure class we hit during session 025
+     * bring-up; see docs/sessions/068-self-link-diagnostics-* for the
+     * mapping.
+     *
+     * On any failure: emit `tcc_error_noabort` (multiple OK — they
+     * all print), set ret = -1, goto cleanup. We deliberately do not
+     * bail on the first failure so the user gets the full picture. */
+    {
+        int sanity_ok = 1;
+        int j;
+
+        /* ---- (a) VM layout: alignment, overlap, vmsize/filesize. ---- */
+        if (text_seg_vmaddr != EXE_TEXT_VMADDR_BASE) {
+            tcc_error_noabort("ppc-macho: __TEXT vmaddr 0x%x != expected "
+                              "EXE_TEXT_VMADDR_BASE 0x%x",
+                              text_seg_vmaddr, EXE_TEXT_VMADDR_BASE);
+            sanity_ok = 0;
+        }
+        if (text_seg_vmaddr & (EXE_PAGE_SIZE - 1)) {
+            tcc_error_noabort("ppc-macho: __TEXT vmaddr 0x%x not page-aligned "
+                              "(page=0x%x)", text_seg_vmaddr, EXE_PAGE_SIZE);
+            sanity_ok = 0;
+        }
+        if (text_seg_filesize & (EXE_PAGE_SIZE - 1)) {
+            tcc_error_noabort("ppc-macho: __TEXT filesize 0x%x not "
+                              "page-aligned (page=0x%x)",
+                              text_seg_filesize, EXE_PAGE_SIZE);
+            sanity_ok = 0;
+        }
+        if (text_seg_vmsize < text_seg_filesize) {
+            tcc_error_noabort("ppc-macho: __TEXT vmsize 0x%x < filesize 0x%x",
+                              text_seg_vmsize, text_seg_filesize);
+            sanity_ok = 0;
+        }
+        if (n_data_sects > 0) {
+            if (data_seg_vmaddr != text_seg_vmaddr + text_seg_vmsize) {
+                tcc_error_noabort("ppc-macho: __DATA vmaddr 0x%x != __TEXT "
+                                  "vmaddr+vmsize 0x%x (gap or overlap)",
+                                  data_seg_vmaddr,
+                                  text_seg_vmaddr + text_seg_vmsize);
+                sanity_ok = 0;
+            }
+            if (data_seg_file_off != text_seg_filesize) {
+                tcc_error_noabort("ppc-macho: __DATA file_off 0x%x != __TEXT "
+                                  "filesize 0x%x", data_seg_file_off,
+                                  text_seg_filesize);
+                sanity_ok = 0;
+            }
+            if (data_seg_filesize & (EXE_PAGE_SIZE - 1)) {
+                tcc_error_noabort("ppc-macho: __DATA filesize 0x%x not "
+                                  "page-aligned (page=0x%x)",
+                                  data_seg_filesize, EXE_PAGE_SIZE);
+                sanity_ok = 0;
+            }
+            if (data_seg_vmsize < data_seg_filesize) {
+                tcc_error_noabort("ppc-macho: __DATA vmsize 0x%x < "
+                                  "filesize 0x%x",
+                                  data_seg_vmsize, data_seg_filesize);
+                sanity_ok = 0;
+            }
+        }
+        /* __LINKEDIT must sit right after __TEXT+__DATA in both VA and
+         * file. The session-025 "Cannot allocate memory" bug was
+         * linkedit_vmaddr computed off filesize instead of vmsize,
+         * which placed __LINKEDIT inside __bss's vmsize footprint. */
+        {
+            uint32_t expect_le_va = text_seg_vmaddr + text_seg_vmsize
+                                  + (n_data_sects > 0 ? data_seg_vmsize : 0);
+            uint32_t expect_le_off = text_seg_filesize
+                                   + (n_data_sects > 0 ? data_seg_filesize : 0);
+            if (linkedit_vmaddr != expect_le_va) {
+                tcc_error_noabort("ppc-macho: __LINKEDIT vmaddr 0x%x != "
+                                  "__TEXT+__DATA end 0x%x (would collide "
+                                  "with __bss or earlier section)",
+                                  linkedit_vmaddr, expect_le_va);
+                sanity_ok = 0;
+            }
+            if (linkedit_file_off != expect_le_off) {
+                tcc_error_noabort("ppc-macho: __LINKEDIT file_off 0x%x != "
+                                  "__TEXT+__DATA end 0x%x",
+                                  linkedit_file_off, expect_le_off);
+                sanity_ok = 0;
+            }
+        }
+        /* Per-section: each must lie inside its owning segment, and
+         * sections within a segment must not overlap each other. */
+        for (j = 0; j < nsec; j++) {
+            struct exe_sect *sj = &sects[j];
+            const char *sname = sj->elf ? sj->elf->name : "<synthetic>";
+            uint32_t seg_va, seg_vmsize;
+            if (j >= sect_idx_dwarf_first && sect_idx_dwarf_first >= 0)
+                continue;       /* __DWARF: vmaddr=0 by design */
+            if (j < n_text_sects) {
+                seg_va = text_seg_vmaddr;
+                seg_vmsize = text_seg_vmsize;
+            } else {
+                seg_va = data_seg_vmaddr;
+                seg_vmsize = data_seg_vmsize;
+            }
+            if (sj->vmaddr < seg_va
+             || sj->vmaddr + sj->size > seg_va + seg_vmsize) {
+                tcc_error_noabort("ppc-macho: section '%s' [0x%x+0x%x] "
+                                  "escapes its segment [0x%x+0x%x]",
+                                  sname, sj->vmaddr, sj->size,
+                                  seg_va, seg_vmsize);
+                sanity_ok = 0;
+            }
+        }
+        for (j = 0; j + 1 < nsec; j++) {
+            struct exe_sect *a = &sects[j];
+            struct exe_sect *b = &sects[j + 1];
+            int a_dwarf = (sect_idx_dwarf_first >= 0
+                           && j     >= sect_idx_dwarf_first);
+            int b_dwarf = (sect_idx_dwarf_first >= 0
+                           && j + 1 >= sect_idx_dwarf_first);
+            int a_in_text = (j     <  n_text_sects);
+            int b_in_text = (j + 1 <  n_text_sects);
+            if (a_dwarf || b_dwarf) continue;
+            if (a_in_text != b_in_text) continue;   /* different segments */
+            if (a->vmaddr + a->size > b->vmaddr) {
+                const char *an = a->elf ? a->elf->name : "<synthetic>";
+                const char *bn = b->elf ? b->elf->name : "<synthetic>";
+                tcc_error_noabort("ppc-macho: sections '%s' [0x%x+0x%x] "
+                                  "and '%s' [0x%x+0x%x] overlap",
+                                  an, a->vmaddr, a->size,
+                                  bn, b->vmaddr, b->size);
+                sanity_ok = 0;
+            }
+        }
+
+        /* ---- (b) Required symbols.
+         *
+         * `__mh_execute_header` must be present in s1->symtab as
+         * STB_GLOBAL/SHN_ABS at text_seg_vmaddr (registered at line
+         * ~2017). Catches regressions where the registration is
+         * skipped — surfaces as the session-025 `Symbol not found:
+         * __mh_execute_header` dyld error otherwise.
+         *
+         * entry_addr must fall within __text (which sits at
+         * text_sect_vmaddr for text_data_size bytes). Catches a
+         * mis-set entry point — surfaces as dyld jumping to a
+         * non-code address. */
+        {
+            int sym = find_elf_sym(s1->symtab, "__mh_execute_header");
+            if (sym <= 0) {
+                tcc_error_noabort("ppc-macho: '__mh_execute_header' is "
+                                  "not in s1->symtab (required for "
+                                  "crt1 / libSystem cross-image refs)");
+                sanity_ok = 0;
+            } else {
+                ElfW(Sym) *es = &((ElfW(Sym) *)s1->symtab->data)[sym];
+                if (es->st_shndx != SHN_ABS) {
+                    tcc_error_noabort("ppc-macho: '__mh_execute_header' "
+                                      "has shndx %d, expected SHN_ABS",
+                                      (int)es->st_shndx);
+                    sanity_ok = 0;
+                }
+                if (es->st_value != text_seg_vmaddr) {
+                    tcc_error_noabort("ppc-macho: '__mh_execute_header' "
+                                      "value 0x%x != __TEXT base 0x%x",
+                                      (uint32_t)es->st_value,
+                                      text_seg_vmaddr);
+                    sanity_ok = 0;
+                }
+            }
+        }
+        if (entry_addr < text_sect_vmaddr
+         || entry_addr >= text_sect_vmaddr + text_data_size) {
+            tcc_error_noabort("ppc-macho: entry_addr 0x%x outside __text "
+                              "[0x%x+0x%x] (would crash at dyld handoff)",
+                              entry_addr, text_sect_vmaddr, text_data_size);
+            sanity_ok = 0;
+        }
+
+        /* ---- (c) Stub/slot wiring.
+         *
+         * Every stub address must fall inside the __symbol_stub1
+         * section, and every nl-symbol-ptr slot inside __nl_symbol_ptr.
+         * The session-025 SIGBUS-during-crt1 bug was crt1's indirect-
+         * call sequence landing on data slots instead of code stubs;
+         * verifying the address ranges catches that class directly.
+         *
+         * Also: every ST_PPC_NEEDS_STUB UNDEF symbol must have a stub
+         * allocated (stub_for_elfsym[i] >= 0). */
+        if (nstubs > 0) {
+            uint32_t stub_lo = sects[sect_idx_stub].vmaddr;
+            uint32_t stub_hi = stub_lo + sects[sect_idx_stub].size;
+            uint32_t nl_lo   = sects[sect_idx_nlptr].vmaddr;
+            uint32_t nl_hi   = nl_lo + sects[sect_idx_nlptr].size;
+            for (i = 0; i < nstubs; i++) {
+                if (stubs[i].addr < stub_lo
+                 || stubs[i].addr + 16u > stub_hi) {
+                    tcc_error_noabort("ppc-macho: stub %d addr 0x%x outside "
+                                      "__symbol_stub1 [0x%x+0x%x]",
+                                      i, stubs[i].addr, stub_lo,
+                                      stub_hi - stub_lo);
+                    sanity_ok = 0;
+                }
+                if (stubs[i].la_ptr_addr < nl_lo
+                 || stubs[i].la_ptr_addr + 4u > nl_hi) {
+                    tcc_error_noabort("ppc-macho: stub %d la_ptr_addr "
+                                      "0x%x outside __nl_symbol_ptr "
+                                      "[0x%x+0x%x]", i, stubs[i].la_ptr_addr,
+                                      nl_lo, nl_hi - nl_lo);
+                    sanity_ok = 0;
+                }
+            }
+        }
+        if (n_nlptrs > 0) {
+            uint32_t nl_lo = sects[sect_idx_nlptr].vmaddr;
+            uint32_t nl_hi = nl_lo + sects[sect_idx_nlptr].size;
+            for (i = 0; i < n_nlptrs; i++) {
+                if (nlptrs[i].slot_addr < nl_lo
+                 || nlptrs[i].slot_addr + 4u > nl_hi) {
+                    tcc_error_noabort("ppc-macho: nlptr %d slot 0x%x "
+                                      "outside __nl_symbol_ptr [0x%x+0x%x]",
+                                      i, nlptrs[i].slot_addr,
+                                      nl_lo, nl_hi - nl_lo);
+                    sanity_ok = 0;
+                }
+            }
+        }
+        {
+            int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+            for (i = 1; i < nsyms; i++) {
+                ElfW(Sym) *es = &((ElfW(Sym) *)s1->symtab->data)[i];
+                const char *sn;
+                if (es->st_shndx != SHN_UNDEF) continue;
+                if (!(es->st_other & ST_PPC_NEEDS_STUB)) continue;
+                if (stub_for_elfsym[i] >= 0) continue;
+                sn = (char *)s1->symtab->link->data + es->st_name;
+                tcc_error_noabort("ppc-macho: symbol '%s' has "
+                                  "ST_PPC_NEEDS_STUB hint but no stub "
+                                  "was allocated (collect_extern_stubs "
+                                  "regression?)", sn && sn[0] ? sn : "<anon>");
+                sanity_ok = 0;
+            }
+        }
+
+        /* ---- (d) Section-presence.
+         *
+         * For every defined symbol with a real section index, the
+         * target tcc Section must be emitted in the output image —
+         * either in sects[] (regular sections) or as a synthetic
+         * (debug / SHN_ABS) one. Catches the session-025
+         * "common symbol allocated to .bss but __bss not emitted"
+         * case — where the symbol's section silently disappears
+         * from the linked image. */
+        {
+            int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+            /* Track which shndx values we've already complained about
+             * (one error per missing section is enough). 256 covers
+             * everything we'd plausibly emit; falls back to
+             * always-report past that. */
+            unsigned char reported[256];
+            memset(reported, 0, sizeof(reported));
+            for (i = 1; i < nsyms; i++) {
+                ElfW(Sym) *es = &((ElfW(Sym) *)s1->symtab->data)[i];
+                int stype = ELFW(ST_TYPE)(es->st_info);
+                int shndx = es->st_shndx;
+                Section *target;
+                int found, k;
+                const char *sn;
+                if (shndx == SHN_UNDEF) continue;
+                if (shndx == SHN_ABS) continue;
+                if (shndx == SHN_COMMON) continue;
+                if (stype == STT_SECTION || stype == STT_FILE) continue;
+                if (shndx <= 0 || shndx >= s1->nb_sections) continue;
+                if (shndx < (int)sizeof(reported) && reported[shndx]) continue;
+                target = s1->sections[shndx];
+                if (!target) continue;
+                found = 0;
+                for (k = 0; k < nsec; k++) {
+                    if (sects[k].elf == target) { found = 1; break; }
+                }
+                if (!found) {
+                    sn = (char *)s1->symtab->link->data + es->st_name;
+                    tcc_error_noabort("ppc-macho: symbol '%s' is defined "
+                                      "in section '%s' but that section "
+                                      "is not emitted by the EXE writer "
+                                      "(missed section-pickup case in "
+                                      "macho_output_exe?)",
+                                      sn && sn[0] ? sn : "<anon>",
+                                      target->name ? target->name : "<noname>");
+                    sanity_ok = 0;
+                    if (shndx < (int)sizeof(reported))
+                        reported[shndx] = 1;
+                }
+            }
+        }
+
+        if (!sanity_ok) {
+            ret = -1;
+            goto cleanup;
+        }
+    }
+
     /* ---- Serialize: Mach header. ---- */
     put32be(&out, MH_MAGIC);
     put32be(&out, CPU_TYPE_POWERPC);
