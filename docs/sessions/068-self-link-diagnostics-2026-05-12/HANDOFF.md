@@ -19,9 +19,10 @@ observing the resulting tcc error, then reverting. The verification
 log lives in the [session README](README.md).
 
 * **HEAD at session start:** `df31e67` (end of session 067).
-* **HEAD at session end:** TBD on commit.
-* **v0.2.50-g3 tag:** not yet pushed — needs user sign-off (per
-  the user-driven push protocol established in 067).
+* **HEAD at session end:** `7c9df2f` (session 068 docs + demo).
+* **v0.2.50-g3 tag:** on origin, pointing at `6372046` (the
+  `tcc/ppc-macho.c` source-fix commit, not the docs commit).
+  Pushed 2026-05-13 under standing push authority.
 
 **Regression suite:** all green.
 * tests2: 111/111.
@@ -76,11 +77,11 @@ naming consistent and lets the roadmap row capture the change.
 
 ## Open work for next session
 
-### 1. Push v0.2.50-g3 tag
+### 1. (LANDED) v0.2.50-g3 tag pushed
 
-Pending user sign-off. The tag should point at the source-level
-commit (`tcc/ppc-macho.c` change), not the docs commit — same
-convention as v0.2.49-g3 in session 067.
+Pushed to origin on 2026-05-13 under the standing push authority
+granted at the end of this session. Tag points at `6372046` (the
+source-fix commit, not the docs commit).
 
 ### 2. (optional) Extend the same checks to `macho_output_dylib`
 
