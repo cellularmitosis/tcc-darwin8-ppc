@@ -43,6 +43,11 @@ __define_stab (N_LCSYM, 0x28, "LCSYM")
    This is not used in C.  */
 __define_stab (N_MAIN, 0x2a, "MAIN")
 
+/* Apple Mach-O: begin nsect sym ("begin nested symbol"). Pairs with
+   N_ENSYM around an N_FUN entry to pin a function body's start
+   address explicitly. Format: 0,,n_sect,0,address. */
+__define_stab (N_BNSYM, 0x2e, "BNSYM")
+
 /* Global symbol in Pascal.
    Supposedly the value is its line number; I'm skeptical.  */
 __define_stab (N_PC, 0x30, "PC")
@@ -88,6 +93,11 @@ __define_stab (N_BROWS, 0x48, "BROWS")
    GNU M2 keyword %INITIALIZE.  Perhaps N_M2C can be used if there
    are enough empty fields? */
 __define_stab(N_DEFD, 0x4a, "DEFD")
+
+/* Apple Mach-O: end nsect sym. Pairs with N_BNSYM; emitted after the
+   closing N_FUN size-entry to pin the function body's end address.
+   Format: 0,,n_sect,0,address. */
+__define_stab (N_ENSYM, 0x4e, "ENSYM")
 
 /* THE FOLLOWING TWO STAB VALUES CONFLICT.  Happily, one is for Modula-2
    and one is for C++.   Still,... */

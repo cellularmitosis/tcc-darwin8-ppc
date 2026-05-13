@@ -2473,6 +2473,19 @@ ST_FUNC void tcc_debug_funcstart(TCCState *s1, Sym *sym)
     }
     else
     {
+#ifdef TCC_TARGET_MACHO
+        /* Apple convention: bracket the function body with paired
+         * N_BNSYM / N_ENSYM markers (BNSYM before the opening N_FUN,
+         * ENSYM after the closing N_FUN size-entry). Tiger gdb 6.3
+         * uses these to pin the body's entry address explicitly —
+         * pre-marker `break <func>` resolved a couple of instructions
+         * past entry because gdb's prolog-skip heuristic guessed.
+         * func_ind == ind at this call site (gen_function sets
+         * func_ind = ind just before invoking us), so the reloc
+         * resolves to the function's first instruction. */
+        put_stabs_r(s1, NULL, N_BNSYM, 0, 0, func_ind,
+                    text_section, section_sym);
+#endif
         cstr_new (&debug_str);
         cstr_printf(&debug_str, "%s:%c", funcname, sym->type.t & VT_STATIC ? 'f' : 'F');
         tcc_get_debug_info(s1, sym->type.ref, &debug_str);
@@ -2564,6 +2577,10 @@ ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
          * boundaries unambiguous for prolog-skip and stack-frame
          * unwinding. */
         put_stabs(s1, NULL, N_FUN, 0, 0, size);
+        /* Paired N_ENSYM marker (see BNSYM in tcc_debug_funcstart).
+         * Address = function start + body size = function end. */
+        put_stabs_r(s1, NULL, N_ENSYM, 0, 0, func_ind + size,
+                    text_section, section_sym);
 #endif
     }
     debug_info_root = 0;
