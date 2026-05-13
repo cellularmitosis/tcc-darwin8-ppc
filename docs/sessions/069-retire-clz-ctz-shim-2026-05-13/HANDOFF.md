@@ -12,7 +12,7 @@ directly.
 * **HEAD at session start:** `c264906` (end of session 068).
 * **HEAD at session end:** (this session's docs commit).
 * **No tcc source change. No version bump. No new demo.**
-* **New artifact:** [`bswap_compat.h`](bswap_compat.h) — the
+* **New artifact:** [`bswap_compat.h`](../../../scripts/csmith/bswap_compat.h) — the
   trimmed successor to session 062's `builtin_compat.h`. Just
   three `extern` prototypes (bswap32, bswap64, ia32_crc32qi); no
   clz/ctz wrapping. Future csmith `--builtins` campaigns
@@ -33,10 +33,11 @@ confirmation that the clz/ctz shim was no longer load-bearing.
 
 ## What landed
 
-* [`docs/sessions/069-retire-clz-ctz-shim-2026-05-13/bswap_compat.h`](bswap_compat.h)
-  — trimmed shim header. Three `extern` prototypes for builtins
+* [`bswap_compat.h`](../../../scripts/csmith/bswap_compat.h) —
+  trimmed shim header. Three `extern` prototypes for builtins
   gcc-4.0 lacks (or treats as ordinary externs). Comment block
-  explains why each is still needed.
+  explains why each is still needed. (Originated in this session
+  dir; promoted to `scripts/csmith/` in session 070.)
 
 * [`README.md`](README.md) — full narrative including the
   verification log and the build-infra gotchas that surfaced when

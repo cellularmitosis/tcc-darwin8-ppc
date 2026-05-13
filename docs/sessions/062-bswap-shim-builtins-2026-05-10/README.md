@@ -1,5 +1,13 @@
 # Session 062 — bswap shim, csmith --builtins, 5 real bugs surfaced
 
+> **Note (session 070):** the canonical `bswap_compat.c` and
+> `csmith_campaign.sh` originated in this session have moved to
+> [`scripts/csmith/`](../../../scripts/csmith/). The `builtin_compat.h`
+> clz/ctz shim (also originated here) stayed in this dir as a
+> historical artifact — it was retired by session 069 once v0.2.49-g3
+> made libtcc1.a return gcc-PPC's UB values directly. The narrative
+> below is unchanged from session-062's exit state.
+
 ## TL;DR
 
 Built the `bswap_compat.c` shim per session 061's HANDOFF — gcc-4.0

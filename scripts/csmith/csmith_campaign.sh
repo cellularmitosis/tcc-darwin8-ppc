@@ -1,15 +1,19 @@
 #!/opt/tigersh-deps-0.1/bin/bash
-# Csmith differential testing campaign on imacg3 / ibookg38.
+# Csmith differential testing campaign on imacg3 / ibookg37 / ibookg38.
 # Args: $1 = first seed, $2 = last seed (inclusive)
 #       $3 = SRC dir (default /Users/macuser/tmp/csmith)
 #       $4 = OUT dir (default /Users/macuser/tmp/csmith-out)
 # Env:  EXTRA_CC_SRC = optional extra .c file (e.g. bswap_compat.c)
-#                      compiled into both the gcc and tcc binary.
-#                      Used to provide gcc-4.0 with __builtin_bswap32 etc.
+#                      compiled into both the gcc and tcc binary. Used to
+#                      provide gcc-4.0 with __builtin_bswap32 / bswap64 /
+#                      ia32_crc32qi, which gcc-4.0 lacks (treats as ordinary
+#                      externs) and which csmith --builtins can emit.
 #       EXTRA_CC_HDR = optional header injected via -include into both
-#                      compilers (e.g. builtin_compat.h, which UB-guards
-#                      __builtin_clz/ctz so tcc's libtcc1.a software impl
-#                      doesn't false-positive vs gcc-PPC's cntlzw).
+#                      compilers (e.g. bswap_compat.h: extern prototypes
+#                      for the three builtins above).
+# History: the clz/ctz UB-guard wrapping that pre-v0.2.49-g3 used to live in
+# builtin_compat.h was retired in session 069 once tcc's libtcc1.a started
+# returning gcc-PPC's observed UB values directly. See scripts/csmith/README.md.
 # Reads .c files from $SRC/seed-N.c
 # Writes results to $OUT/seed-N.{gcc,tcc}.{exit,out}
 # Summary: $OUT/SUMMARY.txt

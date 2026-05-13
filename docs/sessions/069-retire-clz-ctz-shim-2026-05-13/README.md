@@ -1,5 +1,12 @@
 # Session 069 — Retire the clz/ctz half of `builtin_compat.h`
 
+> **Note (session 070):** `bswap_compat.h` landed in this session's
+> dir; in session 070 it was promoted (alongside `bswap_compat.c` and
+> `csmith_campaign.sh` from session 062) to
+> [`scripts/csmith/`](../../../scripts/csmith/). Links below are
+> updated to point at the new location; the narrative is unchanged
+> from session-069's exit state.
+
 **Date:** 2026-05-13
 **HEAD at start:** `c264906` (end of session 068)
 **HEAD at end:** (this session's commit)
@@ -26,7 +33,7 @@ Both landed in this session.
 
 ### `bswap_compat.h` — trimmed successor
 
-[`bswap_compat.h`](bswap_compat.h) is the post-v0.2.49 replacement
+[`bswap_compat.h`](../../../scripts/csmith/bswap_compat.h) is the post-v0.2.49 replacement
 for session 062's `builtin_compat.h`. Contents:
 
 * `extern unsigned int __builtin_bswap32(unsigned int);`
@@ -40,10 +47,10 @@ __builtin_clz(x) __compat_clz(x)` macros are gone. Future csmith
 session 062's `builtin_compat.h`.
 
 The bswap-shim **implementation** (function bodies in
-[`bswap_compat.c`](../062-bswap-shim-builtins-2026-05-10/bswap_compat.c))
+[`bswap_compat.c`](../../../scripts/csmith/bswap_compat.c))
 is unchanged. Linked into both the gcc and tcc binaries via the
 `EXTRA_CC_SRC=` env var in
-[`csmith_campaign.sh`](../062-bswap-shim-builtins-2026-05-10/csmith_campaign.sh).
+[`csmith_campaign.sh`](../../../scripts/csmith/csmith_campaign.sh).
 
 Session 062's `builtin_compat.h` is **kept as a historical artifact**
 (the right thing as of session 062; pointing forward sessions at
@@ -81,7 +88,7 @@ generates that pattern.)
 
 ### Csmith `--builtins` re-sweep — byte-identical to session 066
 
-Ran [session 062's `csmith_campaign.sh`](../062-bswap-shim-builtins-2026-05-10/csmith_campaign.sh)
+Ran [session 062's `csmith_campaign.sh`](../../../scripts/csmith/csmith_campaign.sh)
 on imacg3 over the same seed range session 066 used:
 
 * Range: 8020-8419 (400 seeds), `--builtins+bitfields` corpus
