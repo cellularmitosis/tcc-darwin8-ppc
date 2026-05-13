@@ -396,6 +396,8 @@ static int classify_section(Section *s, const char **segname,
             {".debug_addr",         "__debug_addr"},
             {".debug_str",          "__debug_str"},
             {".debug_line_str",     "__debug_line_str"},
+            {".stab",               "__stab"},
+            {".stabstr",            "__stabstr"},
         };
         size_t k;
         for (k = 0; k < sizeof(dwarf_map)/sizeof(dwarf_map[0]); k++) {
@@ -837,11 +839,21 @@ static int emit_section_relocs(obuf *b, Section *s, struct reloc_ctx *ctx)
         int mtype, mlength, mpcrel;
         ElfW(Sym) *esym;
 
-        if (elfsym <= 0 || !xlat_present[elfsym]) {
-            /* Skip relocs against symbols we couldn't translate. */
+        if (elfsym <= 0) {
+            /* Skip null-sym placeholder relocs. */
             continue;
         }
         esym = (ElfW(Sym) *)s1->symtab->data + elfsym;
+        if (!xlat_present[elfsym]) {
+            /* STT_SECTION syms are intentionally not in xlat (Mach-O
+             * doesn't need a separate nlist entry for them — the
+             * section number alone identifies the target). The .stab
+             * reloc path uses them as anchors; let them through to
+             * the local-handling branch below. Everything else gets
+             * skipped (no nlist => no way to reference). */
+            if (ELFW(ST_TYPE)(esym->st_info) != STT_SECTION)
+                continue;
+        }
         extern_bit = sym_isext[elfsym] ? 1 : 0;
 
         /* External BR24: retarget to the stub section. */
@@ -1896,7 +1908,10 @@ static int emit_stab_nlist(TCCState *s1,
     }
 
     /* idx==0 is the empty-header entry put_stabs writes at section
-     * creation time; skip it. */
+     * creation time; skip it. Subsequent placeholders (n_type=0) can
+     * appear too when stab data round-trips through `-c` -> link:
+     * each loaded .o contributed its own leading empty Stab_Sym
+     * before the real entries. Skip those defensively. */
     for (idx = 1; idx < n_stabs; idx++) {
         Stab_Sym *sym = &stabs[idx];
         uint32_t nvalue_off = (uint32_t)idx * (uint32_t)sizeof(Stab_Sym) + 8u;
@@ -1904,6 +1919,13 @@ static int emit_stab_nlist(TCCState *s1,
         uint32_t n_value = sym->n_value;
         const char *name;
         uint32_t new_strx;
+        if (sym->n_type == 0) {
+            /* Advance reloc_idx past any reloc on this placeholder
+             * (in practice there is none; defensive). */
+            while (reloc_idx < n_rels && rels[reloc_idx].r_offset <= nvalue_off)
+                reloc_idx++;
+            continue;
+        }
 
         /* Advance through any relocs that fall in earlier entries
          * (shouldn't happen in practice — relocs are emitted
@@ -5708,6 +5730,22 @@ static int macho_section_to_elf(const char *segname, const char *sectname,
         *out_sh_flags = SHF_ALLOC | SHF_WRITE;
         return 1;
     }
+    /* GNU stabs sections (round-trip from a tcc-built .o; see
+     * classify_section for the forward mapping). sh_flags=0 keeps
+     * them non-allocated so the layout step treats them as debug
+     * data (vmaddr=0, no runtime mapping). */
+    if (!strcmp(segname, "__DWARF") && !strcmp(sectname, "__stab")) {
+        *out_name = ".stab";
+        *out_sh_type = SHT_PROGBITS;
+        *out_sh_flags = 0;
+        return 1;
+    }
+    if (!strcmp(segname, "__DWARF") && !strcmp(sectname, "__stabstr")) {
+        *out_name = ".stabstr";
+        *out_sh_type = SHT_STRTAB;
+        *out_sh_flags = 0;
+        return 1;
+    }
     /* Sections that re-synthesize at link time are skipped. */
     return 0;
 }
@@ -5961,13 +5999,14 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
 
             /* Find the section that contains sc_value. With -g,
              * multiple debug sections (__debug_info, __debug_abbrev,
-             * etc.) all have addr=0 and combined sizes that overlap
-             * sc_value's address range — without filtering, the
-             * iteration picks the FIRST match, which is usually the
-             * wrong (debug) section. Limit the search to sections
-             * that can actually be SECTDIFF targets: real sections
-             * we merge (sec_to_tcc != NULL), or the discarded
-             * stub / la_ptr / nl_ptr sections. */
+             * __stab/__stabstr, etc.) all have addr=0 and combined
+             * sizes that overlap sc_value's address range — without
+             * filtering, the iteration picks the FIRST match, which
+             * is usually the wrong (debug) section. Limit the search
+             * to sections that can actually be SECTDIFF targets:
+             * real sections we merge (sec_to_tcc != NULL and not
+             * S_ATTR_DEBUG), or the discarded stub / la_ptr /
+             * nl_ptr sections. */
             target_sect_idx = -1;
             for (j = 0; j < ctx->nsec; j++) {
                 const struct mach_section *t = &ctx->sects[j];
@@ -5977,6 +6016,8 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
                                     || kind == S_NON_LAZY_SYMBOL_POINTERS);
                 if (!ctx->sec_to_tcc[j] && !is_stub_like)
                     continue;
+                if (t->flags & S_ATTR_DEBUG)
+                    continue;  /* never a SECTDIFF target */
                 if (sc_value >= t->addr
                  && sc_value <  t->addr + t->size) {
                     target_sect_idx = j;
@@ -6456,6 +6497,47 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
         if (align > s->sh_addralign) s->sh_addralign = align;
         ctx.sec_to_tcc[i] = s;
         ctx.sec_to_off[i] = off;
+    }
+
+    /* Pass 1.5: stabs fixup. .stab entries carry n_strx as a raw
+     * uint32 offset into the .o's .stabstr (not a reloc). After
+     * Pass 1 appended the .o's .stabstr to the merged .stabstr at
+     * `stabstr_off`, each just-loaded .stab entry's non-zero
+     * n_strx needs `stabstr_off` added so it indexes into the
+     * merged strtab. Also make sure stab_section / .stabstr's
+     * sh_entsize / link / addralign are set on first encounter —
+     * the link tcc's tcc_debug_new (under -gstabs) already does
+     * this, but if a follow-on relink invokes the loader without
+     * -gstabs we still set sane values. */
+    {
+        int stab_sec_idx = -1, stabstr_sec_idx = -1;
+        Section *stab_s = NULL, *stabstr_s = NULL;
+        for (i = 0; i < nsec; i++) {
+            Section *s = ctx.sec_to_tcc[i];
+            if (!s) continue;
+            if (!strcmp(s->name, ".stab"))    { stab_sec_idx = i;    stab_s = s; }
+            if (!strcmp(s->name, ".stabstr")) { stabstr_sec_idx = i; stabstr_s = s; }
+        }
+        if (stab_s && stabstr_s) {
+            uint32_t stab_off    = ctx.sec_to_off[stab_sec_idx];
+            uint32_t stabstr_off = ctx.sec_to_off[stabstr_sec_idx];
+            uint32_t loaded_size = ctx.sects[stab_sec_idx].size;
+            uint32_t k;
+            Stab_Sym *entries;
+            if (stab_s->sh_entsize == 0)
+                stab_s->sh_entsize = sizeof(Stab_Sym);
+            if (stab_s->sh_addralign < sizeof((Stab_Sym*)0)->n_value)
+                stab_s->sh_addralign = sizeof((Stab_Sym*)0)->n_value;
+            if (!stab_s->link)
+                stab_s->link = stabstr_s;
+            if (!stab_section)
+                stab_section = stab_s;
+            entries = (Stab_Sym *)(stab_s->data + stab_off);
+            for (k = 0; k * sizeof(Stab_Sym) < loaded_size; k++) {
+                if (entries[k].n_strx)
+                    entries[k].n_strx += stabstr_off;
+            }
+        }
     }
 
     /* Pass 2: pull all named externally-visible symbols and any
