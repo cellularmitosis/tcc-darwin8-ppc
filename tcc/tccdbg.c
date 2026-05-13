@@ -2357,12 +2357,34 @@ static void tcc_debug_finish (TCCState *s1, struct _debug_info *cur)
         {
             for (i = 0; i < cur->n_sym; i++) {
                 struct debug_sym *s = &cur->sym[i];
+                unsigned long emit_value = s->value;
+
+#if defined(TCC_TARGET_PPC) && defined(TCC_TARGET_MACHO)
+                /* Apple PPC: Tiger gdb 6.3 interprets N_PSYM /
+                 * N_LSYM offsets as r1 (post-prolog SP) relative,
+                 * but tcc's PPC backend assigns s->c as r31
+                 * (frame-pointer / OLD_SP) relative. Our prolog
+                 * sets r31 = r1 + frame_size, so translate by
+                 * adding ppc_last_frame_size (just set by
+                 * gfunc_epilog, which runs before tcc_debug_funcend
+                 * — our caller).
+                 *
+                 * Skip type-def LSYMs (struct fields / typedefs
+                 * emitted by tcc_get_debug_info while inside the
+                 * function): those carry value==0 unambiguously,
+                 * because real PPC param offsets start at +24
+                 * (caller's param save area) and locals start at
+                 * -12 (FP-save slot at -4, PIC-base-save at -8). */
+                if (s->type == N_PSYM ||
+                    (s->type == N_LSYM && s->value != 0))
+                    emit_value += ppc_last_frame_size;
+#endif
 
                 if (s->sec)
-                    put_stabs_r(s1, s->str, s->type, 0, 0, s->value,
+                    put_stabs_r(s1, s->str, s->type, 0, 0, emit_value,
                                 s->sec, s->sym_index);
                 else
-                    put_stabs(s1, s->str, s->type, 0, 0, s->value);
+                    put_stabs(s1, s->str, s->type, 0, 0, emit_value);
                 tcc_free (s->str);
             }
             tcc_free (cur->sym);
