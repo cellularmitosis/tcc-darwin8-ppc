@@ -8,6 +8,7 @@ have brought tests2 from 70 / 122 (57%) to **111 / 111 (100%)**:
 
 | | tests2 | what it added |
 |---|---|---|
+| [v0.2.51-g3](sessions/072-oso-stab-gdb-tiger-2026-05-13/README.md) | 111 / 111 | **OSO STAB emission for gdb-on-Tiger (roadmap #7.5, Phase 1).** Tiger's bundled `gdb 6.3` reads Apple-format STAB entries directly from the linked exe's `LC_SYMTAB` nlist — no external .o files or `.dSYM` bundle required for `break <fn>` / `break <line>` / `list` / `bt` / `print <global>`. tcc's existing `-gstabs` mode already populated `stab_section` with the right Stab_Sym entries, but the Mach-O writer historically dropped them. v0.2.51 closes the gap: new `emit_stab_nlist()` in `ppc-macho.c` walks `stab_section` (and its reloc table) at link time and emits one nlist per Stab_Sym into the local-symbol range, translating `n_value` to runtime VAs via `sects[].vmaddr + tsym->st_value + addend` and `n_sect` to the 1-based Mach-O section ordinal. tccdbg.c switches `N_SLINE` / `N_LBRAC` / `N_RBRAC` emission to absolute form (`put_stabs_r` against `text_section` + `section_sym`) on `#ifdef TCC_TARGET_MACHO` since Apple's debug-map convention uses absolute VAs, not GNU function-relative offsets — plus a paired `N_FUN` end-entry (empty name, `n_value=size`) for unambiguous function boundaries. With this, `gdb hello-tcc` on Tiger sets file:line breakpoints, hits them, walks stacks with file:line per frame, and lists source. Phase 2 (parameter / local-variable offsets matching tcc's PPC frame layout, `N_OSO` chain for dsymutil round-tripping, defaulting `-g` to stabs on Darwin) is tracked in [session 072 HANDOFF](sessions/072-oso-stab-gdb-tiger-2026-05-13/HANDOFF.md). Verified by [`v0.2.51-gstabs-oso-stab.sh`](../demos/v0.2.51-gstabs-oso-stab.sh). tests2 111/111, abitest-cc/tcc 24/24, bootstrap fixpoint holds, non-debug + DWARF builds unchanged. |
 | [v0.2.50-g3](sessions/068-self-link-diagnostics-2026-05-12/README.md) | 111 / 111 | **Self-link diagnostics (roadmap #7).** `macho_output_exe` runs four pre-write sanity checks that turn historically-cryptic dyld errors (`Cannot allocate memory`, `Symbol not found: __mh_execute_header`, SIGBUS in crt1) into tcc-level diagnostics with file/line/segment-aware context. Invariants: (a) VM layout (segments page-aligned, no overlap, `vmsize >= filesize`, `__LINKEDIT` placed after `__TEXT+__DATA` in both VA and file space — directly catches session-025's "Cannot allocate memory" failure); (b) `__mh_execute_header` registered as `N_ABS` at `__TEXT` base + `entry_addr` inside `__text`; (c) every stub VA inside `__symbol_stub1`, every `__nl_symbol_ptr` slot inside `__nl_symbol_ptr`, every `ST_PPC_NEEDS_STUB` symbol has a stub allocated — catches the session-025 crt1 SIGBUS; (d) every defined symbol's section is in the EXE writer's emitted section list — catches "common in `.bss` but `__bss` not emitted". Each check verified by hand-injecting a deliberate break and observing the resulting message; happy-path overhead <1 ms per link. Demo: [`v0.2.50-self-link-diagnostics.sh`](../demos/v0.2.50-self-link-diagnostics.sh). |
 | [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md) | 70 / 122 | full self-link, no gcc-4.0 in pipeline |
 | [v0.2.1-g3](sessions/032-v0.2.1-release/README.md) | 75 / 122 | >8-arg fns, FP shadow for variadic |
@@ -104,7 +105,7 @@ scope" below.
 | ~~**#5**~~ | ~~`ppc-macho-stubs.c` cleanup~~ | ✅ Done in `00751c8`. Stubs file was dead since session 009 — `ppc-macho.c` had subsumed all its symbols. |
 | ~~**#6**~~ | ~~De-duplicate UNDEF symbols~~ | ✅ Done in `dc7a05d`. The dupe came from emitting one UNDEF nlist entry per stubs[] element AND another per nlptrs[] element when both lists referenced the same elfsym (e.g. `_atexit` referenced as both call target via REL24 and data pointer via ADDR32 from crt1.o's static-init machinery). Refactored to build an elfsym→nlist map so stub_sym_idx and data_sym_idx share UNDEF entries. |
 | ~~**#7**~~ | ~~Self-link diagnostics~~ | ✅ Done in v0.2.50-g3 (session 068). `macho_output_exe` runs four pre-write sanity checks (VM layout, required symbols, stub/slot wiring, section-presence) that turn the historical session-025 dyld errors into tcc-level diagnostics. Each check verified by injecting a deliberate break. Happy-path cost <1 ms per link. |
-| **#7.5** | **OSO STAB emission for gdb-on-Tiger** | tcc currently embeds DWARF in a `__DWARF` segment, which dwarfdump and lldb (later macOS) read but Apple's gdb 6.3 does not. Apple's debug-map convention is N_OSO STAB entries pointing back at the .o files. Emitting these (plus N_FUN entries for the source-level symbol map) would make `dsymutil exe -o exe.dSYM` and `gdb exe` work end-to-end on Tiger. Requires keeping .o file paths in scope through linking. |
+| ~~**#7.5**~~ | ~~OSO STAB emission for gdb-on-Tiger~~ | ✅ Done (Phase 1) in v0.2.51-g3 (session 072). `tcc -gstabs -o exe file.c` now produces a Mach-O whose `LC_SYMTAB` nlist carries the classic stabs+ chain Apple's Tiger `gdb 6.3` reads directly: file:line breakpoints, source listing, run/step/where with file:line per frame, and `print <global>` all work end-to-end. The `N_OSO` name itself is currently empty (gcc-4.0's `-g hello.c -o hello` does the same — no intermediate .o exists), so `dsymutil` round-tripping is deferred to Phase 2 along with `N_PSYM`/`N_LSYM` offset alignment with the PPC backend's actual frame layout and the question of defaulting `-g` to stabs on Darwin. |
 
 ### Larger scope
 
@@ -181,11 +182,14 @@ In rough order of cost vs. confidence:
   communicate, not really a risk.
 
 - ~~**No DWARF / no debugger**~~. ✅ Largely retired through
-  v0.2.37/.38/.39: tcc binaries now carry full DWARF (compile unit,
-  types, line table, aranges, strings) plus an `__eh_frame` with
-  per-prolog CFI directives. dwarfdump and lldb (later macOS)
-  read it directly. Tiger's `gdb 6.3` doesn't read embedded DWARF
-  — that gap is item #7.5 above.
+  v0.2.37/.38/.39 (DWARF in .o + linked exe + `__eh_frame` with
+  per-prolog CFI; dwarfdump and lldb read it directly) and
+  v0.2.51 (Apple-format STAB chain in the nlist symtab; Tiger's
+  bundled `gdb 6.3` sets file:line breakpoints, walks stack
+  frames, lists source, prints globals). Remaining gaps —
+  parameter/local offsets matching the PPC frame layout, and
+  `dsymutil` round-tripping via an `N_OSO` chain pointing at real
+  .o files — are Phase 2 polish items deferred to a follow-up.
 
 - **Out-of-tree upstream divergence**. We modify tcc/ in place
   rather than maintaining a patch set. If we ever want to rebase

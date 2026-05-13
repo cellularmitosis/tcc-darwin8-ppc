@@ -1619,7 +1619,17 @@ ST_FUNC void tcc_debug_line(TCCState *s1)
     else
     {
 	if (func_ind != -1) {
+#ifdef TCC_TARGET_MACHO
+            /* Apple debug-map convention: N_SLINE n_value is the
+             * absolute text VA (with reloc), not relative to the
+             * surrounding function start. Tiger gdb 6.3 follows the
+             * Apple convention and won't compute an absolute address
+             * from a relative offset, so we need the reloc. */
+            put_stabs_r(s1, NULL, N_SLINE, 0, f->line_num, ind,
+                        text_section, section_sym);
+#else
             put_stabn(s1, N_SLINE, 0, f->line_num, ind - func_ind);
+#endif
         } else {
             /* from tcc_assemble */
             put_stabs_r(s1, NULL, N_SLINE, 0, f->line_num, ind, text_section, section_sym);
@@ -2356,9 +2366,22 @@ static void tcc_debug_finish (TCCState *s1, struct _debug_info *cur)
                 tcc_free (s->str);
             }
             tcc_free (cur->sym);
+#ifdef TCC_TARGET_MACHO
+            /* Apple debug-map convention: N_LBRAC / N_RBRAC use
+             * absolute text VAs (with reloc), not function-relative
+             * offsets. func_ind holds the current function's start
+             * offset in the text section; cur->start / cur->end are
+             * offsets within the function. */
+            put_stabs_r(s1, NULL, N_LBRAC, 0, 0, func_ind + cur->start,
+                        text_section, section_sym);
+            tcc_debug_finish (s1, cur->child);
+            put_stabs_r(s1, NULL, N_RBRAC, 0, 0, func_ind + cur->end,
+                        text_section, section_sym);
+#else
             put_stabn(s1, N_LBRAC, 0, 0, cur->start);
             tcc_debug_finish (s1, cur->child);
             put_stabn(s1, N_RBRAC, 0, 0, cur->end);
+#endif
         }
         tcc_free (cur);
         cur = next;
@@ -2510,6 +2533,16 @@ ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
     else
     {
         tcc_debug_finish (s1, debug_info_root);
+#ifdef TCC_TARGET_MACHO
+        /* Apple debug-map convention: emit a paired N_FUN end-entry
+         * with empty name and n_value = function size (no reloc).
+         * gcc-4.0 emits this and Tiger dsymutil / gdb both expect
+         * to find the function's size here rather than inferring it
+         * from the next FUN's address. The pair makes function
+         * boundaries unambiguous for prolog-skip and stack-frame
+         * unwinding. */
+        put_stabs(s1, NULL, N_FUN, 0, 0, size);
+#endif
     }
     debug_info_root = 0;
 }

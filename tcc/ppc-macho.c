@@ -1843,6 +1843,118 @@ static void put_nlist(obuf *nlist, uint32_t strx, int n_type,
     obuf_put(nlist, buf, 12);
 }
 
+/* Translate tcc's internal .stab section into Mach-O nlist entries,
+ * appended to `nlist` / `strtab`. Returns the number of entries
+ * emitted (= contribution to n_localsym).
+ *
+ * Apple's gdb 6.3 on Tiger reads classic stabs+ entries from the
+ * linked exe's LC_SYMTAB nlist directly — no external .o files or
+ * .dSYM bundle required for the basic break-by-file:line / list /
+ * info workflow. tcc's existing tccdbg.c stabs emission (under
+ * `-gstabs`) already populates `stab_section` with the right
+ * entries; the Mach-O writer historically dropped them. This helper
+ * closes the gap.
+ *
+ * Each Stab_Sym whose n_value is section-relative carries an
+ * R_DATA_PTR reloc against the relevant STT_SECTION sym; we walk
+ * stab_section->reloc in parallel and translate:
+ *   n_value -> section_vmaddr + Stab_Sym.n_value  (current addend)
+ *   n_sect  -> 1-based ordinal of the target section in `sects[]`
+ * Stab_Sym entries without a reloc (N_LSYM type defs, N_PSYM stack
+ * offsets, N_GSYM placeholder, etc.) emit with n_sect=0 and the raw
+ * n_value preserved — gdb interprets those as data (line numbers,
+ * stack offsets, etc.) rather than VAs.
+ */
+static int emit_stab_nlist(TCCState *s1,
+                           obuf *nlist, obuf *strtab,
+                           struct exe_sect *sects, int nsec)
+{
+    Section *ss = stab_section;
+    Section *ssr;
+    Section *sss;
+    Stab_Sym *stabs;
+    ElfW_Rel *rels = NULL;
+    int n_stabs, n_rels = 0, count = 0;
+    int idx, reloc_idx = 0;
+
+    if (!s1->do_debug || s1->dwarf != 0)
+        return 0;
+    if (!ss || ss->data_offset < sizeof(Stab_Sym))
+        return 0;
+
+    sss = ss->link;            /* .stabstr */
+    ssr = ss->reloc;           /* relocs on .stab (may be NULL) */
+    if (!sss || !sss->data)
+        return 0;
+
+    stabs = (Stab_Sym *)ss->data;
+    n_stabs = (int)(ss->data_offset / sizeof(Stab_Sym));
+
+    if (ssr && ssr->data_offset) {
+        rels  = (ElfW_Rel *)ssr->data;
+        n_rels = (int)(ssr->data_offset / sizeof(ElfW_Rel));
+    }
+
+    /* idx==0 is the empty-header entry put_stabs writes at section
+     * creation time; skip it. */
+    for (idx = 1; idx < n_stabs; idx++) {
+        Stab_Sym *sym = &stabs[idx];
+        uint32_t nvalue_off = (uint32_t)idx * (uint32_t)sizeof(Stab_Sym) + 8u;
+        int n_sect = 0;
+        uint32_t n_value = sym->n_value;
+        const char *name;
+        uint32_t new_strx;
+
+        /* Advance through any relocs that fall in earlier entries
+         * (shouldn't happen in practice — relocs are emitted
+         * stab-by-stab in order — but be defensive). */
+        while (reloc_idx < n_rels && rels[reloc_idx].r_offset < nvalue_off)
+            reloc_idx++;
+        if (reloc_idx < n_rels && rels[reloc_idx].r_offset == nvalue_off) {
+            int rsym = (int)ELFW(R_SYM)(rels[reloc_idx].r_info);
+            ElfW(Sym) *tsym;
+            int shndx, j;
+            tsym = &((ElfW(Sym) *)s1->symtab->data)[rsym];
+            shndx = tsym->st_shndx;
+            for (j = 0; j < nsec; j++) {
+                if (sects[j].elf && sects[j].elf->sh_num == shndx) {
+                    n_sect = j + 1;
+                    /* For section_syms (STT_SECTION) tsym->st_value is
+                     * 0, leaving sects[j].vmaddr + addend (which is
+                     * the section-relative offset already stored in
+                     * sym->n_value).  For regular syms — N_FUN's
+                     * function sym, N_STSYM's data sym — st_value is
+                     * the symbol's offset within its section; add it
+                     * so the resolved n_value is the actual symbol
+                     * VA. */
+                    n_value = sects[j].vmaddr + tsym->st_value
+                                              + sym->n_value;
+                    break;
+                }
+            }
+            /* If the target section isn't in our output layout
+             * (e.g. a debug section that didn't get laid out), leave
+             * n_sect=0 and emit the raw addend — better than dropping
+             * the entry entirely. */
+            reloc_idx++;
+        }
+
+        if (sym->n_strx) {
+            name = (const char *)sss->data + sym->n_strx;
+        } else {
+            name = "";
+        }
+        new_strx = (uint32_t)strtab->len;
+        obuf_put(strtab, name, strlen(name) + 1);
+
+        put_nlist(nlist, new_strx, sym->n_type, n_sect,
+                  sym->n_desc, n_value);
+        count++;
+    }
+
+    return count;
+}
+
 /* The big one. */
 static int macho_output_exe(TCCState *s1, const char *filename)
 {
@@ -2546,11 +2658,15 @@ static int macho_output_exe(TCCState *s1, const char *filename)
      *   3. undef syms — one per stub (e.g. _printf)
      *
      * We only emit the canonical entries: _main, _start, and one undef
-     * per stub. Local syms not strictly required for an executable. */
+     * per stub. Local syms not strictly required for an executable —
+     * the exception is STAB debug entries emitted under `-gstabs`,
+     * which Apple's convention puts in the local-symbol range so gdb
+     * walks them as part of the symbolic-debug pass. */
     obuf_put(&strtab, "", 1);
 
-    /* No locals in our minimal symtab. */
-    n_localsym = 0;
+    /* STAB debug entries from `-gstabs` (no-op when -gstabs wasn't
+     * used or when DWARF is the active debug format). */
+    n_localsym = emit_stab_nlist(s1, &nlist, &strtab, sects, nsec);
 
     /* Externally-defined: enumerate all globally-visible symbols
      * defined in our text/data/rodata sections, so dyld can find
@@ -4145,7 +4261,9 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     /* ---- Build symbol table. ---- */
     obuf_put(&strtab, "", 1);
 
-    n_localsym = 0;
+    /* STAB debug entries from `-gstabs` (same handling as the exe
+     * writer — see emit_stab_nlist for the rationale). */
+    n_localsym = emit_stab_nlist(s1, &nlist, &strtab, sects, nsec);
 
     /* Externally-defined: enumerate all globally-visible symbols
      * defined in our text/data/rodata sections so dyld can export
