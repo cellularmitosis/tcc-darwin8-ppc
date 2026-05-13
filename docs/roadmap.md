@@ -2,12 +2,13 @@
 
 ## Where we are (May 2026)
 
-Self-hosted tcc for Tiger PowerPC, **shipped through v0.2.49-g3**.
-Twenty-eight patch releases on top of [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md)
+Self-hosted tcc for Tiger PowerPC, **shipped through v0.2.50-g3**.
+Twenty-nine patch releases on top of [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md)
 have brought tests2 from 70 / 122 (57%) to **111 / 111 (100%)**:
 
 | | tests2 | what it added |
 |---|---|---|
+| [v0.2.50-g3](sessions/068-self-link-diagnostics-2026-05-12/README.md) | 111 / 111 | **Self-link diagnostics (roadmap #7).** `macho_output_exe` runs four pre-write sanity checks that turn historically-cryptic dyld errors (`Cannot allocate memory`, `Symbol not found: __mh_execute_header`, SIGBUS in crt1) into tcc-level diagnostics with file/line/segment-aware context. Invariants: (a) VM layout (segments page-aligned, no overlap, `vmsize >= filesize`, `__LINKEDIT` placed after `__TEXT+__DATA` in both VA and file space — directly catches session-025's "Cannot allocate memory" failure); (b) `__mh_execute_header` registered as `N_ABS` at `__TEXT` base + `entry_addr` inside `__text`; (c) every stub VA inside `__symbol_stub1`, every `__nl_symbol_ptr` slot inside `__nl_symbol_ptr`, every `ST_PPC_NEEDS_STUB` symbol has a stub allocated — catches the session-025 crt1 SIGBUS; (d) every defined symbol's section is in the EXE writer's emitted section list — catches "common in `.bss` but `__bss` not emitted". Each check verified by hand-injecting a deliberate break and observing the resulting message; happy-path overhead <1 ms per link. Demo: [`v0.2.50-self-link-diagnostics.sh`](../demos/v0.2.50-self-link-diagnostics.sh). |
 | [v0.2.0-g3](sessions/028-v0.2.0-g3-release/README.md) | 70 / 122 | full self-link, no gcc-4.0 in pipeline |
 | [v0.2.1-g3](sessions/032-v0.2.1-release/README.md) | 75 / 122 | >8-arg fns, FP shadow for variadic |
 | [v0.2.2-g3](sessions/033-v0.2.2-release/README.md) | 77 / 122 | more libgcc helpers, auto-link libtcc1.a |
@@ -102,7 +103,7 @@ scope" below.
 | ~~**#4**~~ | ~~Mach-O archive alacarte loader~~ | ✅ Done in v0.2.30-g3 (session 046). `tcc_load_alacarte_macho` parses the BSD `__.SYMDEF SORTED` symbol table and pulls in only the members that resolve currently-undefined symbols. The existing SysV-style `/` symdef path also got a Mach-O codepath: it now sniffs each loaded member's magic and routes Mach-O `.o` files through `macho_load_object_file`, so tcc -ar-built archives (libtcc1.a) keep loading correctly. |
 | ~~**#5**~~ | ~~`ppc-macho-stubs.c` cleanup~~ | ✅ Done in `00751c8`. Stubs file was dead since session 009 — `ppc-macho.c` had subsumed all its symbols. |
 | ~~**#6**~~ | ~~De-duplicate UNDEF symbols~~ | ✅ Done in `dc7a05d`. The dupe came from emitting one UNDEF nlist entry per stubs[] element AND another per nlptrs[] element when both lists referenced the same elfsym (e.g. `_atexit` referenced as both call target via REL24 and data pointer via ADDR32 from crt1.o's static-init machinery). Refactored to build an elfsym→nlist map so stub_sym_idx and data_sym_idx share UNDEF entries. |
-| **#7** | **Self-link diagnostics** | (Was old #10.) When the EXE writer fails the user gets `dyld` errors with no context. Better messages would shorten future 025-style debugging considerably. |
+| ~~**#7**~~ | ~~Self-link diagnostics~~ | ✅ Done in v0.2.50-g3 (session 068). `macho_output_exe` runs four pre-write sanity checks (VM layout, required symbols, stub/slot wiring, section-presence) that turn the historical session-025 dyld errors into tcc-level diagnostics. Each check verified by injecting a deliberate break. Happy-path cost <1 ms per link. |
 | **#7.5** | **OSO STAB emission for gdb-on-Tiger** | tcc currently embeds DWARF in a `__DWARF` segment, which dwarfdump and lldb (later macOS) read but Apple's gdb 6.3 does not. Apple's debug-map convention is N_OSO STAB entries pointing back at the .o files. Emitting these (plus N_FUN entries for the source-level symbol map) would make `dsymutil exe -o exe.dSYM` and `gdb exe` work end-to-end on Tiger. Requires keeping .o file paths in scope through linking. |
 
 ### Larger scope
