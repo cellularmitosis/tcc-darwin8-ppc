@@ -73,6 +73,7 @@ ST_FUNC void ppc_pic_pairs_reset(void);
 #define LC_LOAD_DYLINKER        0xe
 #define LC_UNIXTHREAD           0x5
 #define LC_TWOLEVEL_HINTS       0x16
+#define LC_UUID                 0x1b
 
 /* MH_EXECUTE filetype + flags. */
 #define MH_EXECUTE              2
@@ -2048,6 +2049,17 @@ synthesize_oso_chain:
                 put_nlist(nlist, fn_strx, N_FUN,
                           text_sect_ord, 0, fn_va);
                 count++;
+                /* N_SOL — source-file marker between N_FUN(name) and
+                 * N_FUN(size). gcc-4.0 emits this carrying the source
+                 * path; dsymutil uses it to attach each function's DWARF
+                 * compile unit to the consolidated .dSYM. Without N_SOL
+                 * dsymutil writes pubnames only and leaves .debug_info
+                 * empty, so gdb can resolve symbol names but not source
+                 * lines. We use the .o's path as the SOL value — Tiger's
+                 * dsymutil only checks that *some* SOL marker appears
+                 * within the function bracket. */
+                put_nlist(nlist, oso_strx, N_SOL, 0, 0, 0);
+                count++;
                 put_nlist(nlist, empty_strx, N_FUN, 0, 0, fn->size);
                 count++;
                 put_nlist(nlist, empty_strx, N_ENSYM,
@@ -2165,6 +2177,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     uint32_t dyld_path_aligned  = (sizeof(dyld_path)  + 3u) & ~3u;
     uint32_t dylib_cmd_size = 24 + dylib_path_aligned;
     uint32_t dyld_cmd_size  = 12 + dyld_path_aligned;
+    uint32_t uuid_cmd_size  = 24;       /* LC_UUID: cmd + cmdsize + 16-byte UUID. */
+    unsigned char uuid_bytes[16];
     /* Total cmd-size of all per-non-libSystem-dll LC_LOAD_DYLIB
      * entries (computed from s1->loaded_dlls). */
     uint32_t extra_dylib_cmds_size = 0;
@@ -2355,10 +2369,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         }
     }
 
-    ncmds = 4;  /* PAGEZERO, TEXT, LINKEDIT, UNIXTHREAD */
+    ncmds = 5;  /* PAGEZERO, TEXT, LINKEDIT, UNIXTHREAD, UUID */
     total_cmds_size = pagezero_cmd_size + text_seg_cmd_size
                     + linkedit_cmd_size + symtab_cmd_size
-                    + unixthread_cmd_size;
+                    + unixthread_cmd_size + uuid_cmd_size;
     if (n_data_sects > 0) {
         ncmds++;
         total_cmds_size += data_seg_cmd_size;
@@ -2543,16 +2557,11 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         }
     }
 
-    /* ---- Layout __LINKEDIT. ---- */
-    linkedit_file_off = text_seg_filesize + data_seg_filesize;
-    linkedit_vmaddr   = text_seg_vmaddr + text_seg_filesize + data_seg_vmsize;
-
     /* ---- Add DWARF sections to sects[] with vmaddr=0. ----
-     * file_off is filled in once linkedit_filesize is known. vmaddr
-     * stays 0 — debug data isn't loaded, and cross-section
-     * R_PPC_ADDR32 within DWARF resolves to "0 + addend = addend"
-     * (offset within the target debug section), matching the .o
-     * convention dwarfdump expects. */
+     * file_off is filled in below. vmaddr stays 0 — debug data isn't
+     * loaded, and cross-section R_PPC_ADDR32 within DWARF resolves to
+     * "0 + addend = addend" (offset within the target debug section),
+     * matching the .o convention dwarfdump expects. */
     if (n_dwarf_sects > 0) {
         int j;
         sect_idx_dwarf_first = nsec;
@@ -2560,11 +2569,43 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             sects[nsec].elf      = dwarf_elf[j];
             sects[nsec].vmaddr   = 0;
             sects[nsec].size     = (uint32_t)dwarf_elf[j]->data_offset;
-            sects[nsec].file_off = 0;          /* assigned later */
+            sects[nsec].file_off = 0;          /* assigned below */
             sects[nsec].is_zerofill = 0;
             nsec++;
         }
     }
+
+    /* ---- Layout __DWARF (file-only) and __LINKEDIT.
+     *
+     * File order is: __TEXT, __DATA, __DWARF, __LINKEDIT — __LINKEDIT
+     * must be the segment with the highest fileoff for cctools `strip`
+     * to accept the image (it asserts "__LINKEDIT covers end of file").
+     * VM order is unaffected: __DWARF has vmaddr=0, so __LINKEDIT.vmaddr
+     * still sits right after __TEXT+__DATA in the address space.
+     *
+     * __DWARF's reported filesize is page-padded so __LINKEDIT.fileoff
+     * lands on a page boundary — required for dyld's __LINKEDIT mmap
+     * to succeed (a non-page-aligned fileoff faults in
+     * doBindIndirectSymbolPointers when dyld dereferences the indirect
+     * symbol table). The padding bytes are zeros and live at the tail
+     * of the __DWARF segment in the file. */
+    if (n_dwarf_sects > 0) {
+        uint32_t dcur = text_seg_filesize + data_seg_filesize;
+        int j;
+        dwarf_seg_file_off = dcur;
+        for (j = 0; j < n_dwarf_sects; j++) {
+            int idx = sect_idx_dwarf_first + j;
+            sects[idx].file_off = dcur;
+            dcur += sects[idx].size;
+        }
+        dwarf_seg_filesize = dcur - dwarf_seg_file_off;
+        /* Pad up to page boundary. */
+        dwarf_seg_filesize = (dwarf_seg_filesize + EXE_PAGE_SIZE - 1u)
+                           & ~(uint32_t)(EXE_PAGE_SIZE - 1);
+    }
+    linkedit_file_off = text_seg_filesize + data_seg_filesize
+                      + dwarf_seg_filesize;
+    linkedit_vmaddr   = text_seg_vmaddr + text_seg_filesize + data_seg_vmsize;
 
     /* Now we know the stub addresses; set them in `stubs[]`.
      * Function-stub slots come first in __nl_symbol_ptr, data slots
@@ -3017,32 +3058,28 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             put32be(&indirect, data_sym_idx[i]);
     }
 
-    /* ---- Compute __LINKEDIT layout. ---- */
+    /* ---- Compute __LINKEDIT layout.
+     *
+     * Order inside __LINKEDIT: symbol table, then indirect symbol
+     * table, then string table — matches gcc-4.0's exe layout, which
+     * is what Tiger's `strip` enforces ("symbol table out of place"
+     * fires when the order differs). The string table must be last
+     * because cctools `strip` rewrites everything up to (and not
+     * including) the string-table region. */
     {
         uint32_t loff = linkedit_file_off;
+        sym_file_off = loff;
+        loff += (uint32_t)nlist.len;
         if (nstubs > 0 || n_nlptrs > 0) {
             indirect_file_off = loff;
             loff += (uint32_t)indirect.len;
         }
-        sym_file_off = loff;
-        loff += (uint32_t)nlist.len;
         str_file_off = loff;
         loff += (uint32_t)strtab.len;
         linkedit_filesize = loff - linkedit_file_off;
     }
 
-    /* ---- Compute __DWARF layout (after __LINKEDIT). ---- */
-    if (n_dwarf_sects > 0) {
-        uint32_t dcur = (linkedit_file_off + linkedit_filesize + 3u) & ~3u;
-        int j;
-        dwarf_seg_file_off = dcur;
-        for (j = 0; j < n_dwarf_sects; j++) {
-            int idx = sect_idx_dwarf_first + j;
-            sects[idx].file_off = dcur;
-            dcur += sects[idx].size;
-        }
-        dwarf_seg_filesize = dcur - dwarf_seg_file_off;
-    }
+    /* (__DWARF file_off was assigned above, before __LINKEDIT.) */
 
     /* ---- Pre-serialize sanity checks (roadmap #7).
      *
@@ -3111,15 +3148,21 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                 sanity_ok = 0;
             }
         }
-        /* __LINKEDIT must sit right after __TEXT+__DATA in both VA and
-         * file. The session-025 "Cannot allocate memory" bug was
-         * linkedit_vmaddr computed off filesize instead of vmsize,
-         * which placed __LINKEDIT inside __bss's vmsize footprint. */
+        /* __LINKEDIT must sit right after __TEXT+__DATA in VM and
+         * right after __TEXT+__DATA+__DWARF in the file. The
+         * session-025 "Cannot allocate memory" bug was linkedit_vmaddr
+         * computed off filesize instead of vmsize, which placed
+         * __LINKEDIT inside __bss's vmsize footprint. The file-side
+         * check also covers session-078's __DWARF reordering: __DWARF
+         * is now sandwiched between __DATA and __LINKEDIT in the file
+         * (vmaddr=0 keeps it out of VM), so cctools `strip` finds
+         * __LINKEDIT covering end-of-file. */
         {
             uint32_t expect_le_va = text_seg_vmaddr + text_seg_vmsize
                                   + (n_data_sects > 0 ? data_seg_vmsize : 0);
             uint32_t expect_le_off = text_seg_filesize
-                                   + (n_data_sects > 0 ? data_seg_filesize : 0);
+                                   + (n_data_sects > 0 ? data_seg_filesize : 0)
+                                   + dwarf_seg_filesize;
             if (linkedit_vmaddr != expect_le_va) {
                 tcc_error_noabort("ppc-macho: __LINKEDIT vmaddr 0x%x != "
                                   "__TEXT+__DATA end 0x%x (would collide "
@@ -3129,8 +3172,18 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             }
             if (linkedit_file_off != expect_le_off) {
                 tcc_error_noabort("ppc-macho: __LINKEDIT file_off 0x%x != "
-                                  "__TEXT+__DATA end 0x%x",
+                                  "__TEXT+__DATA+__DWARF end 0x%x",
                                   linkedit_file_off, expect_le_off);
+                sanity_ok = 0;
+            }
+            if (n_dwarf_sects > 0
+                && dwarf_seg_file_off != text_seg_filesize
+                                       + (n_data_sects > 0 ? data_seg_filesize : 0)) {
+                tcc_error_noabort("ppc-macho: __DWARF file_off 0x%x != "
+                                  "__TEXT+__DATA end 0x%x",
+                                  dwarf_seg_file_off,
+                                  text_seg_filesize
+                                  + (n_data_sects > 0 ? data_seg_filesize : 0));
                 sanity_ok = 0;
             }
         }
@@ -3347,6 +3400,65 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         }
     }
 
+    /* ---- Compute LC_UUID payload.
+     *
+     * Two FNV-1a 64-bit hashes (with different seeds) over the
+     * post-relocation contents of __TEXT (text + rodata + eh_frame),
+     * __DATA (data + init_array + fini_array), and __DWARF give a
+     * deterministic 16-byte fingerprint: same source + same toolchain
+     * → same UUID, different code/data/debug → different UUID. The
+     * RFC 4122 v4 marker bits keep the value parseable as a UUID for
+     * tools (otool / dwarfdump) that pretty-print it.
+     *
+     * Why this matters: Tiger gdb pairs a stripped exe with its
+     * `.dSYM` by matching LC_UUID bytes. dsymutil copies the source
+     * exe's LC_UUID into the .dSYM, so as long as we emit one,
+     * `gdb stripped-exe` finds debug info in `stripped-exe.dSYM`. */
+    {
+        static const uint64_t FNV64_OFFSET = 0xcbf29ce484222325ull;
+        static const uint64_t FNV64_PRIME  = 0x100000001b3ull;
+        uint64_t h1 = FNV64_OFFSET;
+        uint64_t h2 = FNV64_OFFSET ^ 0x9e3779b97f4a7c15ull;
+        int j;
+        size_t k;
+        #define HASH_BUF(buf, len) do {                          \
+            const unsigned char *p = (const unsigned char *)(buf); \
+            size_t n = (size_t)(len);                            \
+            for (k = 0; k < n; k++) {                            \
+                h1 = (h1 ^ p[k])         * FNV64_PRIME;          \
+                h2 = (h2 ^ p[n - 1 - k]) * FNV64_PRIME;          \
+            }                                                    \
+        } while (0)
+        if (text_data)       HASH_BUF(text_data, new_text_size);
+        if (rodata)          HASH_BUF(rodata_data, rodata->data_offset);
+        if (eh_frame)        HASH_BUF(eh_frame_data, eh_frame->data_offset);
+        if (data)            HASH_BUF(data_data, data->data_offset);
+        if (init_array)      HASH_BUF(init_array_data, init_array->data_offset);
+        if (fini_array)      HASH_BUF(fini_array_data, fini_array->data_offset);
+        for (j = 0; j < n_dwarf_sects; j++)
+            HASH_BUF(dwarf_data_arr[j], sects[sect_idx_dwarf_first + j].size);
+        #undef HASH_BUF
+        uuid_bytes[ 0] = (h1 >> 56) & 0xff;
+        uuid_bytes[ 1] = (h1 >> 48) & 0xff;
+        uuid_bytes[ 2] = (h1 >> 40) & 0xff;
+        uuid_bytes[ 3] = (h1 >> 32) & 0xff;
+        uuid_bytes[ 4] = (h1 >> 24) & 0xff;
+        uuid_bytes[ 5] = (h1 >> 16) & 0xff;
+        uuid_bytes[ 6] = (h1 >>  8) & 0xff;
+        uuid_bytes[ 7] = (h1      ) & 0xff;
+        uuid_bytes[ 8] = (h2 >> 56) & 0xff;
+        uuid_bytes[ 9] = (h2 >> 48) & 0xff;
+        uuid_bytes[10] = (h2 >> 40) & 0xff;
+        uuid_bytes[11] = (h2 >> 32) & 0xff;
+        uuid_bytes[12] = (h2 >> 24) & 0xff;
+        uuid_bytes[13] = (h2 >> 16) & 0xff;
+        uuid_bytes[14] = (h2 >>  8) & 0xff;
+        uuid_bytes[15] = (h2      ) & 0xff;
+        /* RFC 4122 v4 marker bits. */
+        uuid_bytes[6] = (uuid_bytes[6] & 0x0f) | 0x40;
+        uuid_bytes[8] = (uuid_bytes[8] & 0x3f) | 0x80;
+    }
+
     /* ---- Serialize: Mach header. ---- */
     put32be(&out, MH_MAGIC);
     put32be(&out, CPU_TYPE_POWERPC);
@@ -3557,29 +3669,17 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         }
     }
 
-    /* ---- LC_SEGMENT __LINKEDIT. ---- */
-    put32be(&out, LC_SEGMENT);
-    put32be(&out, linkedit_cmd_size);
-    put_sectname(&out, "__LINKEDIT");
-    put32be(&out, linkedit_vmaddr);
-    put32be(&out, (linkedit_filesize + EXE_PAGE_SIZE - 1u)
-                  & ~(uint32_t)(EXE_PAGE_SIZE - 1));
-    put32be(&out, linkedit_file_off);
-    put32be(&out, linkedit_filesize);
-    put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
-    put32be(&out, VM_PROT_READ);
-    put32be(&out, 0);
-    put32be(&out, 0);
-
     /* ---- LC_SEGMENT __DWARF. ----
      *
-     * Mirrors the .o-side debug-segment layout: vmaddr=0/vmsize=0
-     * (debug data isn't loaded, dyld won't try to map it), real
-     * file_offset / file_size, per-section headers carrying
-     * S_ATTR_DEBUG. Section vmaddrs all 0 (matching the .o
-     * convention: cross-section ADDR32 within DWARF resolves to
-     * "0 + addend = addend" = offset within the target debug
-     * section, which is what dwarfdump reads). */
+     * Emitted before __LINKEDIT so the file order is __TEXT, __DATA,
+     * __DWARF, __LINKEDIT — required by cctools `strip`, which asserts
+     * "__LINKEDIT covers end of file". Mirrors the .o-side debug-
+     * segment layout: vmaddr=0/vmsize=0 (debug data isn't loaded, dyld
+     * won't try to map it), real file_offset / file_size, per-section
+     * headers carrying S_ATTR_DEBUG. Section vmaddrs all 0 (matching
+     * the .o convention: cross-section ADDR32 within DWARF resolves to
+     * "0 + addend = addend" = offset within the target debug section,
+     * which is what dwarfdump reads). */
     if (n_dwarf_sects > 0) {
         int j;
         put32be(&out, LC_SEGMENT);
@@ -3608,6 +3708,20 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             put32be(&out, 0);                 /* reserved2 */
         }
     }
+
+    /* ---- LC_SEGMENT __LINKEDIT. ---- */
+    put32be(&out, LC_SEGMENT);
+    put32be(&out, linkedit_cmd_size);
+    put_sectname(&out, "__LINKEDIT");
+    put32be(&out, linkedit_vmaddr);
+    put32be(&out, (linkedit_filesize + EXE_PAGE_SIZE - 1u)
+                  & ~(uint32_t)(EXE_PAGE_SIZE - 1));
+    put32be(&out, linkedit_file_off);
+    put32be(&out, linkedit_filesize);
+    put32be(&out, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_EXECUTE);
+    put32be(&out, VM_PROT_READ);
+    put32be(&out, 0);
+    put32be(&out, 0);
 
     /* ---- LC_LOAD_DYLINKER (only if we use libSystem). ---- */
     if (nstubs > 0 || n_nlptrs > 0) {
@@ -3698,6 +3812,11 @@ static int macho_output_exe(TCCState *s1, const char *filename)
      * unnecessary — and emitting it with nhints=0 makes nm/otool
      * complain about "nhints != nundefsym".) */
 
+    /* ---- LC_UUID. ---- */
+    put32be(&out, LC_UUID);
+    put32be(&out, uuid_cmd_size);
+    obuf_put(&out, uuid_bytes, 16);
+
     /* ---- LC_UNIXTHREAD with PPC_THREAD_STATE. ---- */
     put32be(&out, LC_UNIXTHREAD);
     put32be(&out, unixthread_cmd_size);
@@ -3787,21 +3906,6 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         }
     }
 
-    /* ---- Pad to __LINKEDIT, then indirect/sym/strtab. ---- */
-    while (out.len < linkedit_file_off)
-        put8(&out, 0);
-    if (nstubs > 0) {
-        while (out.len < indirect_file_off)
-            put8(&out, 0);
-        obuf_put(&out, indirect.buf, indirect.len);
-    }
-    while (out.len < sym_file_off)
-        put8(&out, 0);
-    obuf_put(&out, nlist.buf, nlist.len);
-    while (out.len < str_file_off)
-        put8(&out, 0);
-    obuf_put(&out, strtab.buf, strtab.len);
-
     /* ---- Pad to __DWARF, then write debug section payloads. ---- */
     if (n_dwarf_sects > 0) {
         int j;
@@ -3814,6 +3918,21 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             obuf_put(&out, dwarf_data_arr[j], sects[idx].size);
         }
     }
+
+    /* ---- Pad to __LINKEDIT, then sym/indirect/strtab. ---- */
+    while (out.len < linkedit_file_off)
+        put8(&out, 0);
+    while (out.len < sym_file_off)
+        put8(&out, 0);
+    obuf_put(&out, nlist.buf, nlist.len);
+    if (nstubs > 0 || n_nlptrs > 0) {
+        while (out.len < indirect_file_off)
+            put8(&out, 0);
+        obuf_put(&out, indirect.buf, indirect.len);
+    }
+    while (out.len < str_file_off)
+        put8(&out, 0);
+    obuf_put(&out, strtab.buf, strtab.len);
 
     /* ---- Write file. ---- */
     unlink(filename);
