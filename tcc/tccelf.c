@@ -3317,8 +3317,35 @@ LIBTCCAPI int tcc_output_file(TCCState *s, const char *filename)
                 "     * before main runs. */\n"
                 "    _dyld_lookup_and_bind(\"_environ\", &envp, 0);\n"
                 "}\n";
+            /* Suppress debug-info emission for the keymgr stub.
+             *
+             * Under -gdwarf-2, the stub compile would otherwise write
+             * a fresh `<string>` compile-unit into `.debug_info`,
+             * `.debug_abbrev`, `.debug_line`, and `.debug_str` at
+             * link time.  That CU gets baked into a `__DWARF` segment
+             * on the linked exe — and `dsymutil` then produces a
+             * `.dSYM` carrying TWO `__DWARF` segments: the exe's
+             * (small, link-time-only) one preserved verbatim, plus a
+             * second one with the consolidated content from the OSO
+             * chain.  `dwarfdump` and Tiger `gdb` read the first
+             * `__DWARF` they find, report `< EMPTY >`, and never look
+             * at the second segment — so `gdb list main` /
+             * `break main:LINE` fail post-strip.
+             *
+             * The user's own `.o` files don't contribute to the
+             * exe's `__DWARF` (the loader drops `__DWARF,__debug_*`
+             * sections, see `macho_section_to_elf`), and dsymutil
+             * pulls debug info from the `.o` files via the OSO
+             * chain.  So the keymgr stub is the ONLY thing writing
+             * to the linker's `.debug_*` sections; suppressing it
+             * leaves them empty, and `macho_output_exe`'s
+             * `s->data_offset == 0` filter drops the `__DWARF`
+             * segment entirely (gcc-4.0 parity). */
+            int saved_do_debug = s->do_debug;
+            s->do_debug = 0;
             if (tcc_compile_string(s, keymgr_stub) != 0)
                 return -1;
+            s->do_debug = saved_do_debug;
         }
     }
 #endif

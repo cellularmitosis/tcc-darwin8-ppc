@@ -69,13 +69,19 @@ if [ "$out" != "sum=7 prod=35 argc=1" ]; then
 fi
 echo "  $out  ok"
 
-echo "==> [layout] Asserting __DWARF appears before __LINKEDIT..."
+echo "==> [layout] Asserting __DWARF placement is strip-friendly..."
+# v0.2.57 emitted __DWARF before __LINKEDIT.  v0.2.58 suppresses the
+# link-time `<string>` keymgr CU, which leaves the linker's `.debug_*`
+# sections empty in a two-step build — so `macho_output_exe`'s
+# `data_offset == 0` filter drops the __DWARF segment entirely.  Both
+# layouts satisfy strip's "LINKEDIT covers end of file" invariant.
 seg_order=$(otool -l "$EXE" | awk '/segname __DWARF/ {print "DWARF"} /segname __LINKEDIT/ {print "LINKEDIT"}' \
             | tr '\n' ' ' | sed 's/ *$//')
 case "$seg_order" in
-    *"DWARF LINKEDIT"*) echo "  __DWARF before __LINKEDIT  ok" ;;
+    *"DWARF LINKEDIT"*) echo "  __DWARF before __LINKEDIT  ok (v0.2.57 layout)" ;;
+    "LINKEDIT")         echo "  no __DWARF in exe  ok (v0.2.58 layout — keymgr CU suppressed)" ;;
     *)
-        echo "FAIL: expected __DWARF before __LINKEDIT, got: $seg_order"
+        echo "FAIL: unexpected segment order around __DWARF/__LINKEDIT: $seg_order"
         exit 1
         ;;
 esac
