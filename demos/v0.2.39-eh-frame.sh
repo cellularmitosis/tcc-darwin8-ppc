@@ -80,8 +80,13 @@ fi
 
 TCCROOT=$(cd "$(dirname "$TCC")" && pwd)
 
-echo "==> Linking with bare -g (default DWARF version)..."
-"$TCC" -B"$TCCROOT" -L"$TCCROOT" -I"$TCCROOT/include" -g \
+echo "==> Linking with -gdwarf (default DWARF version)..."
+# Pre-v0.2.55 bare `-g` resolved to DWARF; v0.2.55 flipped the default
+# to stabs so Tiger gdb just works.  This demo predates that flip and
+# exists to verify the DWARF emission path (eh_frame + CFI + version);
+# spell -gdwarf explicitly so it tests what it intends regardless of the
+# bare-`-g` default.
+"$TCC" -B"$TCCROOT" -L"$TCCROOT" -I"$TCCROOT/include" -gdwarf \
     "$SRC" -o "$EXE"
 
 echo "==> Verifying __TEXT,__eh_frame is present..."

@@ -744,6 +744,29 @@ struct sym_attr {
 #endif
 };
 
+#if defined TCC_TARGET_MACHO
+/* Per-loaded-.o stabs-debug-map state.  Populated by
+ * macho_load_object_file when a `.o` is loaded under `-g` (either
+ * stabs or DWARF mode); consumed by emit_stab_nlist at link time
+ * to emit the per-TU debug-map record dsymutil walks to find each
+ * .o's companion debug info.  See ppc-macho.c. */
+struct macho_oso_func {
+    char    *name;        /* function name, with leading '_' */
+    uint32_t off;         /* offset in merged text_section */
+    uint32_t size;        /* function body size (computed by adjacency) */
+};
+struct macho_oso_state {
+    char    *path;        /* realpath of the .o */
+    uint32_t mtime;       /* st_mtime from stat() */
+    uint32_t after_idx;   /* idx in stab_section to inject N_OSO after
+                           * (0 = synthesize SO/OSO/SO triplet at end) */
+    uint32_t text_off;    /* this .o's offset in the merged text_section */
+    uint32_t text_size;   /* this .o's contribution to text_section */
+    struct macho_oso_func *funcs;
+    int      n_funcs;
+};
+#endif
+
 struct TCCState {
     unsigned char verbose; /* if true, display some information during compilation */
     unsigned char nostdinc; /* if true, no standard headers are added */
@@ -972,6 +995,15 @@ struct TCCState {
     char *install_name;
     uint32_t compatibility_version;
     uint32_t current_version;
+    /* Per-loaded-.o stabs-debug-map state.  When a .o that carries a
+     * `.stab` section is loaded via `macho_load_object_file`, we
+     * record its on-disk realpath + st_mtime + the merged
+     * stab_section index of its filename-N_SO so the exe writer can
+     * emit a paired N_OSO record after that N_SO at link time.
+     * dsymutil reads the OSO chain to find each .o's companion
+     * debug info.  See `emit_stab_nlist` in ppc-macho.c. */
+    struct macho_oso_state *macho_oso_states;
+    int n_macho_oso_states;
 #endif
 
 #ifndef ELF_OBJ_ONLY

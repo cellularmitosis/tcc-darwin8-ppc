@@ -981,6 +981,17 @@ LIBTCCAPI void tcc_delete(TCCState *s1)
     tcc_free(s1->deps_outfile);
 #if defined TCC_TARGET_MACHO
     tcc_free(s1->install_name);
+    {
+        int i, j;
+        for (i = 0; i < s1->n_macho_oso_states; i++) {
+            struct macho_oso_state *os = &s1->macho_oso_states[i];
+            tcc_free(os->path);
+            for (j = 0; j < os->n_funcs; j++)
+                tcc_free(os->funcs[j].name);
+            tcc_free(os->funcs);
+        }
+        tcc_free(s1->macho_oso_states);
+    }
 #endif
     dynarray_reset(&s1->files, &s1->nb_files);
     dynarray_reset(&s1->target_deps, &s1->nb_target_deps);

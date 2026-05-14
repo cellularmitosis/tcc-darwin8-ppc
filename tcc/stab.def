@@ -120,6 +120,16 @@ __define_stab (N_SSYM, 0x60, "SSYM")
    Value is starting text address of the compilation.  */
 __define_stab (N_SO, 0x64, "SO")
 
+/* Apple Mach-O: Object file path stab.  Apple's debug-map convention:
+   emitted by the linker (or compiler-driver) between an N_SO file pair
+   and the per-function stabs of a translation unit; n_strx points at
+   the absolute path of the .o that contributed those stabs, n_value
+   carries that .o's `st_mtime` (seconds since epoch), and n_desc=1 is
+   the format-version marker.  dsymutil walks this chain to find the
+   per-`.o` companion debug info when producing a standalone .dSYM
+   bundle.  */
+__define_stab (N_OSO, 0x66, "OSO")
+
 /* Automatic variable in the stack.  Value is offset from frame pointer.
    Also used for type descriptions.  */
 __define_stab (N_LSYM, 0x80, "LSYM")

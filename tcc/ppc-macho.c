@@ -1883,29 +1883,35 @@ static int emit_stab_nlist(TCCState *s1,
 {
     Section *ss = stab_section;
     Section *ssr;
-    Section *sss;
-    Stab_Sym *stabs;
+    Section *sss = NULL;
+    Stab_Sym *stabs = NULL;
     ElfW_Rel *rels = NULL;
-    int n_stabs, n_rels = 0, count = 0;
+    int n_stabs = 0, n_rels = 0, count = 0;
     int idx, reloc_idx = 0;
+    int has_stab_chain = 0;
 
-    if (!s1->do_debug || s1->dwarf != 0)
-        return 0;
-    if (!ss || ss->data_offset < sizeof(Stab_Sym))
-        return 0;
-
-    sss = ss->link;            /* .stabstr */
-    ssr = ss->reloc;           /* relocs on .stab (may be NULL) */
-    if (!sss || !sss->data)
+    if (!s1->do_debug)
         return 0;
 
-    stabs = (Stab_Sym *)ss->data;
-    n_stabs = (int)(ss->data_offset / sizeof(Stab_Sym));
-
-    if (ssr && ssr->data_offset) {
-        rels  = (ElfW_Rel *)ssr->data;
-        n_rels = (int)(ssr->data_offset / sizeof(ElfW_Rel));
+    /* Walk stab_section if it carries a real stab chain (i.e. the
+     * user used -gstabs or post-v0.2.55 bare -g; under -gdwarf-N the
+     * section is empty and we go straight to OSO-only synthesis). */
+    if (ss && ss->data_offset >= sizeof(Stab_Sym) && s1->dwarf == 0) {
+        sss = ss->link;          /* .stabstr */
+        ssr = ss->reloc;         /* relocs on .stab (may be NULL) */
+        if (sss && sss->data) {
+            stabs = (Stab_Sym *)ss->data;
+            n_stabs = (int)(ss->data_offset / sizeof(Stab_Sym));
+            if (ssr && ssr->data_offset) {
+                rels  = (ElfW_Rel *)ssr->data;
+                n_rels = (int)(ssr->data_offset / sizeof(ElfW_Rel));
+            }
+            has_stab_chain = 1;
+        }
     }
+
+    if (!has_stab_chain)
+        goto synthesize_oso_chain;
 
     /* idx==0 is the empty-header entry put_stabs writes at section
      * creation time; skip it. Subsequent placeholders (n_type=0) can
@@ -1972,6 +1978,88 @@ static int emit_stab_nlist(TCCState *s1,
         put_nlist(nlist, new_strx, sym->n_type, n_sect,
                   sym->n_desc, n_value);
         count++;
+    }
+
+synthesize_oso_chain:
+    /* DWARF-mode (and any stabs-mode .o that didn't include its own
+     * SO pair): synthesize a freestanding N_SO / N_OSO / N_SO chain
+     * per loaded .o so dsymutil-on-Tiger has a debug map to walk.
+     *
+     * gcc-4.0's `-gdwarf-2` debug-map format (cross-checked against
+     * an actual gcc-4.0 -gdwarf-2 build on Tiger):
+     *
+     *   N_SO  <source-filename>   n_sect=1 n_value=low_pc
+     *   N_OSO <objpath>           n_sect=1 n_desc=1 n_value=mtime
+     *   N_SO  ""                  n_sect=1 n_value=high_pc
+     *
+     * dsymutil uses the {low_pc,high_pc} pair plus the OSO mtime to
+     * find each TU's range in the linked exe's __text and consolidate
+     * the corresponding DWARF from the on-disk .o.
+     *
+     * Source filename: we don't currently parse DW_AT_name out of the
+     * .o's DWARF, so we substitute the .o's own path.  dsymutil keys
+     * on the OSO record, not the leading SO, so this stand-in is
+     * harmless.  Text-section ordinal is hardcoded to 1 (__text). */
+    {
+        int oi;
+        int text_sect_ord = 1;  /* __text is always ordinal 1 in EXE_SECT layout */
+        uint32_t text_vmaddr = 0;
+        int i;
+        for (i = 0; i < nsec; i++) {
+            if (sects[i].elf == text_section) {
+                text_vmaddr = sects[i].vmaddr;
+                text_sect_ord = i + 1;
+                break;
+            }
+        }
+        for (oi = 0; oi < s1->n_macho_oso_states; oi++) {
+            struct macho_oso_state *os = &s1->macho_oso_states[oi];
+            uint32_t so_strx, oso_strx, end_strx, empty_strx;
+            int fi;
+            if (os->after_idx != 0) continue;  /* already inlined */
+            /* SO open — source filename; gcc-4.0 emits this with
+             * n_sect=0 / n_value=0 under -gdwarf-N (the address range
+             * lives in the per-function BNSYM/FUN markers below, not
+             * the surrounding SO bookends). */
+            so_strx = (uint32_t)strtab->len;
+            obuf_put(strtab, os->path, strlen(os->path) + 1);
+            put_nlist(nlist, so_strx, N_SO, 0, 0, 0);
+            count++;
+            /* OSO — object file path, mtime, version=1. */
+            oso_strx = (uint32_t)strtab->len;
+            obuf_put(strtab, os->path, strlen(os->path) + 1);
+            put_nlist(nlist, oso_strx, N_OSO, 0, 1, os->mtime);
+            count++;
+            /* Per-function BNSYM / N_FUN(name) / N_FUN("" w/ size) /
+             * N_ENSYM markers.  dsymutil walks this chain to map each
+             * function name to its address+size in the linked exe,
+             * then consults the .o's DWARF (via the OSO record) for
+             * the corresponding subprogram body. */
+            empty_strx = (uint32_t)strtab->len;
+            obuf_put(strtab, "", 1);
+            for (fi = 0; fi < os->n_funcs; fi++) {
+                struct macho_oso_func *fn = &os->funcs[fi];
+                uint32_t fn_va = text_vmaddr + fn->off;
+                uint32_t fn_strx = (uint32_t)strtab->len;
+                obuf_put(strtab, fn->name, strlen(fn->name) + 1);
+                put_nlist(nlist, empty_strx, N_BNSYM,
+                          text_sect_ord, 0, fn_va);
+                count++;
+                put_nlist(nlist, fn_strx, N_FUN,
+                          text_sect_ord, 0, fn_va);
+                count++;
+                put_nlist(nlist, empty_strx, N_FUN, 0, 0, fn->size);
+                count++;
+                put_nlist(nlist, empty_strx, N_ENSYM,
+                          text_sect_ord, 0, fn_va);
+                count++;
+            }
+            /* Closing SO — empty name, n_sect=0 / n_value=0. */
+            end_strx = (uint32_t)strtab->len;
+            obuf_put(strtab, "", 1);
+            put_nlist(nlist, end_strx, N_SO, 0, 0, 0);
+            count++;
+        }
     }
 
     return count;
@@ -6522,7 +6610,7 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
             uint32_t stab_off    = ctx.sec_to_off[stab_sec_idx];
             uint32_t stabstr_off = ctx.sec_to_off[stabstr_sec_idx];
             uint32_t loaded_size = ctx.sects[stab_sec_idx].size;
-            uint32_t k;
+            uint32_t k, n_loaded;
             Stab_Sym *entries;
             if (stab_s->sh_entsize == 0)
                 stab_s->sh_entsize = sizeof(Stab_Sym);
@@ -6533,9 +6621,137 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
             if (!stab_section)
                 stab_section = stab_s;
             entries = (Stab_Sym *)(stab_s->data + stab_off);
-            for (k = 0; k * sizeof(Stab_Sym) < loaded_size; k++) {
+            n_loaded = loaded_size / sizeof(Stab_Sym);
+            for (k = 0; k < n_loaded; k++) {
                 if (entries[k].n_strx)
                     entries[k].n_strx += stabstr_off;
+            }
+        }
+
+        /* Record per-loaded-.o OSO state for the exe writer's debug
+         * map.  Only fires for DWARF-mode `.o` files — `dsymutil` on
+         * Tiger consumes DWARF in `.o` files via the OSO chain to
+         * build a `.dSYM` bundle, and a stabs-mode `.o` would just
+         * make Tiger `gdb 6.3` try to re-read stabs from the `.o`
+         * via the OSO record and crash on tcc's __DWARF,__stab
+         * section layout (which differs from gcc's LC_SYMTAB nlist
+         * placement).  Stabs-mode debugging already works directly
+         * out of the linked exe's LC_SYMTAB — no OSO needed. */
+        if (s1->do_debug && s1->dwarf != 0 && s1->current_filename) {
+            uint32_t text_off = 0, text_size = 0;
+            int has_dwarf = 0;
+            /* Locate this .o's __TEXT,__text contribution to the
+             * merged text_section so the exe writer can emit
+             * dsymutil-consumable low_pc/high_pc on the synthesized
+             * N_SO bookends. */
+            for (i = 0; i < nsec; i++) {
+                Section *s = ctx.sec_to_tcc[i];
+                if (s && s == text_section) {
+                    text_off  = ctx.sec_to_off[i];
+                    text_size = ctx.sects[i].size;
+                    break;
+                }
+            }
+            /* Detect DWARF by walking the raw Mach-O section table —
+             * the loader currently drops `__DWARF,__debug_*` sections
+             * (macho_section_to_elf has no entry for them), so
+             * ctx.sec_to_tcc[] for those slots is NULL. */
+            for (i = 0; i < nsec; i++) {
+                if (!strncmp(sects[i].segname, "__DWARF", 7)
+                 && !strncmp(sects[i].sectname, "__debug_", 8)) {
+                    has_dwarf = 1;
+                    break;
+                }
+            }
+            if (has_dwarf) {
+                struct stat st;
+                char rp_buf[1024];
+                char *rp;
+                struct macho_oso_state *os;
+                int sym_i, text_sec_idx = -1;
+                rp = realpath(s1->current_filename, rp_buf);
+                if (!rp) rp = (char *)s1->current_filename;
+                s1->macho_oso_states = tcc_realloc(s1->macho_oso_states,
+                    sizeof(*s1->macho_oso_states)
+                    * (s1->n_macho_oso_states + 1));
+                os = &s1->macho_oso_states[s1->n_macho_oso_states++];
+                memset(os, 0, sizeof(*os));
+                os->path = tcc_strdup(rp);
+                os->mtime = (stat(rp, &st) == 0)
+                            ? (uint32_t)st.st_mtime : 0u;
+                os->after_idx = 0;  /* always synthesize triplet for DWARF .o */
+                os->text_off  = text_off;
+                os->text_size = text_size;
+                /* Locate this .o's __TEXT,__text section index (raw)
+                 * so we can pick out defined-in-text function symbols
+                 * from the .o's nlist. */
+                for (i = 0; i < nsec; i++) {
+                    if (ctx.sec_to_tcc[i] == text_section) {
+                        text_sec_idx = i;
+                        break;
+                    }
+                }
+                /* Scan the .o's nlist for defined function symbols in
+                 * __text, recording each as a per-OSO func entry.
+                 * dsymutil uses the resulting N_BNSYM/N_FUN/N_FUN/N_ENSYM
+                 * chain to map function names → linked-exe addresses
+                 * before consolidating the .o's DWARF.  We skip
+                 * undefined / non-text / no-name symbols. */
+                if (text_sec_idx >= 0) {
+                    for (sym_i = 0; sym_i < nsyms; sym_i++) {
+                        const struct mach_nlist *nl = &syms[sym_i];
+                        const char *nm;
+                        struct macho_oso_func *fn;
+                        if (nl->n_type & N_STAB) continue;
+                        if ((nl->n_type & N_TYPE) != N_SECT) continue;
+                        if ((nl->n_sect - 1) != text_sec_idx) continue;
+                        if (nl->n_strx == 0 || nl->n_strx >= strsize)
+                            continue;
+                        nm = strtab + nl->n_strx;
+                        if (!nm[0]) continue;
+                        /* `$a` is the Apple-llvm "code start" mapping
+                         * symbol tcc emits at text_section offset 0
+                         * (see tccdbg.c::tcc_debug_start).  It's not
+                         * a function and dsymutil ignores it; skip
+                         * here so it doesn't pollute the debug map. */
+                        if (nm[0] == '$') continue;
+                        /* Other Apple-conventional mapping syms (rare,
+                         * but defensive): "L.<name>" assembler locals,
+                         * `Ltmp*`, etc. — anything starting with 'L'
+                         * isn't an externally-meaningful function. */
+                        if (nm[0] == 'L') continue;
+                        os->funcs = tcc_realloc(os->funcs,
+                            sizeof(*os->funcs) * (os->n_funcs + 1));
+                        fn = &os->funcs[os->n_funcs++];
+                        fn->name = tcc_strdup(nm);
+                        fn->off = (nl->n_value
+                                 - ctx.sects[text_sec_idx].addr)
+                                + text_off;
+                        fn->size = 0;  /* computed below */
+                    }
+                    /* Sort by offset; compute sizes by adjacency. */
+                    if (os->n_funcs > 1) {
+                        int a, b;
+                        for (a = 0; a < os->n_funcs - 1; a++) {
+                            for (b = a + 1; b < os->n_funcs; b++) {
+                                if (os->funcs[b].off < os->funcs[a].off) {
+                                    struct macho_oso_func t = os->funcs[a];
+                                    os->funcs[a] = os->funcs[b];
+                                    os->funcs[b] = t;
+                                }
+                            }
+                        }
+                    }
+                    {
+                        int fi;
+                        uint32_t end = text_off + text_size;
+                        for (fi = 0; fi < os->n_funcs; fi++) {
+                            uint32_t nxt = (fi + 1 < os->n_funcs)
+                                         ? os->funcs[fi + 1].off : end;
+                            os->funcs[fi].size = nxt - os->funcs[fi].off;
+                        }
+                    }
+                }
             }
         }
     }

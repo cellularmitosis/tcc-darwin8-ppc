@@ -2539,7 +2539,21 @@ ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
         dwarf_reloc(dwarf_info_section, section_sym, R_DATA_PTR);
 #if PTR_SIZE == 4
         dwarf_data4(dwarf_info_section, func_ind); // low_pc
-        dwarf_data4(dwarf_info_section, size); // high_pc
+# if defined TCC_TARGET_PPC && !defined(TCC_TARGET_PPC64)
+        /* Apple cctools dsymutil (dwarf_utilities-42, shipped on
+         * Tiger) interprets DW_AT_high_pc as an absolute end-address
+         * even with DW_FORM_data4 — strict DWARF-2 semantics.  Other
+         * tcc targets emit `size` here (offset form, DWARF-3+);
+         * under DWARF-2 with multiple functions per TU that
+         * collapses the second function's [low,high) to an empty
+         * range, which dsymutil silently drops.  Emit
+         * (low_pc + size) with a text-section reloc so the linker
+         * resolves to the function's real end VA. */
+        dwarf_reloc(dwarf_info_section, section_sym, R_DATA_PTR);
+        dwarf_data4(dwarf_info_section, func_ind + size); // high_pc (absolute end)
+# else
+        dwarf_data4(dwarf_info_section, size); // high_pc (offset from low_pc)
+# endif
 #else
         dwarf_data8(dwarf_info_section, func_ind); // low_pc
         dwarf_data8(dwarf_info_section, size); // high_pc
@@ -2557,6 +2571,15 @@ ST_FUNC void tcc_debug_funcend(TCCState *s1, int size)
         dwarf_data1(dwarf_info_section, DW_OP_reg29); // reg 29
 #elif defined TCC_TARGET_RISCV64
         dwarf_data1(dwarf_info_section, DW_OP_reg8); // r8(s0)
+#elif defined TCC_TARGET_PPC && !defined(TCC_TARGET_PPC64)
+        /* Frame base = r31 (post-prolog FP, = r1 + frame_size, set in
+         * gfunc_prolog).  Use DW_OP_reg31 directly rather than DWARF-3's
+         * DW_OP_call_frame_cfa: Tiger's `dsymutil` (cctools dwarf_utilities-42)
+         * asserts on any DW_OP it doesn't recognize in `-gdwarf-2` output,
+         * and `call_frame_cfa` was added in DWARF-3.  Locals already encode
+         * their FP-relative offsets, so r31 as the frame base gives the
+         * same resolved address as a CFA expression would. */
+        dwarf_data1(dwarf_info_section, DW_OP_reg0 + 31);
 #else
         dwarf_data1(dwarf_info_section, DW_OP_call_frame_cfa);
 #endif
