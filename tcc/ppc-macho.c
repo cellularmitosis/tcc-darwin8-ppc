@@ -6790,6 +6790,43 @@ static int macho_section_to_elf(const char *segname, const char *sectname,
     return 0;
 }
 
+/* Verbose reader diagnostic. Gated on `-vv` (s1->verbose >= 2).
+ *
+ * Logs every silent routing decision macho_load_object_file makes —
+ * section skips, reloc drops, symbol filtering — to stderr in a
+ * structured `tcc: reader: <file>: <category>: <details>` format.
+ * Output volume is high under `-vv` but zero at default verbosity.
+ *
+ * The companion to v0.2.50 / v0.2.59 / v0.2.60: those bracket the
+ * writer (pre-write + post-write); this surfaces decisions on the
+ * read path that historically led to the v0.2.40 sed bug (silent
+ * pass-1 section skip) and the v0.2.44 SECTDIFF shadow-section bug
+ * (SECTDIFF target VA mapping to no loaded section).
+ *
+ * Categories: "section-skip", "reloc-drop", "sym-skip".
+ *
+ * STAB symbols (n_type & N_STAB) and standalone PPC_RELOC_PAIR
+ * entries are *not* logged — the first is routine under `-g` and
+ * would flood; the second is iteration mechanics rather than a
+ * routing decision. */
+static void macho_reader_log(TCCState *s1, const char *category,
+                              const char *fmt, ...)
+{
+    va_list ap;
+    const char *file;
+    const char *slash;
+    if (s1->verbose < 2)
+        return;
+    file = s1->current_filename ? s1->current_filename : "<unknown>";
+    slash = strrchr(file, '/');
+    if (slash) file = slash + 1;
+    fprintf(stderr, "tcc: reader: %s: %s: ", file, category);
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
 /* Per-input bookkeeping for one .o load. */
 struct macho_load_ctx {
     const unsigned char       *file;        /* whole file in memory */
@@ -6859,12 +6896,18 @@ static int macho_translate_sym(TCCState *s1, struct macho_load_ctx *ctx,
     int new_idx;
 
     if (n_type & N_STAB)
-        return 0;       /* debug syms: skip */
-    if (nl->n_strx == 0 || nl->n_strx >= ctx->strtab_size)
+        return 0;       /* debug syms: skip (intentionally unlogged: too noisy under -g) */
+    if (nl->n_strx == 0 || nl->n_strx >= ctx->strtab_size) {
+        macho_reader_log(s1, "sym-skip",
+                          "index %d: bad n_strx %u (strtab size %u)",
+                          old_idx, nl->n_strx, ctx->strtab_size);
         return 0;
+    }
     name = ctx->strtab + nl->n_strx;
-    if (!name[0])
+    if (!name[0]) {
+        macho_reader_log(s1, "sym-skip", "index %d: empty name", old_idx);
         return 0;
+    }
 
     bind = is_ext ? STB_GLOBAL : STB_LOCAL;
     type = STT_NOTYPE;
@@ -6898,7 +6941,12 @@ static int macho_translate_sym(TCCState *s1, struct macho_load_ctx *ctx,
     } else if (basic == N_SECT) {
         Section *s;
         int sec_idx = nl->n_sect - 1;
-        if (sec_idx < 0 || sec_idx >= ctx->nsec) return 0;
+        if (sec_idx < 0 || sec_idx >= ctx->nsec) {
+            macho_reader_log(s1, "sym-skip",
+                              "index %d (%s): n_sect %d out of range [1, %d]",
+                              old_idx, name, nl->n_sect, ctx->nsec);
+            return 0;
+        }
         s = ctx->sec_to_tcc[sec_idx];
         if (!s) {
             /* Symbol points into a section we discarded (stubs / la_ptr).
@@ -6915,6 +6963,9 @@ static int macho_translate_sym(TCCState *s1, struct macho_load_ctx *ctx,
                   + ctx->sec_to_off[sec_idx];
         }
     } else {
+        macho_reader_log(s1, "sym-skip",
+                          "index %d (%s): unknown N_TYPE basic 0x%x",
+                          old_idx, name, basic);
         return 0;
     }
 
@@ -6983,6 +7034,9 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
              * pre-fix behavior for in-memory loads of libtcc1.a). */
             if (s1->output_type != TCC_OUTPUT_OBJ
              && s1->output_type != TCC_OUTPUT_EXE) {
+                macho_reader_log(s1, "reloc-drop",
+                                  "section %.16s reloc %u: SECTDIFF illegal for output type %d",
+                                  sec->sectname, k, s1->output_type);
                 /* Skip the SECTDIFF reloc itself AND its trailing
                  * PAIR. */
                 if (k + 1 < sec->nreloc) {
@@ -7018,8 +7072,12 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
             int target_sect_idx;
 
             if (sc_type != PPC_RELOC_HA16_SECTDIFF
-             && sc_type != PPC_RELOC_LO16_SECTDIFF)
+             && sc_type != PPC_RELOC_LO16_SECTDIFF) {
+                macho_reader_log(s1, "reloc-drop",
+                                  "section %.16s reloc %u: unknown scattered type %d",
+                                  sec->sectname, k, sc_type);
                 goto skip_pair_after;
+            }
 
             /* Peek the PAIR scattered reloc: its r_value is the
              * anchor VA in the source object's __text. We need it
@@ -7064,8 +7122,12 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
                     break;
                 }
             }
-            if (target_sect_idx < 0)
+            if (target_sect_idx < 0) {
+                macho_reader_log(s1, "reloc-drop",
+                                  "section %.16s reloc %u: SECTDIFF target VA 0x%x maps to no section",
+                                  sec->sectname, k, sc_value);
                 goto skip_pair_after;
+            }
             /* Two cases for the SECTDIFF target:
              *
              * (a) target_sect was discarded (stub / la_ptr /
@@ -7100,16 +7162,24 @@ static int macho_translate_relocs(TCCState *s1, struct macho_load_ctx *ctx,
                 /* Case (a). */
                 und_sym = macho_resolve_stub_slot(ctx, target_sect_idx,
                                                    sc_value);
-                if (und_sym < 0)
+                if (und_sym < 0) {
+                    macho_reader_log(s1, "reloc-drop",
+                                      "section %.16s reloc %u: SECTDIFF stub-slot resolve failed (target sect %d, value 0x%x)",
+                                      sec->sectname, k, target_sect_idx, sc_value);
                     goto skip_pair_after;
+                }
 
                 new_sym = ctx->sym_old_to_new[und_sym];
                 if (new_sym == 0) {
                     new_sym = macho_translate_sym(s1, ctx, und_sym);
                     ctx->sym_old_to_new[und_sym] = new_sym;
                 }
-                if (new_sym == 0)
+                if (new_sym == 0) {
+                    macho_reader_log(s1, "reloc-drop",
+                                      "section %.16s reloc %u: SECTDIFF target sym %d filtered by translate_sym",
+                                      sec->sectname, k, und_sym);
                     goto skip_pair_after;
+                }
             }
 
             elf_type = (sc_type == PPC_RELOC_HA16_SECTDIFF)
@@ -7172,9 +7242,19 @@ skip_pair_after:
             target_old_sym = r_symnum;
         } else {
             target_sect = r_symnum - 1;
-            if (target_sect < 0 || target_sect >= ctx->nsec) continue;
+            if (target_sect < 0 || target_sect >= ctx->nsec) {
+                macho_reader_log(s1, "reloc-drop",
+                                  "section %.16s reloc %u: non-extern target sect %d out of range [0, %d)",
+                                  sec->sectname, k, target_sect, ctx->nsec);
+                continue;
+            }
             file_off = sec->offset + r_address;
-            if (file_off + 4 > (int)ctx->file_size) continue;
+            if (file_off + 4 > (int)ctx->file_size) {
+                macho_reader_log(s1, "reloc-drop",
+                                  "section %.16s reloc %u: instruction at file offset %d past file end %zu",
+                                  sec->sectname, k, file_off, ctx->file_size);
+                continue;
+            }
             insn_bytes = ctx->file + file_off;
             insn = mach_get32(insn_bytes);
             target_value = 0;
@@ -7201,6 +7281,9 @@ skip_pair_after:
                                  + (int16_t)this_half;
                 }
             } else {
+                macho_reader_log(s1, "reloc-drop",
+                                  "section %.16s reloc %u: non-extern type %d length %d not handled",
+                                  sec->sectname, k, r_type, r_length);
                 continue;
             }
 
@@ -7218,7 +7301,12 @@ skip_pair_after:
                 int slot_kind;
                 und_sym = macho_resolve_stub_slot(ctx, target_sect,
                                                    target_value);
-                if (und_sym < 0) continue;
+                if (und_sym < 0) {
+                    macho_reader_log(s1, "reloc-drop",
+                                      "section %.16s reloc %u: non-extern stub-slot resolve failed (target sect %d, value 0x%x)",
+                                      sec->sectname, k, target_sect, target_value);
+                    continue;
+                }
                 target_old_sym = und_sym;
                 /* If the original target was a __symbol_stub1 entry
                  * (i.e. a function call site routed through the
@@ -7263,13 +7351,23 @@ skip_pair_after:
             }
         }
 
-        if (target_old_sym < 0 || target_old_sym >= ctx->nsyms) continue;
+        if (target_old_sym < 0 || target_old_sym >= ctx->nsyms) {
+            macho_reader_log(s1, "reloc-drop",
+                              "section %.16s reloc %u: target sym %d out of range [0, %d)",
+                              sec->sectname, k, target_old_sym, ctx->nsyms);
+            continue;
+        }
         new_sym = ctx->sym_old_to_new[target_old_sym];
         if (new_sym == 0) {
             new_sym = macho_translate_sym(s1, ctx, target_old_sym);
             ctx->sym_old_to_new[target_old_sym] = new_sym;
         }
-        if (new_sym == 0) continue;
+        if (new_sym == 0) {
+            macho_reader_log(s1, "reloc-drop",
+                              "section %.16s reloc %u: extern target sym %d filtered by translate_sym",
+                              sec->sectname, k, target_old_sym);
+            continue;
+        }
 have_sym:;
 
         if (r_type == PPC_RELOC_VANILLA && r_length == 2)
@@ -7282,8 +7380,12 @@ have_sym:;
             elf_type = R_PPC_ADDR16_HI;
         else if (r_type == PPC_RELOC_LO16)
             elf_type = R_PPC_ADDR16_LO;
-        else
+        else {
+            macho_reader_log(s1, "reloc-drop",
+                              "section %.16s reloc %u: extern r_type %d has no ELF mapping",
+                              sec->sectname, k, r_type);
             continue;
+        }
 
         put_elf_reloc(s1->symtab, s, sec_off + r_address, elf_type, new_sym);
 
@@ -7513,8 +7615,12 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
         int j;
         uint32_t off, align;
         if (!macho_section_to_elf(m->segname, m->sectname,
-                                   &name, &sh_type, &sh_flags))
+                                   &name, &sh_type, &sh_flags)) {
+            macho_reader_log(s1, "section-skip",
+                              "%.16s,%.16s (sect %d, flags 0x%08x, size %u, nreloc %u)",
+                              m->segname, m->sectname, i, m->flags, m->size, m->nreloc);
             continue;
+        }
         /* Find or create the matching tcc section. */
         for (j = 1; j < s1->nb_sections; j++) {
             if (!strcmp(s1->sections[j]->name, name)) break;
@@ -7722,11 +7828,26 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
         int is_ext = (nl->n_type & N_EXT) != 0;
         int new_idx;
         if (nl->n_type & N_STAB) continue;
-        if (!is_ext && basic != N_SECT) continue;     /* skip locals not in a kept section */
+        if (!is_ext && basic != N_SECT) {
+            macho_reader_log(s1, "sym-skip",
+                              "pass-2 index %d: local with N_TYPE basic 0x%x (not N_SECT)",
+                              i, basic);
+            continue;     /* skip locals not in a kept section */
+        }
         if (basic == N_SECT) {
             int sec_idx = nl->n_sect - 1;
-            if (sec_idx < 0 || sec_idx >= nsec) continue;
-            if (!ctx.sec_to_tcc[sec_idx] && !is_ext) continue;
+            if (sec_idx < 0 || sec_idx >= nsec) {
+                macho_reader_log(s1, "sym-skip",
+                                  "pass-2 index %d: n_sect %d out of range [1, %d]",
+                                  i, nl->n_sect, nsec);
+                continue;
+            }
+            if (!ctx.sec_to_tcc[sec_idx] && !is_ext) {
+                macho_reader_log(s1, "sym-skip",
+                                  "pass-2 index %d: local in discarded section %d (%.16s,%.16s)",
+                                  i, sec_idx, sects[sec_idx].segname, sects[sec_idx].sectname);
+                continue;
+            }
         }
         new_idx = macho_translate_sym(s1, &ctx, i);
         ctx.sym_old_to_new[i] = new_idx;
@@ -7734,7 +7855,15 @@ ST_FUNC int macho_load_object_file(TCCState *s1, int fd,
 
     /* Pass 3: translate relocations. */
     for (i = 0; i < nsec; i++) {
-        if (!ctx.sec_to_tcc[i]) continue;
+        if (!ctx.sec_to_tcc[i]) {
+            if (sects[i].nreloc) {
+                macho_reader_log(s1, "reloc-drop",
+                                  "section %.16s,%.16s skipped: %u relocs dropped wholesale",
+                                  sects[i].segname, sects[i].sectname,
+                                  sects[i].nreloc);
+            }
+            continue;
+        }
         if (macho_translate_relocs(s1, &ctx, i) < 0)
             goto cleanup;
     }
