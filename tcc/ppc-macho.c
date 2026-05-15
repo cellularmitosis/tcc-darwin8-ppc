@@ -2077,6 +2077,530 @@ synthesize_oso_chain:
     return count;
 }
 
+/* ====================================================================
+ * Post-write linter — emission-side complement to the pre-write blocks
+ * landed in v0.2.50 (EXE) and v0.2.59 (dylib).
+ *
+ * Pre-write checks operate on writer state in memory — they catch
+ * arithmetic mistakes (LC_DYSYMTAB index drift, __LINKEDIT placed
+ * inside __bss's vmsize, stub/slot mispairing) BEFORE any bytes are
+ * emitted. They can't see what actually landed on disk.
+ *
+ * This linter runs AFTER fwrite+fclose. It re-stat's the file, reads
+ * the bytes back through a fresh code path that does not share state
+ * with the writer, and verifies high-level shape invariants the
+ * emitted file alone has to satisfy. That catches:
+ *
+ *   - `obuf` corruption: a write helper trampled an earlier slot
+ *   - byteorder regression: a put32be became put32le
+ *   - cmdsize mismatch: literal vs actual command extent drift
+ *   - truncated fwrite / fclose
+ *   - missing or duplicated load commands
+ *
+ * Failure mode mirrors the pre-write blocks: every violation goes
+ * through tcc_error_noabort with prefix "ppc-macho: post-write:" so
+ * the user gets the full picture in one link. Returns 0 if every
+ * check passed, -1 otherwise.
+ *
+ * Parameters the file alone cannot tell us:
+ *
+ *   is_dylib       — MH_DYLIB (1) vs MH_EXECUTE (0)
+ *   expected_size  — out.len at fwrite time
+ *   has_externs    — true iff the writer emitted LC_LOAD_DYLINKER /
+ *                    LC_DYSYMTAB / libSystem LC_LOAD_DYLIB. Dylibs
+ *                    always emit LC_LOAD_DYLINKER and LC_DYSYMTAB
+ *                    regardless; EXE gates them on whether any stubs
+ *                    or non-lazy symbol pointers exist.
+ *   n_extra_dylibs — count of LC_LOAD_DYLIB commands for non-libSystem
+ *                    loaded dylibs.
+ * ================================================================== */
+
+static uint32_t pwl_get32be(const unsigned char *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16)
+         | ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+}
+
+static int macho_post_write_lint(TCCState *s1, const char *filename,
+                                 int is_dylib, uint32_t expected_size,
+                                 int has_externs, int n_extra_dylibs)
+{
+    int ret = 0;
+    int post_ok = 1;
+    struct stat st;
+    int fd = -1;
+    unsigned char *buf = NULL;
+    uint32_t file_size = 0;
+    uint32_t magic, cputype, cpusubtype, filetype;
+    uint32_t ncmds, sizeofcmds, flags;
+    uint32_t off, end_of_cmds, walked;
+    int n_load_dylib = 0, n_id_dylib = 0;
+    int n_symtab = 0, n_dysymtab = 0;
+    int n_load_dylinker = 0, n_unixthread = 0;
+    int saw_symtab = 0, saw_dysymtab = 0;
+    uint32_t symtab_symoff = 0, symtab_nsyms = 0;
+    uint32_t symtab_stroff = 0, symtab_strsize = 0;
+    uint32_t dys_ilocalsym = 0, dys_nlocalsym = 0;
+    uint32_t dys_iextdefsym = 0, dys_nextdefsym = 0;
+    uint32_t dys_iundefsym = 0, dys_nundefsym = 0;
+    uint32_t dys_indirectsymoff = 0, dys_nindirectsyms = 0;
+    uint32_t dys_extreloff = 0, dys_nextrel = 0;
+    uint32_t dys_locreloff = 0, dys_nlocrel = 0;
+    int expected_n_load_dylib;
+    int expected_n_load_dylinker;
+    int expected_n_dysymtab;
+    ssize_t got;
+
+    if (is_dylib) {
+        expected_n_load_dylib    = (has_externs ? 1 : 0) + n_extra_dylibs;
+        expected_n_load_dylinker = 1;
+        expected_n_dysymtab      = 1;
+    } else {
+        expected_n_load_dylib    = has_externs ? (1 + n_extra_dylibs) : 0;
+        expected_n_load_dylinker = has_externs ? 1 : 0;
+        expected_n_dysymtab      = has_externs ? 1 : 0;
+    }
+
+    /* (1) File on disk matches what fwrite reported. */
+    if (stat(filename, &st) != 0) {
+        tcc_error_noabort("ppc-macho: post-write: stat('%s') failed: %s",
+                          filename, strerror(errno));
+        return -1;
+    }
+    if (st.st_size < 0 || (uint64_t)st.st_size > 0xffffffffu) {
+        tcc_error_noabort("ppc-macho: post-write: implausible file size "
+                          "on '%s'", filename);
+        return -1;
+    }
+    file_size = (uint32_t)st.st_size;
+    if (file_size != expected_size) {
+        tcc_error_noabort("ppc-macho: post-write: file size %u != "
+                          "expected %u (truncated write?)",
+                          file_size, expected_size);
+        post_ok = 0;
+    }
+
+    /* (2) Read the file back through a fresh open/read — independent
+     *     of the writer's `out.buf`, so an obuf-aliasing or use-after-
+     *     realloc bug shows up as a divergence. */
+    fd = open(filename, O_RDONLY | O_BINARY);
+    if (fd < 0) {
+        tcc_error_noabort("ppc-macho: post-write: open('%s') failed: %s",
+                          filename, strerror(errno));
+        ret = -1;
+        goto out;
+    }
+    if (file_size < MACHO_HEADER_SIZE) {
+        tcc_error_noabort("ppc-macho: post-write: file size %u < Mach "
+                          "header size %u",
+                          file_size, (unsigned)MACHO_HEADER_SIZE);
+        ret = -1;
+        goto out;
+    }
+    buf = tcc_malloc(file_size);
+    got = read(fd, buf, file_size);
+    if (got != (ssize_t)file_size) {
+        tcc_error_noabort("ppc-macho: post-write: short read on '%s' "
+                          "(got %ld of %u)",
+                          filename, (long)got, file_size);
+        ret = -1;
+        goto out;
+    }
+    close(fd); fd = -1;
+
+    /* (3) Mach header. */
+    magic      = pwl_get32be(buf + 0);
+    cputype    = pwl_get32be(buf + 4);
+    cpusubtype = pwl_get32be(buf + 8);
+    filetype   = pwl_get32be(buf + 12);
+    ncmds      = pwl_get32be(buf + 16);
+    sizeofcmds = pwl_get32be(buf + 20);
+    flags      = pwl_get32be(buf + 24);
+
+    if (magic != MH_MAGIC) {
+        tcc_error_noabort("ppc-macho: post-write: bad magic 0x%08x != "
+                          "MH_MAGIC 0x%08x (byteorder regression?)",
+                          magic, (unsigned)MH_MAGIC);
+        post_ok = 0;
+    }
+    if (cputype != (uint32_t)CPU_TYPE_POWERPC) {
+        tcc_error_noabort("ppc-macho: post-write: cputype %u != "
+                          "CPU_TYPE_POWERPC %u",
+                          cputype, (unsigned)CPU_TYPE_POWERPC);
+        post_ok = 0;
+    }
+    if (cpusubtype != (uint32_t)CPU_SUBTYPE_POWERPC_ALL) {
+        tcc_error_noabort("ppc-macho: post-write: cpusubtype %u != "
+                          "CPU_SUBTYPE_POWERPC_ALL %u",
+                          cpusubtype, (unsigned)CPU_SUBTYPE_POWERPC_ALL);
+        post_ok = 0;
+    }
+    {
+        uint32_t want = (uint32_t)(is_dylib ? MH_DYLIB : MH_EXECUTE);
+        if (filetype != want) {
+            tcc_error_noabort("ppc-macho: post-write: filetype %u != "
+                              "expected %u (%s)",
+                              filetype, want,
+                              is_dylib ? "MH_DYLIB" : "MH_EXECUTE");
+            post_ok = 0;
+        }
+    }
+    if (has_externs && !(flags & MH_DYLDLINK)) {
+        tcc_error_noabort("ppc-macho: post-write: flags 0x%x missing "
+                          "MH_DYLDLINK 0x%x (writer has externs)",
+                          flags, (unsigned)MH_DYLDLINK);
+        post_ok = 0;
+    }
+    if ((uint64_t)MACHO_HEADER_SIZE + sizeofcmds > file_size) {
+        tcc_error_noabort("ppc-macho: post-write: sizeofcmds %u overflows "
+                          "file size %u (header %u)",
+                          sizeofcmds, file_size,
+                          (unsigned)MACHO_HEADER_SIZE);
+        ret = -1;
+        goto out;
+    }
+
+    /* (4) Walk load commands; verify sum-of-cmdsize, ncmds, and
+     *     per-command shape. */
+    off = MACHO_HEADER_SIZE;
+    end_of_cmds = MACHO_HEADER_SIZE + sizeofcmds;
+    walked = 0;
+    while (off < end_of_cmds) {
+        uint32_t cmd, cmdsize;
+        if (end_of_cmds - off < 8) {
+            tcc_error_noabort("ppc-macho: post-write: load cmd #%u at "
+                              "off=%u truncated (need 8 bytes, %u "
+                              "available)",
+                              walked, off, end_of_cmds - off);
+            post_ok = 0;
+            break;
+        }
+        cmd     = pwl_get32be(buf + off + 0);
+        cmdsize = pwl_get32be(buf + off + 4);
+        if (cmdsize < 8 || (cmdsize & 3u) != 0) {
+            tcc_error_noabort("ppc-macho: post-write: load cmd #%u "
+                              "(cmd=0x%x) at off=%u has bogus cmdsize "
+                              "%u (must be >=8 and 4-aligned)",
+                              walked, cmd, off, cmdsize);
+            post_ok = 0;
+            break;
+        }
+        if ((uint64_t)off + cmdsize > end_of_cmds) {
+            tcc_error_noabort("ppc-macho: post-write: load cmd #%u "
+                              "(cmd=0x%x) at off=%u cmdsize %u runs "
+                              "past end-of-cmds %u",
+                              walked, cmd, off, cmdsize, end_of_cmds);
+            post_ok = 0;
+            break;
+        }
+
+        switch (cmd) {
+        case LC_SEGMENT: {
+            uint32_t seg_vmaddr, seg_vmsize, seg_fileoff, seg_filesize;
+            uint32_t nsects, k, sec_off;
+            const char *segname = (const char *)(buf + off + 8);
+            if (cmdsize < MACHO_SEGMENT_CMD_SIZE) {
+                tcc_error_noabort("ppc-macho: post-write: LC_SEGMENT #%u "
+                                  "cmdsize %u < %u",
+                                  walked, cmdsize,
+                                  (unsigned)MACHO_SEGMENT_CMD_SIZE);
+                post_ok = 0;
+                break;
+            }
+            seg_vmaddr   = pwl_get32be(buf + off + 24);
+            seg_vmsize   = pwl_get32be(buf + off + 28);
+            seg_fileoff  = pwl_get32be(buf + off + 32);
+            seg_filesize = pwl_get32be(buf + off + 36);
+            nsects       = pwl_get32be(buf + off + 48);
+            if (cmdsize != MACHO_SEGMENT_CMD_SIZE
+                           + nsects * MACHO_SECTION_SIZE) {
+                tcc_error_noabort("ppc-macho: post-write: LC_SEGMENT "
+                                  "'%.16s' cmdsize %u != %u+%u*%u=%u",
+                                  segname, cmdsize,
+                                  (unsigned)MACHO_SEGMENT_CMD_SIZE, nsects,
+                                  (unsigned)MACHO_SECTION_SIZE,
+                                  (unsigned)(MACHO_SEGMENT_CMD_SIZE
+                                             + nsects * MACHO_SECTION_SIZE));
+                post_ok = 0;
+                break;
+            }
+            /* seg_vmsize == 0 means a file-only segment (__DWARF uses
+             * this: bytes on disk for dsymutil/gdb but never mapped
+             * into VM). For such segments, vmsize<filesize is by
+             * design and per-section vm-range checks are vacuous. */
+            if (seg_vmsize > 0 && seg_vmsize < seg_filesize) {
+                tcc_error_noabort("ppc-macho: post-write: LC_SEGMENT "
+                                  "'%.16s' vmsize 0x%x < filesize 0x%x",
+                                  segname, seg_vmsize, seg_filesize);
+                post_ok = 0;
+            }
+            if ((uint64_t)seg_fileoff + seg_filesize > file_size) {
+                tcc_error_noabort("ppc-macho: post-write: LC_SEGMENT "
+                                  "'%.16s' file range [0x%x, 0x%x) past "
+                                  "file size 0x%x",
+                                  segname, seg_fileoff,
+                                  seg_fileoff + seg_filesize, file_size);
+                post_ok = 0;
+            }
+            /* Per-section bounds: file range inside segment file range
+             * (except zerofill, which has no file presence), and vm
+             * range inside segment vm range (skipped for file-only
+             * segments — see __DWARF note above). */
+            for (k = 0, sec_off = off + MACHO_SEGMENT_CMD_SIZE;
+                 k < nsects;
+                 k++, sec_off += MACHO_SECTION_SIZE) {
+                uint32_t s_addr  = pwl_get32be(buf + sec_off + 32);
+                uint32_t s_size  = pwl_get32be(buf + sec_off + 36);
+                uint32_t s_off   = pwl_get32be(buf + sec_off + 40);
+                uint32_t s_flags = pwl_get32be(buf + sec_off + 56);
+                const char *secname = (const char *)(buf + sec_off);
+                const char *secseg  = (const char *)(buf + sec_off + 16);
+                if ((s_flags & 0xffu) != S_ZEROFILL) {
+                    if ((uint64_t)s_off + s_size
+                        > (uint64_t)seg_fileoff + seg_filesize) {
+                        tcc_error_noabort(
+                            "ppc-macho: post-write: section "
+                            "'%.16s,%.16s' file range [0x%x, 0x%x) "
+                            "past segment file range [0x%x, 0x%x)",
+                            secseg, secname,
+                            s_off, s_off + s_size,
+                            seg_fileoff, seg_fileoff + seg_filesize);
+                        post_ok = 0;
+                    }
+                }
+                if (seg_vmsize > 0 && s_size > 0
+                    && (s_addr < seg_vmaddr
+                        || (uint64_t)s_addr + s_size
+                           > (uint64_t)seg_vmaddr + seg_vmsize)) {
+                    tcc_error_noabort(
+                        "ppc-macho: post-write: section '%.16s,%.16s' "
+                        "vm range [0x%x, 0x%x) outside segment vm "
+                        "range [0x%x, 0x%x)",
+                        secseg, secname,
+                        s_addr, s_addr + s_size,
+                        seg_vmaddr, seg_vmaddr + seg_vmsize);
+                    post_ok = 0;
+                }
+            }
+            break;
+        }
+        case LC_SYMTAB:
+            n_symtab++;
+            saw_symtab = 1;
+            if (cmdsize != MACHO_SYMTAB_CMD_SIZE) {
+                tcc_error_noabort("ppc-macho: post-write: LC_SYMTAB "
+                                  "cmdsize %u != %u",
+                                  cmdsize,
+                                  (unsigned)MACHO_SYMTAB_CMD_SIZE);
+                post_ok = 0;
+            }
+            symtab_symoff  = pwl_get32be(buf + off + 8);
+            symtab_nsyms   = pwl_get32be(buf + off + 12);
+            symtab_stroff  = pwl_get32be(buf + off + 16);
+            symtab_strsize = pwl_get32be(buf + off + 20);
+            if ((uint64_t)symtab_symoff
+                + (uint64_t)symtab_nsyms * MACHO_NLIST_SIZE > file_size) {
+                tcc_error_noabort("ppc-macho: post-write: LC_SYMTAB "
+                                  "nlist table [0x%x, 0x%x) past file "
+                                  "size 0x%x",
+                                  symtab_symoff,
+                                  (unsigned)(symtab_symoff
+                                             + symtab_nsyms
+                                               * MACHO_NLIST_SIZE),
+                                  file_size);
+                post_ok = 0;
+            }
+            if ((uint64_t)symtab_stroff + symtab_strsize > file_size) {
+                tcc_error_noabort("ppc-macho: post-write: LC_SYMTAB "
+                                  "stringtab [0x%x, 0x%x) past file "
+                                  "size 0x%x",
+                                  symtab_stroff,
+                                  symtab_stroff + symtab_strsize,
+                                  file_size);
+                post_ok = 0;
+            }
+            break;
+        case LC_DYSYMTAB:
+            n_dysymtab++;
+            saw_dysymtab = 1;
+            if (cmdsize != MACHO_DYSYMTAB_CMD_SIZE) {
+                tcc_error_noabort("ppc-macho: post-write: LC_DYSYMTAB "
+                                  "cmdsize %u != %u",
+                                  cmdsize,
+                                  (unsigned)MACHO_DYSYMTAB_CMD_SIZE);
+                post_ok = 0;
+            }
+            dys_ilocalsym      = pwl_get32be(buf + off + 8);
+            dys_nlocalsym      = pwl_get32be(buf + off + 12);
+            dys_iextdefsym     = pwl_get32be(buf + off + 16);
+            dys_nextdefsym     = pwl_get32be(buf + off + 20);
+            dys_iundefsym      = pwl_get32be(buf + off + 24);
+            dys_nundefsym      = pwl_get32be(buf + off + 28);
+            dys_indirectsymoff = pwl_get32be(buf + off + 56);
+            dys_nindirectsyms  = pwl_get32be(buf + off + 60);
+            dys_extreloff      = pwl_get32be(buf + off + 64);
+            dys_nextrel        = pwl_get32be(buf + off + 68);
+            dys_locreloff      = pwl_get32be(buf + off + 72);
+            dys_nlocrel        = pwl_get32be(buf + off + 76);
+            break;
+        case LC_LOAD_DYLIB:
+            n_load_dylib++;
+            break;
+        case LC_ID_DYLIB:
+            n_id_dylib++;
+            break;
+        case LC_LOAD_DYLINKER:
+            n_load_dylinker++;
+            break;
+        case LC_UNIXTHREAD:
+            n_unixthread++;
+            break;
+        default:
+            /* LC_UUID and other commands we emit but don't lint —
+             * pre-write already validated their writer-state shape. */
+            break;
+        }
+        off += cmdsize;
+        walked++;
+    }
+    if (walked != ncmds) {
+        tcc_error_noabort("ppc-macho: post-write: walked %u commands but "
+                          "header.ncmds = %u", walked, ncmds);
+        post_ok = 0;
+    }
+    if (off != end_of_cmds) {
+        tcc_error_noabort("ppc-macho: post-write: sum of cmdsizes %u != "
+                          "header.sizeofcmds %u",
+                          off - MACHO_HEADER_SIZE, sizeofcmds);
+        post_ok = 0;
+    }
+
+    /* (5) Presence / count invariants — what the file alone can't
+     *     tell us, anchored on caller-supplied expected counts. */
+    if (n_symtab != 1) {
+        tcc_error_noabort("ppc-macho: post-write: expected exactly 1 "
+                          "LC_SYMTAB, found %d", n_symtab);
+        post_ok = 0;
+    }
+    if (n_dysymtab != expected_n_dysymtab) {
+        tcc_error_noabort("ppc-macho: post-write: LC_DYSYMTAB count %d "
+                          "!= expected %d",
+                          n_dysymtab, expected_n_dysymtab);
+        post_ok = 0;
+    }
+    if (n_load_dylib != expected_n_load_dylib) {
+        tcc_error_noabort("ppc-macho: post-write: LC_LOAD_DYLIB count "
+                          "%d != expected %d (has_externs=%d, "
+                          "n_extra_dylibs=%d)",
+                          n_load_dylib, expected_n_load_dylib,
+                          has_externs, n_extra_dylibs);
+        post_ok = 0;
+    }
+    if (n_load_dylinker != expected_n_load_dylinker) {
+        tcc_error_noabort("ppc-macho: post-write: LC_LOAD_DYLINKER count "
+                          "%d != expected %d",
+                          n_load_dylinker, expected_n_load_dylinker);
+        post_ok = 0;
+    }
+    if (is_dylib) {
+        if (n_id_dylib != 1) {
+            tcc_error_noabort("ppc-macho: post-write: dylib expected "
+                              "exactly 1 LC_ID_DYLIB, found %d",
+                              n_id_dylib);
+            post_ok = 0;
+        }
+        if (n_unixthread != 0) {
+            tcc_error_noabort("ppc-macho: post-write: dylib has %d "
+                              "LC_UNIXTHREAD (expected 0)", n_unixthread);
+            post_ok = 0;
+        }
+    } else {
+        if (n_id_dylib != 0) {
+            tcc_error_noabort("ppc-macho: post-write: exe has %d "
+                              "LC_ID_DYLIB (expected 0)", n_id_dylib);
+            post_ok = 0;
+        }
+        if (n_unixthread != 1) {
+            tcc_error_noabort("ppc-macho: post-write: exe expected "
+                              "exactly 1 LC_UNIXTHREAD, found %d",
+                              n_unixthread);
+            post_ok = 0;
+        }
+    }
+
+    /* (6) LC_DYSYMTAB internal partitioning + reachability of side
+     *     tables. The partition invariant (local | extdef | undef
+     *     contiguously cover [0, nsyms)) is the same one the static
+     *     linker / dyld parse. */
+    if (saw_symtab && saw_dysymtab) {
+        if (dys_ilocalsym + dys_nlocalsym != dys_iextdefsym) {
+            tcc_error_noabort("ppc-macho: post-write: dysymtab "
+                              "ilocalsym(%u)+nlocalsym(%u) != "
+                              "iextdefsym(%u)",
+                              dys_ilocalsym, dys_nlocalsym,
+                              dys_iextdefsym);
+            post_ok = 0;
+        }
+        if (dys_iextdefsym + dys_nextdefsym != dys_iundefsym) {
+            tcc_error_noabort("ppc-macho: post-write: dysymtab "
+                              "iextdefsym(%u)+nextdefsym(%u) != "
+                              "iundefsym(%u)",
+                              dys_iextdefsym, dys_nextdefsym,
+                              dys_iundefsym);
+            post_ok = 0;
+        }
+        if (dys_iundefsym + dys_nundefsym != symtab_nsyms) {
+            tcc_error_noabort("ppc-macho: post-write: dysymtab "
+                              "iundefsym(%u)+nundefsym(%u) != "
+                              "symtab.nsyms(%u)",
+                              dys_iundefsym, dys_nundefsym, symtab_nsyms);
+            post_ok = 0;
+        }
+        if (dys_nindirectsyms > 0
+            && (uint64_t)dys_indirectsymoff
+               + (uint64_t)dys_nindirectsyms * 4u > file_size) {
+            tcc_error_noabort("ppc-macho: post-write: dysymtab "
+                              "indirectsym table [0x%x, 0x%x) past file "
+                              "size 0x%x",
+                              dys_indirectsymoff,
+                              (unsigned)(dys_indirectsymoff
+                                         + dys_nindirectsyms * 4u),
+                              file_size);
+            post_ok = 0;
+        }
+        if (dys_nextrel > 0
+            && (uint64_t)dys_extreloff
+               + (uint64_t)dys_nextrel * MACHO_RELOC_SIZE > file_size) {
+            tcc_error_noabort("ppc-macho: post-write: dysymtab extreloff "
+                              "table [0x%x, 0x%x) past file size 0x%x",
+                              dys_extreloff,
+                              (unsigned)(dys_extreloff
+                                         + dys_nextrel * MACHO_RELOC_SIZE),
+                              file_size);
+            post_ok = 0;
+        }
+        if (dys_nlocrel > 0
+            && (uint64_t)dys_locreloff
+               + (uint64_t)dys_nlocrel * MACHO_RELOC_SIZE > file_size) {
+            tcc_error_noabort("ppc-macho: post-write: dysymtab locreloff "
+                              "table [0x%x, 0x%x) past file size 0x%x",
+                              dys_locreloff,
+                              (unsigned)(dys_locreloff
+                                         + dys_nlocrel * MACHO_RELOC_SIZE),
+                              file_size);
+            post_ok = 0;
+        }
+    }
+
+    if (!post_ok)
+        ret = -1;
+
+out:
+    if (fd >= 0) close(fd);
+    tcc_free(buf);
+    return ret;
+}
+
 /* The big one. */
 static int macho_output_exe(TCCState *s1, const char *filename)
 {
@@ -3948,6 +4472,16 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     }
     fclose(fp); fp = NULL;
     chmod(filename, 0755);
+    /* Post-write linter — re-parses the bytes we just wrote and
+     * checks shape invariants the file alone has to satisfy.
+     * Complements the pre-write sanity-check block above. */
+    if (macho_post_write_lint(s1, filename, /*is_dylib*/0,
+                              (uint32_t)out.len,
+                              /*has_externs*/(nstubs > 0 || n_nlptrs > 0),
+                              n_extra_dylibs) != 0) {
+        ret = -1;
+        goto cleanup;
+    }
     if (s1->verbose)
         printf("<- %s (exe %u bytes, entry 0x%x, %d stubs)\n",
                filename, (unsigned)out.len, entry_addr, nstubs);
@@ -5320,6 +5854,16 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
     }
     fclose(fp); fp = NULL;
     chmod(filename, 0755);
+    /* Post-write linter — re-parses the bytes we just wrote and
+     * checks shape invariants the file alone has to satisfy.
+     * Complements the pre-write sanity-check block above. */
+    if (macho_post_write_lint(s1, filename, /*is_dylib*/1,
+                              (uint32_t)out.len,
+                              /*has_externs*/(nstubs > 0 || n_nlptrs > 0),
+                              n_extra_dylibs) != 0) {
+        ret = -1;
+        goto cleanup;
+    }
     if (s1->verbose)
         printf("<- %s (dylib %u bytes, %d stubs, %d nl_ptrs, %d locrels)\n",
                filename, (unsigned)out.len, nstubs, n_nlptrs, n_locrel);
