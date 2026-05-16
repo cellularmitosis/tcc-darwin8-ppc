@@ -197,6 +197,18 @@
     #define __builtin_flt_rounds() 1
     /* used by _fd_def.h */
     #define __builtin_bzero(p, ignored_size) bzero(p, sizeof(*(p)))
+    /* Predeclare math builtins used by Tiger's <math.h> inline isinf/isnan/
+     * isfinite path. gcc treats these as intrinsics with FP return types;
+     * tcc emits a regular call. Without an explicit prototype, tcc assumes
+     * implicit-int return — on PPC, callers then read r3 instead of f1 and
+     * get garbage, causing isinf(0.0) → true and similar nonsense. The
+     * symbols are provided by libtcc1.a (lib-ppc.c). */
+    extern double __builtin_fabs(double);
+    extern float __builtin_fabsf(float);
+    extern long double __builtin_fabsl(long double);
+    extern double __builtin_inf(void);
+    extern float __builtin_inff(void);
+    extern long double __builtin_infl(void);
 # else
     #define __builtin_nanf(ignored_string) (0.0F/0.0F)
 # endif
