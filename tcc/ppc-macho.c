@@ -7260,10 +7260,27 @@ skip_pair_after:
             target_value = 0;
             if (r_type == PPC_RELOC_VANILLA && r_length == 2) {
                 target_value = insn;
-            } else if (r_type == PPC_RELOC_BR24 || r_type == PPC_RELOC_JBSR) {
+            } else if (r_type == PPC_RELOC_BR24) {
                 disp = insn & 0x03fffffc;
                 if (disp & 0x02000000) disp |= 0xfc000000;
                 target_value = sec->addr + r_address + disp;
+            } else if (r_type == PPC_RELOC_JBSR) {
+                /* JBSR encodes the real far-call target in the PAIR's
+                 * r_address field (full 32-bit, not just the low 16
+                 * like HA16/LO16/HI16). The BR24 immediate in the
+                 * instruction itself points at a local thunk used as
+                 * a 24-bit-reachable trampoline — Apple's linker is
+                 * free to bypass the thunk if the resolved target is
+                 * in range, but the resolution itself must always
+                 * use the PAIR's value or we'd index the stub's
+                 * indirect-symtab slot from the thunk address (which
+                 * lives outside the stub section's address range).
+                 * Seen on crt1.o's four calls (_exit, _main, _atexit,
+                 * ___keymgr_dwarf2_register_sections): the BR24 jumps
+                 * to a 5-insn local thunk (lis/ori/mtctr/bctr); the
+                 * PAIR carries the actual stub VA in __symbol_stub1. */
+                pair_w0 = (k + 1 < sec->nreloc) ? mach_get32(r + 8) : 0;
+                target_value = pair_w0;
             } else if (r_type == PPC_RELOC_HA16
                     || r_type == PPC_RELOC_LO16
                     || r_type == PPC_RELOC_HI16) {
