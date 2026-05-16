@@ -1861,23 +1861,23 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
                  | ((uint32_t)sect_data[reloc_off+2] <<  8)
                  |  (uint32_t)sect_data[reloc_off+3];
             if (type == R_PPC_ADDR32) {
-                /* For undef *data* externs (`int *p = &optind;`), defer
-                 * to dyld: emit a Mach-O external relocation that names
-                 * the symbol, and leave the in-place addend untouched
-                 * (Tiger's dyld treats VANILLA externs as ADD, so the
-                 * runtime value will be `addend + &sym`). The
-                 * previously-used slot-address fallback wrote the
-                 * address of __nl_symbol_ptr[sym] instead — wrong, since
-                 * a plain 32-bit data word has no second-step
-                 * indirection. STT_FUNC ADDR32s already get a stub via
-                 * collect_extern_stubs(); the slot-fallback only fires
-                 * for non-STT_FUNC undefs. */
+                /* For ADDR32 against an undef sym in a writable
+                 * section, defer to dyld: emit a Mach-O external
+                 * relocation that names the symbol, and leave the
+                 * in-place addend untouched (Tiger's dyld treats
+                 * VANILLA externs as ADD, so the runtime value will
+                 * be `addend + &sym`). v0.2.63 added this for
+                 * non-STT_FUNC undefs (extern data refs). v0.2.65
+                 * widens it to cover STT_FUNC undefs too: gcc-4.0
+                 * has the table slot hold the libSystem function
+                 * VA, matching the value `q = &extern_fn` would
+                 * compute via the __nl_symbol_ptr indirection. The
+                 * stub allocated by collect_extern_stubs is still
+                 * useful for REL24 callers; the slot value diverges
+                 * from the stub VA but each path reaches the same
+                 * libSystem function at runtime. */
                 ElfW(Sym) *sm = &((ElfW(Sym) *)s1->symtab->data)[symidx];
-                int wants_extrel =
-                    (sm->st_shndx == SHN_UNDEF
-                     && ELFW(ST_TYPE)(sm->st_info) != STT_FUNC
-                     && (!stub_for_elfsym
-                         || stub_for_elfsym[symidx] < 0));
+                int wants_extrel = (sm->st_shndx == SHN_UNDEF);
                 if (wants_extrel && ctx->extrels_out) {
                     int n = *ctx->n_extrels_out;
                     int cap = *ctx->extrels_cap_out;
@@ -2721,6 +2721,14 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     Section *init_array = NULL;     /* __attribute__((constructor)) array */
     Section *fini_array = NULL;     /* __attribute__((destructor)) array */
     Section *eh_frame = NULL;       /* DWARF CIE/FDEs (when -g is in use) */
+    /* v0.2.65: if .rodata holds any R_PPC_ADDR32 against an undef sym,
+     * we route it to __DATA,__const (writable at load time, dyld can
+     * bind into it) instead of the default __TEXT,__const. Matches
+     * gcc-4.0 on Tiger and keeps `prednames[0] == &extern_fn` true
+     * (both end up holding the libSystem-bound VA). Decided once at
+     * link start so the segment grouping / vmaddr math / extrel
+     * collection toggle all see the same answer. */
+    int rodata_in_data = 0;
     int main_off, shim_off, target_off;
     int i, ret = -1;
     FILE *fp = NULL;
@@ -2896,6 +2904,31 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                 ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE), 0,
                 SHN_ABS, "__mh_execute_header");
 
+    /* v0.2.65: decide rodata placement. The rule is gcc-4.0's: any
+     * `.rodata` with R_PPC_ADDR32 against an undef sym is routed to
+     * __DATA,__const, where dyld can bind the slot values at load
+     * time. Defined-target ADDR32s are link-time-baked and stay
+     * happily in read-only __TEXT,__const. */
+    if (rodata && rodata->reloc) {
+        Section *sr = rodata->reloc;
+        int nrel = sr->data_offset / sizeof(ElfW_Rel);
+        int nsyms = s1->symtab->data_offset / sizeof(ElfW(Sym));
+        int k;
+        for (k = 0; k < nrel; k++) {
+            ElfW_Rel *rel = (ElfW_Rel *)sr->data + k;
+            int type = ELFW(R_TYPE)(rel->r_info);
+            int symidx = ELFW(R_SYM)(rel->r_info);
+            ElfW(Sym) *esym;
+            if (type != R_PPC_ADDR32) continue;
+            if (symidx <= 0 || symidx >= nsyms) continue;
+            esym = (ElfW(Sym) *)s1->symtab->data + symidx;
+            if (esym->st_shndx == SHN_UNDEF) {
+                rodata_in_data = 1;
+                break;
+            }
+        }
+    }
+
     /* ---- Collect external function calls. ---- */
     nstubs = collect_extern_stubs(s1, &stubs, &stub_for_elfsym);
     /* ---- Collect external data references. ---- */
@@ -2946,8 +2979,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
 
     /* ---- Plan section layout. ---- */
     n_text_sects = 1;       /* __text */
-    if (rodata)
-        n_text_sects++;     /* __const */
+    if (rodata && !rodata_in_data)
+        n_text_sects++;     /* __const in __TEXT */
     if (nstubs > 0)
         n_text_sects++;     /* __picsymbolstub1 (well, plain stub) */
     if (eh_frame)
@@ -2963,6 +2996,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         n_data_sects++;     /* __nl_symbol_ptr (function ptrs + data ptrs) */
     if (nstubs > 0 || n_nlptrs > 0)
         n_data_sects++;     /* __dyld (8 bytes; dyld writes pointers here) */
+    if (rodata && rodata_in_data)
+        n_data_sects++;     /* __const in __DATA (gcc-4.0 placement) */
     if (bss)
         n_data_sects++;     /* __bss (zerofill) */
 
@@ -3052,7 +3087,7 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     sects[nsec].is_zerofill = 0;
     nsec++;
 
-    if (rodata) {
+    if (rodata && !rodata_in_data) {
         cur_va = (cur_va + 3u) & ~3u;
         cur_off = (cur_off + 3u) & ~3u;
         sect_idx_rodata = nsec;
@@ -3176,6 +3211,21 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             sects[nsec].is_zerofill = 0;
             nsec++;
             data_cur += 8;
+        }
+
+        /* v0.2.65: __DATA,__const for rodata that holds undef-ADDR32
+         * relocs. gcc-4.0 places this between __dyld and __bss; we
+         * match that ordering. */
+        if (rodata && rodata_in_data) {
+            data_cur = (data_cur + 3u) & ~3u;
+            sect_idx_rodata = nsec;
+            sects[nsec].elf = rodata;
+            sects[nsec].vmaddr = data_seg_vmaddr + data_cur;
+            sects[nsec].size = rodata->data_offset;
+            sects[nsec].file_off = data_seg_file_off + data_cur;
+            sects[nsec].is_zerofill = 0;
+            nsec++;
+            data_cur += rodata->data_offset;
         }
 
         data_end = data_cur;
@@ -3305,20 +3355,13 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     /* ---- Resolve relocations in text and rodata. ----
      *
      * Extrel collection is enabled per-section by toggling
-     * ctx.extrels_out: only data / init_array / fini_array are
-     * writable at load time, so dyld can populate the bound address
-     * there. Read-only sections (text, rodata→__const, eh_frame,
-     * dwarf) keep the legacy slot-address fallback — emitting an
-     * extrel for a location dyld can't write would SIGBUS the
-     * process during load (sed's dfa.c::prednames[] tripped this:
-     * .o roundtrip drops STT_FUNC info on the ctype symbols, so
-     * undef ADDR32 refs to `_isalpha` etc. in __TEXT,__const fell
-     * through to the new extrel path).
-     *
-     * On-disk staleness aside, this matches gcc's pragmatics:
-     * statically-init pointers to extern data live in writable
-     * segments (gcc-emitted const tables likewise put no extrels
-     * into __const). */
+     * ctx.extrels_out: dyld can only bind into writable locations.
+     * The default writable set is data / init_array / fini_array;
+     * v0.2.65 adds moved rodata (__DATA,__const) when it carries
+     * undef-ADDR32 relocs. Read-only sections (text, unmoved rodata,
+     * eh_frame, dwarf) keep the legacy slot-address fallback —
+     * emitting an extrel for a location dyld can't write would
+     * SIGBUS the process during load. */
     {
         struct exe_reloc_ctx ctx;
         int j;
@@ -3336,6 +3379,12 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         if (exe_resolve_section_relocs(s1, text, text_sect_vmaddr,
                                         text_data, &ctx) < 0)
             goto cleanup;
+        /* Enable extrels for moved rodata before resolving it. */
+        if (rodata_in_data) {
+            ctx.extrels_out = &extrels;
+            ctx.n_extrels_out = &n_extrels;
+            ctx.extrels_cap_out = &extrels_cap;
+        }
         if (rodata && exe_resolve_section_relocs(s1, rodata,
                                                   sects[sect_idx_rodata].vmaddr,
                                                   rodata_data, &ctx) < 0)
@@ -4220,8 +4269,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     put32be(&out, S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS);
     put32be(&out, 0);
     put32be(&out, 0);
-    /* __const if present */
-    if (rodata) {
+    /* __const in __TEXT (only when rodata stays read-only). */
+    if (rodata && !rodata_in_data) {
         put_sectname(&out, "__const");
         put_sectname(&out, "__TEXT");
         put32be(&out, sects[sect_idx_rodata].vmaddr);
@@ -4350,6 +4399,21 @@ static int macho_output_exe(TCCState *s1, const char *filename)
             put32be(&out, sects[sect_idx_dyld].vmaddr);
             put32be(&out, sects[sect_idx_dyld].size);
             put32be(&out, sects[sect_idx_dyld].file_off);
+            put32be(&out, 2);
+            put32be(&out, 0);
+            put32be(&out, 0);
+            put32be(&out, S_REGULAR);
+            put32be(&out, 0);
+            put32be(&out, 0);
+        }
+        /* v0.2.65: __const in __DATA when rodata holds extern-bind
+         * relocs (gcc-4.0 places it between __dyld and __bss). */
+        if (rodata && rodata_in_data) {
+            put_sectname(&out, "__const");
+            put_sectname(&out, "__DATA");
+            put32be(&out, sects[sect_idx_rodata].vmaddr);
+            put32be(&out, sects[sect_idx_rodata].size);
+            put32be(&out, sects[sect_idx_rodata].file_off);
             put32be(&out, 2);
             put32be(&out, 0);
             put32be(&out, 0);
@@ -4541,8 +4605,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         put8(&out, 0);
     obuf_put(&out, text_data, text_data_size);
 
-    /* ---- rodata. ---- */
-    if (rodata) {
+    /* ---- rodata (only when it stays in __TEXT). When routed to
+     * __DATA,__const its file payload is written below in the
+     * __DATA write sequence to keep file offsets monotonic. ---- */
+    if (rodata && !rodata_in_data) {
         while (out.len < sects[sect_idx_rodata].file_off)
             put8(&out, 0);
         obuf_put(&out, rodata_data, sects[sect_idx_rodata].size);
@@ -4607,6 +4673,13 @@ static int macho_output_exe(TCCState *s1, const char *filename)
              * __DATA,__dyld bytes (they're literally embedded there). */
             put32be(&out, 0x8fe01000u);  /* __dyld_func_lookup */
             put32be(&out, 0x8fe01008u);  /* dyld_stub_binding_helper */
+        }
+        /* v0.2.65: moved __DATA,__const payload (gcc-4.0 placement,
+         * between __dyld and __bss). */
+        if (rodata && rodata_in_data) {
+            while (out.len < sects[sect_idx_rodata].file_off)
+                put8(&out, 0);
+            obuf_put(&out, rodata_data, sects[sect_idx_rodata].size);
         }
     }
 
