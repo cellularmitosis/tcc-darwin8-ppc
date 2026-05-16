@@ -531,6 +531,68 @@ static int collect_extern_stubs(TCCState *s1,
 
     for (i = 0; i < nsyms; i++) stub_for[i] = -1;
 
+    /* Pre-pass: reconstruct STT_FUNC on undef syms. Mach-O nlist has no
+     * function-vs-data bit, so a .o roundtrip drops STT_FUNC: tcc emits
+     * `&isalpha` in dfa.o's static init as a VANILLA ADDR32 against an
+     * undef extern, the .o reader translates the undef back into the
+     * tcc symtab as STT_NOTYPE, and the ADDR32+STT_FUNC clause below
+     * fails to match — no stub gets allocated, and `&isalpha` ends up
+     * pointing at the __nl_symbol_ptr slot instead of the function
+     * (sed's prednames[] is the canonical sufferer; the table lives in
+     * __TEXT,__const where v0.2.63's writable-section gate also kicks
+     * the slot-address fallback in).
+     *
+     * Two heuristics combine:
+     *
+     *  (a) Any undef sym ever referenced via R_PPC_REL24 is a function.
+     *      Catches the common case where the function is called
+     *      directly somewhere in the link.
+     *
+     *  (b) Any undef sym referenced via R_PPC_ADDR32 from .rodata (the
+     *      input to __TEXT,__const) is treated as a function. Rationale:
+     *      a function-pointer table in a `static const` declaration is
+     *      vastly more common than `const T *const p = &extern_data;`,
+     *      and the latter was already broken pre-fix (slot-address
+     *      fallback) — post-fix it's still wrong (stub-address fallback)
+     *      but no worse. Critically, this catches sed's
+     *      dfa.c::prednames[] where Tiger's <ctype.h> expands every
+     *      `isalpha(c)` call to `__istype(c, _CTYPE_A)`, so no direct
+     *      REL24 to `_isalpha` exists anywhere in the link for
+     *      heuristic (a) to find.
+     *
+     * Done here rather than at .o-read time so heuristic (a) sees the
+     * union of all loaded objects' relocs, including stdlib calls
+     * resolved later. */
+    for (i = 1; i < s1->nb_sections; i++) {
+        Section *s = s1->sections[i];
+        Section *sr;
+        int nrel;
+        int is_rodata;
+        if (!s) continue;
+        sr = s->reloc;
+        if (!sr) continue;
+        is_rodata = (!strcmp(s->name, ".rodata")
+                     || !strcmp(s->name, ".data.ro")
+                     || !strncmp(s->name, ".rodata.", 8));
+        nrel = sr->data_offset / sizeof(ElfW_Rel);
+        for (k = 0; k < nrel; k++) {
+            ElfW_Rel *rel = (ElfW_Rel *)sr->data + k;
+            int type = ELFW(R_TYPE)(rel->r_info);
+            int symidx = ELFW(R_SYM)(rel->r_info);
+            ElfW(Sym) *esym;
+            int matches;
+            matches = (type == R_PPC_REL24)
+                   || (is_rodata && type == R_PPC_ADDR32);
+            if (!matches) continue;
+            if (symidx <= 0 || symidx >= nsyms) continue;
+            esym = (ElfW(Sym) *)s1->symtab->data + symidx;
+            if (esym->st_shndx != SHN_UNDEF) continue;
+            if (ELFW(ST_TYPE)(esym->st_info) == STT_FUNC) continue;
+            esym->st_info = ELFW(ST_INFO)(ELFW(ST_BIND)(esym->st_info),
+                                           STT_FUNC);
+        }
+    }
+
     /* First pass: any extern with the ST_PPC_NEEDS_STUB hint set by
      * the Mach-O .o reader (because it was originally referenced via
      * __symbol_stub1). */

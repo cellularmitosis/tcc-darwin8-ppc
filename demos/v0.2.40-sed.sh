@@ -207,5 +207,33 @@ if [[ "$RESULT" != "$EXPECT" ]]; then
 fi
 echo "  a\\ append works"
 
+# Test 8: POSIX character classes ([[:alpha:]], [[:digit:]], [[:space:]]).
+# Exercises dfa.c::prednames[] — a static const table of extern ctype
+# function pointers in __TEXT,__const. Pre-v0.2.64-g3 this SIGSEGV'd
+# because tcc baked the __nl_symbol_ptr slot address into the table
+# (calling through the pointer jumped into data and crashed). v0.2.64
+# reconstructs STT_FUNC on the undef syms so a stub is allocated and
+# the stub VA goes into the table instead.
+RESULT=$(echo "abc123def" | ./sed/sed "s/[[:alpha:]]\{1,\}/A/g")
+if [[ "$RESULT" != "A123A" ]]; then
+    echo "FAIL: [[:alpha:]]: got '$RESULT'"
+    exit 1
+fi
+echo "  [[:alpha:]] works (was SIGSEGV pre-v0.2.64)"
+
+RESULT=$(echo "abc123def" | ./sed/sed "s/[[:digit:]]\{1,\}/D/g")
+if [[ "$RESULT" != "abcDdef" ]]; then
+    echo "FAIL: [[:digit:]]: got '$RESULT'"
+    exit 1
+fi
+echo "  [[:digit:]] works (was SIGSEGV pre-v0.2.64)"
+
+RESULT=$(echo "abc 123 def" | ./sed/sed -E "s/[[:space:]]+/_/g")
+if [[ "$RESULT" != "abc_123_def" ]]; then
+    echo "FAIL: [[:space:]]: got '$RESULT'"
+    exit 1
+fi
+echo "  [[:space:]] works (was SIGSEGV pre-v0.2.64)"
+
 echo
 echo "PASS — GNU sed 4.8 builds + works end-to-end with tcc on Tiger PPC"
