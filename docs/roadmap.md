@@ -124,7 +124,7 @@ scope" below.
 |---|---|---|
 | **#8** | ~~**DWARF debug info emission**~~ | ✅ Done in v0.2.37 (`-c` .o output), v0.2.38 (linked exe `__DWARF`), v0.2.39 (`__eh_frame` + per-prolog CFI; default DWARF-2). dwarfdump on tcc binaries now reads compile unit / line table / aranges / strings / per-FDE CFI directives (CFA position, LR save). Remaining gap is gdb-on-Tiger compatibility (#7.5 above). |
 | **#9** | **AltiVec intrinsics** | (Was old #12.) None today; tcc emits scalar code for everything. Plausible but a large project. |
-| **#10** | **Real-world program builds** | Lua 5.4.7 ✅ done in v0.2.12. sqlite3 next — `sqlite3_open` works since v0.2.15; `sqlite3_prepare_v2` with `select 1+1` still hits a Heisenbug deferred from session 041. |
+| **#10** | **Real-world program builds** | Eight programs build and run end-to-end on Tiger PPC, each with a runnable demo: Lua 5.4.7 (v0.2.12), zlib 1.3.1 (no separate demo), bzip2 1.0.8 (v0.2.18), cJSON 1.7.18 (v0.2.21), a BSD-sockets HTTP server (v0.2.21), sqlite3 with on-disk databases (v0.2.23 — full CREATE/INSERT/SELECT/ORDER BY round-trip; closes session 041's deferred Heisenbug stack: `prepare_v2` fixed in v0.2.16, CREATE TABLE → `SQLITE_CORRUPT` fixed by v0.2.22's addend work, file-open SEGV fixed by v0.2.23's stub-for-data-referenced-extern fix), sqlite3 against a tcc-built `libsqlite3.dylib` (v0.2.28), GNU sed 4.8 (v0.2.40), GNU gzip 1.11 (v0.2.41), and Python 2.7.18 (v0.2.42 — ~150 .c files, ~600k LOC). See [`demos/`](../demos/) for the per-program runners. No specific next-target gates the roadmap; the next one is whichever real-world program a future session tries that surfaces a new bug. One deferred sub-item from session 044: extern *data* references (`extern int errno; int *p = &errno;`) still resolve to the `__nl_symbol_ptr` slot address rather than the dyld-bound target — needs dyld bind-info emission in the Mach-O exe writer, no in-tree program hits it. |
 | **#11** | **bcheck.c port** | If we want `-b` instrumented builds to actually instrument. Multi-session lift. Codegen hooks in `ppc-gen.c` partially exist (`func_bound_offset` / `func_bound_ind` are unused statics); the no-op stubs in `lib-ppc.c` need replacing with a real port. |
 
 ## Out of scope (still)
@@ -168,13 +168,17 @@ In rough order of cost vs. confidence:
 6. **Upstream `make -k test` in `tcc/tests/`** (since session 042).
    Runs hello-exe / hello-run / libtest / libtest_mt / test3 /
    abitest-cc / abitest-tcc / vla_test-run / tests2-dir / pp-dir /
-   memtest / dlltest / cross-test / btest / tccb. Currently the
-   five passing stages are version, hello-exe, hello-run, libtest,
-   vla_test-run, pp-dir (24/24), tests2-dir (111/111), memtest. The
-   rest fail on known-deferred items (long double 128-bit ABI,
-   13-FPR support, Mach-O dylib output, real bcheck port,
-   cross-target configure). See
-   [session 042 README](sessions/042-upstream-tests-2026-05-05/README.md).
+   memtest / dlltest / cross-test / btest / tccb. Passing as of
+   v0.2.62-g3: version, hello-exe, hello-run, libtest,
+   vla_test-run, pp-dir (24/24), tests2-dir (111/111), memtest,
+   abitest-cc, abitest-tcc (steady-state since session 047),
+   dlltest (since v0.2.25 / session 045 added Mach-O dylib
+   output). Still failing on known-deferred items: libtest_mt and
+   test3 (the JIT-context heisenbug from session 044 open item A1),
+   btest / test1b / tccb (real `bcheck.c` port, #11), cross-test
+   (needs `dispatch/dispatch.h`, out of scope on Tiger). See
+   [session 042 README](sessions/042-upstream-tests-2026-05-05/README.md)
+   for the original snapshot.
 
 ## Risk register
 
@@ -192,19 +196,27 @@ In rough order of cost vs. confidence:
   them fail to link with informative errors. Constraint to
   communicate, not really a risk.
 
-- ~~**No DWARF / no debugger**~~. ✅ Largely retired through
-  v0.2.37/.38/.39 (DWARF in .o + linked exe + `__eh_frame` with
-  per-prolog CFI; dwarfdump and lldb read it directly),
-  v0.2.51 (Apple-format STAB chain in the nlist symtab; Tiger's
-  bundled `gdb 6.3` sets file:line breakpoints, walks stack
-  frames, lists source, prints globals), v0.2.52 (`N_PSYM`
-  / `N_LSYM` offsets translated to gdb's SP-relative convention
-  so `print x` and `print local` read correct values, including
-  stepped values and `bt` frame argument display), and v0.2.53
-  (Apple-conventional `N_BNSYM` / `N_ENSYM` body-extent markers
-  around every `N_FUN`). Remaining gap: `dsymutil` round-tripping
-  via an `N_OSO` chain pointing at real .o files — Phase 2 polish
-  item, deferred to a follow-up.
+- ~~**No DWARF / no debugger**~~. ✅ Fully retired. The classic-
+  stabs flow shipped through v0.2.37/.38/.39 (DWARF in .o + linked
+  exe + `__eh_frame` with per-prolog CFI; dwarfdump and lldb read
+  it directly), v0.2.51 (Apple-format STAB chain in the nlist
+  symtab; Tiger's bundled `gdb 6.3` sets file:line breakpoints,
+  walks stack frames, lists source, prints globals), v0.2.52
+  (`N_PSYM` / `N_LSYM` offsets translated to gdb's SP-relative
+  convention so `print x` and `print local` read correct values,
+  including stepped values and `bt` frame argument display), and
+  v0.2.53 (Apple-conventional `N_BNSYM` / `N_ENSYM` body-extent
+  markers around every `N_FUN`). The Phase 2 `.dSYM` flow then
+  shipped through v0.2.56 (synthesized `N_SO / N_OSO / {N_BNSYM
+  N_FUN N_ENSYM} / N_SO ""` chain per `.o`; DWARF fixes for
+  `AT_high_pc` absolute end-VAs and `AT_frame_base` using
+  DWARF-2's `DW_OP_reg31`), v0.2.57 (`strip -S` + `LC_UUID` so
+  Tiger gdb 6.3 auto-pairs the stripped exe with its companion
+  `.dSYM`), and v0.2.58 (suppressed the link-time keymgr-stub's
+  in-line `__DWARF` segment so `dsymutil` writes a single
+  `__DWARF` segment that gdb / dwarfdump read cleanly).
+  `tcc -gdwarf-2 ... -o exe; dsymutil exe; strip -S exe; gdb exe`
+  now works as a single workflow with full source-line debug.
 
 - **Out-of-tree upstream divergence**. We modify tcc/ in place
   rather than maintaining a patch set. If we ever want to rebase
