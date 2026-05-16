@@ -47,6 +47,14 @@ ST_FUNC int  ppc_pic_pairs_lookup(int reloc_off);
 ST_FUNC void ppc_pic_pair_record(int reloc_off, int anchor_off);
 ST_FUNC void ppc_pic_pairs_reset(void);
 
+/* Forward declarations for the late-in-file helpers that earlier
+ * helpers reference: tcc_add_macos_sdkpath() (called from libtcc.c
+ * during set_output_type, defined near EOF) now auto-loads
+ * /usr/lib/libSystem.B.dylib via macho_load_dll, and macho_output_file
+ * (line ~6200) validates user-code undefs via ppc_macho_check_symbols. */
+ST_FUNC int  macho_load_dll(TCCState *s1, int fd, const char *filename, int lev);
+static int   ppc_macho_check_symbols(TCCState *s1);
+
 /* ====================================================================
  * Mach-O constants
  * ================================================================== */
@@ -6207,8 +6215,21 @@ ST_FUNC int macho_output_file(TCCState *s1, const char *filename)
     memset(&sb, 0, sizeof(sb));
 
     /* ---- Step 0: dispatch by output type. ---- */
-    if (s1->output_type == TCC_OUTPUT_EXE)
+    if (s1->output_type == TCC_OUTPUT_EXE) {
+        /* Roadmap #12 (session 091): validate undefined externals
+         * against linked dylibs' exports before laying out the exe.
+         * Pre-091, the writer silently emitted any undefined extern
+         * into the nlist; dyld would then SIGABRT at startup with
+         * "Symbol not found" — and crucially, autoconf's
+         * AC_LINK_IFELSE / AC_CHECK_FUNCS conftests would link
+         * cleanly against absent symbols, producing false positives
+         * in feature-detection. Done for EXE only (DLL/OBJ retain
+         * the loose behavior they had pre-091; the DLL writer is a
+         * deferred work item). */
+        if (ppc_macho_check_symbols(s1) < 0)
+            return -1;
         return macho_output_exe(s1, filename);
+    }
     if (s1->output_type == TCC_OUTPUT_DLL)
         return macho_output_dylib(s1, filename);
     if (s1->output_type != TCC_OUTPUT_OBJ) {
@@ -8182,13 +8203,91 @@ ST_FUNC void tcc_add_macos_sdkpath(TCCState *s)
      * headers in /usr/include. configure sets up /usr/include; we
      * just need to add /usr/lib as a library search path. */
     tcc_add_library_path(s, "/usr/lib");
+
+    /* Pre-load /usr/lib/libSystem.B.dylib's exports into
+     * s1->dynsymtab_section so check_symbols() can validate user-code
+     * UNDEFs against what dyld will actually be able to bind at load
+     * time. The exe writer emits libSystem as the implicit LC_LOAD_DYLIB
+     * (ordinal 1) regardless, so this just brings the symbol-resolution
+     * side into line with the load-command side.
+     *
+     * Roadmap item #12 fix (session 091): pre-091, this implicit
+     * dependency was load-command-only and tcc skipped undef
+     * validation entirely. Result: autoconf's AC_LINK_IFELSE conftests
+     * link cleanly against functions that don't exist anywhere, so
+     * AC_CHECK_FUNCS reports every probed symbol as available. dyld
+     * then SIGABRTs at runtime with "Symbol not found".
+     *
+     * Also register the three runtime-only helpers that dyld provides
+     * at fixed addresses on Tiger (0x8fe00000-base) — they're
+     * referenced by crt1.o's startup glue but aren't in libSystem's
+     * own export table. */
+    {
+        int fd = open("/usr/lib/libSystem.B.dylib", O_RDONLY);
+        if (fd >= 0) {
+            macho_load_dll(s, fd, "/usr/lib/libSystem.B.dylib", 1);
+            close(fd);
+        }
+        /* dyld stubs: not in libSystem's nlist, but ld treats them as
+         * always-defined. The exe writer special-cases their relocs to
+         * jump to fixed Tiger dyld addresses (see the comment near
+         * 0x8fe01008). check_symbols just needs to know they resolve. */
+        set_elf_sym(s->dynsymtab_section, 0, 0,
+                    ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE),
+                    0, SHN_UNDEF, "dyld_stub_binding_helper");
+        set_elf_sym(s->dynsymtab_section, 0, 0,
+                    ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE),
+                    0, SHN_UNDEF, "__dyld_func_lookup");
+    }
+}
+
+/* Validate that every undefined external symbol in s1->symtab is
+ * either weak or known to be exported by some linked dylib (tracked
+ * in s1->dynsymtab_section). Mirrors tccmacho.c's check_symbols.
+ *
+ * Called from macho_output_file() before dispatching to the EXE
+ * writer; not called for OBJ or DLL output. Returns 0 if every
+ * undef is accounted for; -1 (and one tcc_error_noabort per
+ * offender) otherwise. */
+static int ppc_macho_check_symbols(TCCState *s1)
+{
+    int sym_index, sym_end;
+    int ret = 0;
+
+    sym_end = symtab_section->data_offset / sizeof(ElfW(Sym));
+    for (sym_index = 1; sym_index < sym_end; ++sym_index) {
+        ElfW(Sym) *sym = (ElfW(Sym) *)symtab_section->data + sym_index;
+        const char *name;
+        unsigned bind;
+
+        if (sym->st_shndx != SHN_UNDEF) continue;
+        bind = ELFW(ST_BIND)(sym->st_info);
+        if (bind == STB_LOCAL) continue;
+        if (bind == STB_WEAK) continue;
+        name = (char *)symtab_section->link->data + sym->st_name;
+        if (!name || !*name) continue;
+        /* `__mh_execute_header` is synthesized as SHN_ABS by
+         * macho_output_exe (~line 2903) shortly after this check runs;
+         * accept it here as a forward reference. */
+        if (!strcmp(name, "__mh_execute_header")) continue;
+        /* `start` (no leading underscore — tcc internally uses the
+         * leading-underscore-stripped form) is synthesized by the exe
+         * writer when crt1.o isn't loaded; accept it. */
+        if (!strcmp(name, "start")) continue;
+        /* Found in dynsymtab via any -lFoo or auto-loaded libSystem? */
+        if (find_elf_sym(s1->dynsymtab_section, name)) continue;
+        tcc_error_noabort("undefined symbol '%s'", name);
+        ret = -1;
+    }
+    return ret;
 }
 
 /* Parse a Mach-O dylib at link time: read its LC_SYMTAB, register
- * each defined-external symbol as UNDEF in our own symtab, capture
+ * each defined-external symbol in s1->dynsymtab_section, capture
  * its install name (LC_ID_DYLIB) so the eventual LC_LOAD_DYLIB
- * points at the right path, and add it via tcc_add_dllref so the
- * exe/dylib writer can emit one LC_LOAD_DYLIB per loaded dll.
+ * points at the right path, and (when as_subdylib == 0) add it via
+ * tcc_add_dllref so the exe/dylib writer can emit one LC_LOAD_DYLIB
+ * per loaded dll.
  *
  * libSystem is special-cased by the writer (always emitted as the
  * implicit ordinal-1 dependency); calling this on libSystem.B.dylib
@@ -8197,8 +8296,20 @@ ST_FUNC void tcc_add_macos_sdkpath(TCCState *s)
  * Multi-dylib programs use FLAT namespace (no MH_TWOLEVEL): dyld
  * searches all loaded dylibs in load order at runtime. This avoids
  * the per-symbol ordinal tracking that strict two-level requires
- * and is well-supported on Tiger. */
-ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
+ * and is well-supported on Tiger.
+ *
+ * Sub-library handling (session 091 / roadmap #12): on Tiger,
+ * libSystem.B.dylib uses LC_LOAD_DYLIB + LC_SUB_LIBRARY to delegate
+ * math symbols (log2, sqrtf, exp2, ...) to libmathCommon.A.dylib.
+ * The system flat-namespace lookup finds those at runtime, but our
+ * pre-091 dynsymtab only contained libSystem's own nlist, so
+ * check_symbols would false-reject every libmathCommon call.
+ * Top-level loads (`as_subdylib == 0`) therefore recurse into every
+ * LC_LOAD_DYLIB they list, populating dynsymtab with sub-library
+ * exports without polluting loaded_dlls — only the umbrella dylib
+ * appears as an LC_LOAD_DYLIB in the final exe. */
+static int macho_load_dll_inner(TCCState *s1, int fd, const char *filename,
+                                int lev, int as_subdylib)
 {
     unsigned char *file = NULL;
     off_t fsize;
@@ -8209,6 +8320,12 @@ ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
     uint32_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
     int found_symtab = 0;
     char *id_dylib_name = NULL;   /* path string from LC_ID_DYLIB, malloc'd */
+    /* Collected LC_LOAD_DYLIB paths (for sub-library recursion when
+     * as_subdylib == 0). Most umbrella dylibs reference a small handful
+     * of sub-libraries; cap conservatively to avoid runaway. */
+    enum { MAX_SUB_DYLIBS = 16 };
+    char *sub_dylib_paths[MAX_SUB_DYLIBS];
+    int n_sub_dylibs = 0;
 
     lseek(fd, 0, SEEK_END);
     fsize = lseek(fd, 0, SEEK_CUR);
@@ -8322,6 +8439,20 @@ ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
                 memcpy(id_dylib_name, p, n);
                 id_dylib_name[n] = 0;
             }
+        } else if (cmd == LC_LOAD_DYLIB && cmdsize >= 24
+                   && !as_subdylib && n_sub_dylibs < MAX_SUB_DYLIBS) {
+            /* Stash the sub-library path string; recurse after the
+             * main parse so we don't reentrantly clobber `file`. */
+            uint32_t name_off = mach_get32(file + cmd_off + 8);
+            if (name_off < cmdsize) {
+                const char *p = (const char *)(file + cmd_off + name_off);
+                size_t lim = cmdsize - name_off, n = 0;
+                while (n < lim && p[n]) n++;
+                sub_dylib_paths[n_sub_dylibs] = tcc_malloc(n + 1);
+                memcpy(sub_dylib_paths[n_sub_dylibs], p, n);
+                sub_dylib_paths[n_sub_dylibs][n] = 0;
+                n_sub_dylibs++;
+            }
         }
         cmd_off += cmdsize;
     }
@@ -8340,18 +8471,33 @@ ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
 
     /* Register the dylib in loaded_dlls, keyed by install name (or
      * filename if LC_ID_DYLIB was missing). The writer emits one
-     * LC_LOAD_DYLIB per registered dll. */
-    {
+     * LC_LOAD_DYLIB per registered dll. Skipped for sub-library
+     * recursion: we want libmathCommon's symbols available for
+     * validation, but we don't want the exe to list it as a direct
+     * LC_LOAD_DYLIB (the symbols flow through libSystem's umbrella). */
+    if (!as_subdylib) {
         const char *soname = id_dylib_name ? id_dylib_name : filename;
         DLLReference *dllref = tcc_add_dllref(s1, soname, lev);
         (void)dllref;
     }
 
     /* Walk the symbol table, registering each defined-external symbol
-     * as UNDEF in our own symtab. Future references in user code
-     * resolve to this UNDEF, which the exe writer then turns into a
-     * stub or __nl_symbol_ptr slot. dyld binds it at load time
-     * (flat namespace: searches all loaded LC_LOAD_DYLIBs). */
+     * in s1->dynsymtab_section. This is the "available from a linked
+     * dylib" set that check_symbols() consults to validate undefined
+     * externals at exe-link time. Matches tccmacho.c's convention.
+     *
+     * Note: we deliberately do NOT add to s1->symtab here. User code's
+     * own references to dylib symbols flow through put_extern_sym2
+     * (tccgen.c) which adds them to symtab as UNDEF on demand; that
+     * keeps the eventual nlist free of unreferenced libSystem exports
+     * and matches what gcc-4.0+ld produces.
+     *
+     * Names are stored with the Mach-O leading underscore intact —
+     * symtab UNDEFs have the underscore (put_extern_sym2 prepends it
+     * via tcc_state->leading_underscore), so dynsymtab must too for
+     * check_symbols' find_elf_sym to match. (Pre-091 code stripped
+     * the underscore, which only "worked" because nothing then looked
+     * up the dynsymtab entries.) */
     {
         const unsigned char *nl_base = file + symoff;
         const char *strtab_base = (const char *)(file + stroff);
@@ -8370,30 +8516,39 @@ ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
             if (n_strx >= strsize) continue;
             sym_name = strtab_base + n_strx;
             if (!*sym_name) continue;
-            /* Mach-O symbol names have a leading underscore that ELF
-             * names don't. Strip it before registering — tcc's symtab
-             * uses bare C names internally; the leading underscore
-             * gets re-added at output emission via leading_underscore
-             * (already accounted for in collect_extern_stubs etc.). */
-            if (sym_name[0] == '_')
-                sym_name++;
-            if (!*sym_name) continue;
             /* Skip the special Mach-O image-base anchors that real
              * tcc-built EXEs/dylibs synthesize themselves; if they're
              * mentioned by a dylib, they don't apply across images. */
-            if (!strcmp(sym_name, "_mh_dylib_header")
-             || !strcmp(sym_name, "_mh_execute_header")
-             || !strcmp(sym_name, "_mh_bundle_header"))
+            if (!strcmp(sym_name, "__mh_dylib_header")
+             || !strcmp(sym_name, "__mh_execute_header")
+             || !strcmp(sym_name, "__mh_bundle_header"))
                 continue;
-            set_elf_sym(s1->symtab, 0, 0,
+            set_elf_sym(s1->dynsymtab_section, 0, 0,
                         ELFW(ST_INFO)(STB_GLOBAL, STT_NOTYPE),
                         0, SHN_UNDEF, sym_name);
             n_added++;
         }
 
         if (s1->verbose)
-            printf("-> %s (dylib, %d symbols registered)\n",
-                   filename, n_added);
+            printf("-> %s (dylib%s, %d symbols registered)\n",
+                   filename, as_subdylib ? ", sub" : "", n_added);
+    }
+
+    /* Sub-library recursion: at top level, walk the LC_LOAD_DYLIB list
+     * collected above and pull each into dynsymtab so check_symbols
+     * sees the umbrella's full transitive export surface. Tiger
+     * libSystem -> libmathCommon is the canonical case (log2/sqrtf/...
+     * live in the sub-library). */
+    if (!as_subdylib) {
+        int si;
+        for (si = 0; si < n_sub_dylibs; si++) {
+            int subfd = open(sub_dylib_paths[si], O_RDONLY);
+            if (subfd >= 0) {
+                macho_load_dll_inner(s1, subfd, sub_dylib_paths[si],
+                                     lev + 1, 1);
+                close(subfd);
+            }
+        }
     }
 
     ret = 0;
@@ -8401,7 +8556,17 @@ ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
 cleanup:
     tcc_free(file);
     tcc_free(id_dylib_name);
+    {
+        int si;
+        for (si = 0; si < n_sub_dylibs; si++)
+            tcc_free(sub_dylib_paths[si]);
+    }
     return ret;
+}
+
+ST_FUNC int macho_load_dll(TCCState *s1, int fd, const char *filename, int lev)
+{
+    return macho_load_dll_inner(s1, fd, filename, lev, 0);
 }
 
 ST_FUNC int macho_load_tbd(TCCState *s1, int fd, const char *filename, int lev)
