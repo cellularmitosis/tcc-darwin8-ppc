@@ -1530,6 +1530,16 @@ static int exe_emit_locrels_one(TCCState *s1, Section *s,
     return count;
 }
 
+/* One Mach-O external relocation we need to emit in __LINKEDIT so
+ * dyld writes the bound target address into the data section at
+ * load time. Collected by exe_resolve_section_relocs() during
+ * R_PPC_ADDR32 against an undef *data* symbol; the elfsym_idx is
+ * resolved to a machsym index after the nlist is built. */
+struct exe_extrel {
+    uint32_t  r_address;     /* VA where dyld will write */
+    int       elfsym_idx;    /* tcc symtab idx; mapped to machsym after nlist build */
+};
+
 /* Bundled context for exe_resolve_section_relocs(); keeps the param
  * count to 5 so it stays within tcc's PPC backend's 8-GPR-slot
  * function call limit. */
@@ -1542,6 +1552,11 @@ struct exe_reloc_ctx {
     struct extern_nlptr  *nlptrs;
     int                   n_nlptrs;
     int                  *nl_for_elfsym;
+    /* External-relocation collection (extern *data* refs in static
+     * init): grown in place by ADDR32-against-undef-data handling. */
+    struct exe_extrel   **extrels_out;     /* *extrels_out is realloc'd */
+    int                  *n_extrels_out;
+    int                  *extrels_cap_out;
 };
 
 /* Resolve relocations within `s` against the laid-out sections and
@@ -1784,6 +1799,40 @@ static int exe_resolve_section_relocs(TCCState *s1, Section *s,
                  | ((uint32_t)sect_data[reloc_off+2] <<  8)
                  |  (uint32_t)sect_data[reloc_off+3];
             if (type == R_PPC_ADDR32) {
+                /* For undef *data* externs (`int *p = &optind;`), defer
+                 * to dyld: emit a Mach-O external relocation that names
+                 * the symbol, and leave the in-place addend untouched
+                 * (Tiger's dyld treats VANILLA externs as ADD, so the
+                 * runtime value will be `addend + &sym`). The
+                 * previously-used slot-address fallback wrote the
+                 * address of __nl_symbol_ptr[sym] instead — wrong, since
+                 * a plain 32-bit data word has no second-step
+                 * indirection. STT_FUNC ADDR32s already get a stub via
+                 * collect_extern_stubs(); the slot-fallback only fires
+                 * for non-STT_FUNC undefs. */
+                ElfW(Sym) *sm = &((ElfW(Sym) *)s1->symtab->data)[symidx];
+                int wants_extrel =
+                    (sm->st_shndx == SHN_UNDEF
+                     && ELFW(ST_TYPE)(sm->st_info) != STT_FUNC
+                     && (!stub_for_elfsym
+                         || stub_for_elfsym[symidx] < 0));
+                if (wants_extrel && ctx->extrels_out) {
+                    int n = *ctx->n_extrels_out;
+                    int cap = *ctx->extrels_cap_out;
+                    if (n >= cap) {
+                        cap = cap ? cap * 2 : 8;
+                        *ctx->extrels_out =
+                            tcc_realloc(*ctx->extrels_out,
+                                        cap * sizeof(struct exe_extrel));
+                        *ctx->extrels_cap_out = cap;
+                    }
+                    (*ctx->extrels_out)[n].r_address = sect_vmaddr + reloc_off;
+                    (*ctx->extrels_out)[n].elfsym_idx = symidx;
+                    *ctx->n_extrels_out = n + 1;
+                    /* leave inst as the addend; dyld will add &sym at
+                     * load time via doBindExternalRelocations */
+                    target_addr = 0;
+                }
                 /* ELF Rel-format implicit-addend semantics: the in-place
                  * value already holds the addend (init_putv wrote it for
                  * `int *p = &arr[N]`, or the .o-loader zeroed it after
@@ -2674,6 +2723,15 @@ static int macho_output_exe(TCCState *s1, const char *filename)
     int n_nlptrs = 0;
     int *data_sym_idx = NULL;     /* per nlptr, index into our nlist */
 
+    /* External relocations for extern-data static-init refs (e.g.
+     * `int *p = &optind;`). Collected by exe_resolve_section_relocs
+     * during the ADDR32 case; elfsym_idx is replaced with the
+     * machsym index after the nlist is built. */
+    struct exe_extrel *extrels = NULL;
+    int n_extrels = 0;
+    int extrels_cap = 0;
+    uint32_t extrel_file_off = 0;
+
     /* Layout. */
     uint32_t text_seg_vmaddr = EXE_TEXT_VMADDR_BASE;
     uint32_t text_sect_vmaddr;
@@ -3182,7 +3240,23 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         }
     }
 
-    /* ---- Resolve relocations in text and rodata. ---- */
+    /* ---- Resolve relocations in text and rodata. ----
+     *
+     * Extrel collection is enabled per-section by toggling
+     * ctx.extrels_out: only data / init_array / fini_array are
+     * writable at load time, so dyld can populate the bound address
+     * there. Read-only sections (text, rodata→__const, eh_frame,
+     * dwarf) keep the legacy slot-address fallback — emitting an
+     * extrel for a location dyld can't write would SIGBUS the
+     * process during load (sed's dfa.c::prednames[] tripped this:
+     * .o roundtrip drops STT_FUNC info on the ctype symbols, so
+     * undef ADDR32 refs to `_isalpha` etc. in __TEXT,__const fell
+     * through to the new extrel path).
+     *
+     * On-disk staleness aside, this matches gcc's pragmatics:
+     * statically-init pointers to extern data live in writable
+     * segments (gcc-emitted const tables likewise put no extrels
+     * into __const). */
     {
         struct exe_reloc_ctx ctx;
         int j;
@@ -3194,6 +3268,9 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         ctx.nlptrs = nlptrs;
         ctx.n_nlptrs = n_nlptrs;
         ctx.nl_for_elfsym = nl_for_elfsym;
+        ctx.extrels_out = NULL;
+        ctx.n_extrels_out = NULL;
+        ctx.extrels_cap_out = NULL;
         if (exe_resolve_section_relocs(s1, text, text_sect_vmaddr,
                                         text_data, &ctx) < 0)
             goto cleanup;
@@ -3201,6 +3278,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                                                   sects[sect_idx_rodata].vmaddr,
                                                   rodata_data, &ctx) < 0)
             goto cleanup;
+        /* Enable extrel collection for the writable data sections. */
+        ctx.extrels_out = &extrels;
+        ctx.n_extrels_out = &n_extrels;
+        ctx.extrels_cap_out = &extrels_cap;
         if (data && exe_resolve_section_relocs(s1, data,
                                                 sects[sect_idx_data].vmaddr,
                                                 data_data, &ctx) < 0)
@@ -3213,6 +3294,11 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                                                 sects[sect_idx_fini_array].vmaddr,
                                                 fini_array_data, &ctx) < 0)
             goto cleanup;
+        /* Disable extrel collection for the remaining read-only
+         * sections (eh_frame and DWARF debug). */
+        ctx.extrels_out = NULL;
+        ctx.n_extrels_out = NULL;
+        ctx.extrels_cap_out = NULL;
         if (eh_frame && exe_resolve_section_relocs(s1, eh_frame,
                                                 sects[sect_idx_eh_frame].vmaddr,
                                                 eh_frame_data, &ctx) < 0)
@@ -3564,6 +3650,34 @@ static int macho_output_exe(TCCState *s1, const char *filename)
                 data_sym_idx[i] = elfsym_to_undef[e];
             }
         }
+        /* Resolve elfsym_idx → machsym index for each pending external
+         * relocation. The symbol is guaranteed to already be in our
+         * nlist via collect_extern_nlptrs() (every undef sym referenced
+         * via R_PPC_ADDR32 is picked up there), but we defensively add
+         * one if not. After this loop, exe_extrel.elfsym_idx holds the
+         * machsym index for the LC_DYSYMTAB writeout. */
+        if (n_extrels > 0) {
+            if (!elfsym_to_undef) {
+                elfsym_to_undef = tcc_malloc(nsyms * sizeof(int));
+                for (i = 0; i < nsyms; i++) elfsym_to_undef[i] = -1;
+            }
+            for (i = 0; i < n_extrels; i++) {
+                int e = extrels[i].elfsym_idx;
+                if (elfsym_to_undef[e] < 0) {
+                    ElfW(Sym) *esym = (ElfW(Sym) *)s1->symtab->data + e;
+                    const char *name = (char *)s1->symtab->link->data + esym->st_name;
+                    uint32_t strx = (uint32_t)strtab.len;
+                    uint16_t n_desc = default_ord;
+                    if (ELFW(ST_BIND)(esym->st_info) == STB_WEAK)
+                        n_desc |= 0x40u;
+                    obuf_put(&strtab, name, strlen(name) + 1);
+                    elfsym_to_undef[e] = n_localsym + n_extdefsym + n_undefsym;
+                    put_nlist(&nlist, strx, N_EXT | N_UNDF, NO_SECT, n_desc, 0);
+                    n_undefsym++;
+                }
+                extrels[i].elfsym_idx = elfsym_to_undef[e];
+            }
+        }
         tcc_free(elfsym_to_undef);
     }
 
@@ -3594,6 +3708,10 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         uint32_t loff = linkedit_file_off;
         sym_file_off = loff;
         loff += (uint32_t)nlist.len;
+        if (n_extrels > 0) {
+            extrel_file_off = loff;
+            loff += (uint32_t)n_extrels * MACHO_RELOC_SIZE;
+        }
         if (nstubs > 0 || n_nlptrs > 0) {
             indirect_file_off = loff;
             loff += (uint32_t)indirect.len;
@@ -4323,8 +4441,8 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         put32be(&out, 0);                            /* nextrefsyms */
         put32be(&out, indirect_file_off);            /* indirectsymoff */
         put32be(&out, nstubs + n_nlptrs);            /* nindirectsyms */
-        put32be(&out, 0);                            /* extreloff */
-        put32be(&out, 0);                            /* nextrel */
+        put32be(&out, n_extrels ? extrel_file_off : 0); /* extreloff */
+        put32be(&out, (uint32_t)n_extrels);          /* nextrel */
         put32be(&out, 0);                            /* locreloff */
         put32be(&out, 0);                            /* nlocrel */
     }
@@ -4443,12 +4561,23 @@ static int macho_output_exe(TCCState *s1, const char *filename)
         }
     }
 
-    /* ---- Pad to __LINKEDIT, then sym/indirect/strtab. ---- */
+    /* ---- Pad to __LINKEDIT, then sym/extrel/indirect/strtab. ---- */
     while (out.len < linkedit_file_off)
         put8(&out, 0);
     while (out.len < sym_file_off)
         put8(&out, 0);
     obuf_put(&out, nlist.buf, nlist.len);
+    if (n_extrels > 0) {
+        int ei;
+        while (out.len < extrel_file_off)
+            put8(&out, 0);
+        for (ei = 0; ei < n_extrels; ei++) {
+            put32be(&out, extrels[ei].r_address);
+            put32be(&out, pack_reloc_word((uint32_t)extrels[ei].elfsym_idx,
+                                          /*pcrel*/0, /*length*/2,
+                                          /*extern*/1, PPC_RELOC_VANILLA));
+        }
+    }
     if (nstubs > 0 || n_nlptrs > 0) {
         while (out.len < indirect_file_off)
             put8(&out, 0);
@@ -4507,6 +4636,7 @@ cleanup:
     tcc_free(nlptrs);
     tcc_free(nl_for_elfsym);
     tcc_free(data_sym_idx);
+    tcc_free(extrels);
     if (dwarf_data_arr) {
         int j;
         for (j = 0; j < n_dwarf_sects; j++)
@@ -4934,6 +5064,12 @@ static int macho_output_dylib(TCCState *s1, const char *filename)
         ctx.nlptrs = nlptrs;
         ctx.n_nlptrs = n_nlptrs;
         ctx.nl_for_elfsym = nl_for_elfsym;
+        /* dylib writer doesn't emit external relocations yet — disable
+         * extrel collection by leaving the out pointers NULL. (The
+         * exe-writer fix sets these to live storage.) */
+        ctx.extrels_out = NULL;
+        ctx.n_extrels_out = NULL;
+        ctx.extrels_cap_out = NULL;
         if (exe_resolve_section_relocs(s1, text, text_sect_vmaddr,
                                         text_data, &ctx) < 0)
             goto cleanup;
